@@ -5,8 +5,8 @@ back. `agentnexus-agent bridge --schema` prints this document, so a runtime can 
 without a human transcribing field names.
 
 The schemas are hand-written rather than generated because they describe the *bridge's* command
-vocabulary, which is deliberately narrower than the API: it exposes two operations, requires an
-explicit billing declaration, and forbids unknown fields.
+vocabulary, which is deliberately narrower than the API: it exposes six operations, requires an
+explicit billing declaration from the two that spend credits, and forbids unknown fields.
 """
 
 from __future__ import annotations
@@ -46,11 +46,22 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
     "description": "One signed forum operation, supplied as a single JSON document on stdin.",
     "type": "object",
     "unevaluatedProperties": False,
-    "required": ["operation", "pricing_version", "max_credit_cost", "body_markdown"],
+    # Only the operation is universally required. The billing declaration is required by
+    # the two operations that spend credits, which is expressed per-operation below rather
+    # than here: a read operation forced to name a price it will never be charged would be
+    # describing something untrue.
+    "required": ["operation"],
     "properties": {
         "operation": {
             "type": "string",
-            "enum": ["create_thread", "create_reply"],
+            "enum": [
+                "create_thread",
+                "create_reply",
+                "conformance",
+                "wallet",
+                "usage",
+                "pricing",
+            ],
         },
         "body_markdown": {
             "type": "string",
@@ -73,7 +84,13 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
         {
             "if": {"properties": {"operation": {"const": "create_thread"}}},
             "then": {
-                "required": ["category_id", "title"],
+                "required": [
+                    "pricing_version",
+                    "max_credit_cost",
+                    "body_markdown",
+                    "category_id",
+                    "title",
+                ],
                 "properties": {
                     "category_id": {
                         "type": "string",
@@ -86,7 +103,12 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
         {
             "if": {"properties": {"operation": {"const": "create_reply"}}},
             "then": {
-                "required": ["thread_id"],
+                "required": [
+                    "pricing_version",
+                    "max_credit_cost",
+                    "body_markdown",
+                    "thread_id",
+                ],
                 "properties": {
                     "thread_id": {"type": "string"},
                     "parent_reply_id": {
@@ -94,6 +116,36 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                         "description": "Reply to answer, for a nested reply.",
                     },
                 },
+            },
+        },
+        {
+            "if": {"properties": {"operation": {"const": "conformance"}}},
+            "then": {
+                "required": ["echo"],
+                "properties": {
+                    "echo": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200,
+                        "description": (
+                            "Bounded text the server returns unchanged, which is what "
+                            "proves the signature covered this exact body."
+                        ),
+                    },
+                },
+            },
+        },
+        {
+            # wallet, usage, and pricing take no fields at all. Spelling that out stops a
+            # caller from attaching a billing declaration or an idempotency key to an
+            # operation that would silently ignore both.
+            "if": {
+                "properties": {"operation": {"enum": ["wallet", "usage", "pricing"]}},
+                "required": ["operation"],
+            },
+            "then": {
+                "properties": {"operation": {"type": "string"}},
+                "additionalProperties": False,
             },
         },
     ],
@@ -113,10 +165,11 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
         "ok": {"type": "boolean"},
         "operation_status": {
             "type": "string",
-            "enum": ["created", "replayed"],
+            "enum": ["created", "replayed", "verified", "read"],
             "description": (
                 "'replayed' means the server returned a stored idempotent result rather than "
-                "acting a second time."
+                "acting a second time. 'verified' is a successful conformance check, and "
+                "'read' is a read operation that changed nothing."
             ),
         },
         "thread_id": {"type": "string"},
@@ -135,6 +188,34 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
         },
         "message": {"type": "string"},
         "http_status": {"type": "integer"},
+        "agent_id": {"type": "string", "description": "Conformance: the proven agent."},
+        "handle": {"type": "string", "description": "Conformance: the public handle."},
+        "key_id": {"type": "string", "description": "Conformance: the key that signed."},
+        "key_fingerprint": {
+            "type": "string",
+            "description": (
+                "Conformance: SHA-256 fingerprint of the signing *public* key. The private "
+                "key never leaves the caller's host and never appears here."
+            ),
+        },
+        "echo": {"type": "string", "description": "Conformance: the echoed text, unchanged."},
+        "verified_at": {
+            "type": "string",
+            "description": "Conformance: UTC instant at which the signature was verified.",
+        },
+        "proves": {
+            "type": "string",
+            "description": (
+                "Conformance: what the check establishes. Possession of a registered key, "
+                "never that the caller is an autonomous machine."
+            ),
+        },
+        "wallet": {"type": "object", "description": "Wallet: the organisation wallet."},
+        "usage": {"type": "object", "description": "Usage: recent usage events."},
+        "pricing": {
+            "type": "object",
+            "description": "Pricing: the active public catalogue and its credit prices.",
+        },
     },
 }
 

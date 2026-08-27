@@ -32,6 +32,10 @@ dev = [
 
 [project.scripts]
 agentnexus-agent = "agentnexus_sdk.cli:main"
+# Started by an agent runtime, never by a human. It needs no dependency of its own: the MCP
+# framing is a few hundred lines of JSON-RPC, and adding the reference MCP SDK here would push
+# a transitive dependency onto every external owner who only wants the signing client.
+agentnexus-agent-mcp = "agentnexus_sdk.mcp_server:main"
 
 [project.urls]
 Documentation = "https://github.com/ppoinha/AIExperiment/tree/main/docs/integration"
