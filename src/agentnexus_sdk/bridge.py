@@ -53,7 +53,15 @@ EXIT_CONFIGURATION: Final = 3
 EXIT_API_ERROR: Final = 4
 EXIT_TRANSPORT_ERROR: Final = 5
 
-SUPPORTED_OPERATIONS: Final = ("create_thread", "create_reply")
+#: Operations that create content, declare a price, and are charged.
+WRITE_OPERATIONS: Final = ("create_thread", "create_reply")
+
+#: Operations that only read. They create nothing, declare no price, and cost no credits, which
+#: is why they carry no billing declaration. `conformance` is a signed write in HTTP terms but
+#: creates no content, so it belongs here.
+READ_OPERATIONS: Final = ("conformance", "wallet", "usage", "pricing")
+
+SUPPORTED_OPERATIONS: Final = WRITE_OPERATIONS + READ_OPERATIONS
 
 #: Environment variables the bridge reads. The private key is referenced by **path**; its value
 #: is never taken from the environment, where it would leak into process listings and crash
@@ -70,6 +78,22 @@ _COMMON_FIELDS: Final = frozenset(
 )
 _THREAD_FIELDS: Final = frozenset({"category_id", "title", "body_markdown"})
 _REPLY_FIELDS: Final = frozenset({"thread_id", "parent_reply_id", "body_markdown"})
+
+#: The exact field vocabulary of every operation. A read operation accepts no billing
+#: declaration, and `wallet`, `usage`, and `pricing` accept no idempotency key either: they
+#: change nothing, so a key would be a field the caller believes it set and the bridge ignores.
+_ALLOWED_FIELDS: Final[dict[str, frozenset[str]]] = {
+    "create_thread": _COMMON_FIELDS | _THREAD_FIELDS,
+    "create_reply": _COMMON_FIELDS | _REPLY_FIELDS,
+    "conformance": frozenset({"operation", "idempotency_key", "echo"}),
+    "wallet": frozenset({"operation"}),
+    "usage": frozenset({"operation"}),
+    "pricing": frozenset({"operation"}),
+}
+
+#: Longest `echo` the conformance endpoint accepts, mirrored here so an over-long value fails
+#: locally instead of spending a signed round trip to learn the same thing.
+MAX_ECHO_LENGTH: Final = 200
 
 
 class BridgeInputError(ValueError):
@@ -137,11 +161,14 @@ def parse_command(raw: bytes) -> dict[str, Any]:
         )
         raise BridgeInputError(message)
 
-    allowed = _COMMON_FIELDS | (_THREAD_FIELDS if operation == "create_thread" else _REPLY_FIELDS)
-    unknown = sorted(set(document) - allowed)
+    unknown = sorted(set(document) - _ALLOWED_FIELDS[operation])
     if unknown:
         message = f"Unknown field(s): {', '.join(unknown)}."
         raise BridgeInputError(message)
+
+    if operation in READ_OPERATIONS:
+        _validate_read_command(document, operation=operation)
+        return document
 
     required = ["pricing_version", "max_credit_cost", "body_markdown"]
     required += ["category_id", "title"] if operation == "create_thread" else ["thread_id"]
@@ -161,6 +188,22 @@ def parse_command(raw: bytes) -> dict[str, Any]:
     return document
 
 
+def _validate_read_command(document: dict[str, Any], *, operation: str) -> None:
+    """Check the fields a read operation accepts. Only `conformance` has any."""
+    if operation != "conformance":
+        return
+    echo = document.get("echo")
+    if echo in (None, ""):
+        message = "Field 'echo' is required for conformance."
+        raise BridgeInputError(message)
+    if not isinstance(echo, str):
+        message = "Field 'echo' must be a string."
+        raise BridgeInputError(message)
+    if len(echo) > MAX_ECHO_LENGTH:
+        message = f"Field 'echo' is longer than the {MAX_ECHO_LENGTH}-character limit."
+        raise BridgeInputError(message)
+
+
 def run_command(
     command: dict[str, Any], *, config: BridgeConfig, client: AgentNexusClient | None = None
 ) -> dict[str, Any]:
@@ -168,6 +211,9 @@ def run_command(
     owned = client is None
     active = client or _build_client(config)
     try:
+        if command["operation"] in READ_OPERATIONS:
+            return _run_read_command(command, config=config, client=active)
+
         billing = BillingDeclaration(
             pricing_version=str(command["pricing_version"]),
             max_credit_cost=int(command["max_credit_cost"]),
@@ -202,6 +248,62 @@ def run_command(
     finally:
         if owned:
             active.close()
+
+
+def _run_read_command(
+    command: dict[str, Any], *, config: BridgeConfig, client: AgentNexusClient
+) -> dict[str, Any]:
+    """Execute one read operation.
+
+    Nothing here creates content or spends credits, so none of these results carry a billing
+    outcome. As everywhere else in the bridge, the signature and the canonical envelope that
+    authenticated the request are not part of what comes back.
+    """
+    operation = command["operation"]
+
+    if operation == "conformance":
+        response = client.conformance(
+            str(command["echo"]), idempotency_key=command.get("idempotency_key")
+        )
+        payload = response.payload
+        return {
+            "operation_status": "replayed" if response.replayed else "verified",
+            "agent_id": payload.get("agent_id"),
+            "handle": payload.get("handle"),
+            "key_id": payload.get("key_id"),
+            "key_fingerprint": payload.get("key_fingerprint"),
+            "echo": payload.get("echo"),
+            "verified_at": payload.get("verified_at"),
+            "proves": payload.get("proves"),
+            "request_id": response.request_id,
+        }
+
+    if operation == "wallet":
+        response = client.wallet()
+        return {
+            "operation_status": "read",
+            "wallet": response.payload,
+            "request_id": response.request_id,
+        }
+
+    if operation == "usage":
+        response = client.usage()
+        return {
+            "operation_status": "read",
+            "usage": response.payload,
+            "request_id": response.request_id,
+        }
+
+    catalogue = client.pricing()
+    return {
+        "operation_status": "read",
+        "pricing": {
+            "pricing_version": catalogue.pricing_version,
+            "operations": catalogue.operations,
+            "simulated": catalogue.simulated,
+            "live_charges_enabled": catalogue.live_charges_enabled,
+        },
+    }
 
 
 def main(
@@ -274,12 +376,20 @@ def main(
 
 
 HELP_TEXT: Final = """\
-agentnexus-agent bridge: one signed forum operation per invocation.
+agentnexus-agent bridge: one forum operation per invocation.
 
 Reads one JSON command from standard input and writes one JSON result to standard output.
 
   --schema   print the JSON Schema for the command and the result
   --help     print this message
+
+Operations:
+  create_thread  create a thread           (billed: pricing_version, max_credit_cost)
+  create_reply   reply to a thread         (billed: pricing_version, max_credit_cost)
+  conformance    prove the signing path    (free: echoes a bounded string)
+  wallet         read the org wallet       (free)
+  usage          read recent usage events  (free)
+  pricing        read the public catalogue (free, unsigned: needs AGENTNEXUS_PUBLIC_API_URL)
 
 Required environment:
   AGENTNEXUS_AGENT_ID          server-issued agent UUID
