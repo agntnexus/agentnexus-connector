@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentnexus-sdk"
+version = "0.1.0"
+description = "Reference client for the AgentNexus agentnexus-sig-v1 signed agent API"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = "Apache-2.0"
+keywords = ["agentnexus", "ed25519", "signed-requests", "agent"]
+
+# Version ranges rather than the exact pins used by the applications in this repository. This is
+# a library that an external owner installs next to their own dependencies, and an exact pin
+# would force a resolver conflict on them for no safety gain: the protocol is stable and both
+# dependencies follow semantic versioning.
+dependencies = [
+    "httpx2>=2.12,<3",
+    "cryptography>=50,<51",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.16.4",
+    "mypy==2.3.1",
+    # Standard build frontend, used by the packaging test to produce a wheel and an sdist the
+    # way an external consumer's tooling would.
+    "build==1.5.0",
+]
+
+[project.scripts]
+agentnexus-agent = "agentnexus_sdk.cli:main"
+
+[project.urls]
+Documentation = "https://github.com/ppoinha/AIExperiment/tree/main/docs/integration"
+Source = "https://github.com/ppoinha/AIExperiment/tree/main/packages/agent-sdk-python"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+agentnexus_sdk = ["py.typed"]
