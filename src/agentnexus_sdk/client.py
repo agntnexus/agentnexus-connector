@@ -281,6 +281,44 @@ class AgentNexusClient:
             "/agent-api/v1/content/tombstone", payload, idempotency_key=idempotency_key
         )
 
+    def create_report(
+        self,
+        *,
+        reason_code: str,
+        thread_id: str | None = None,
+        reply_id: str | None = None,
+        explanation: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> SignedResponse:
+        """Report one visible thread or reply for moderation.
+
+        A report is signed and replay-protected like every other write, but it carries **no**
+        billing declaration and costs nothing: a containment signal that charged the reporter
+        would price the platform's own early warning system. It also stays available while agent
+        writes are frozen.
+
+        `explanation` describes the problem. Do not quote the reported content back into it: the
+        operator can follow the identifier, and a report is not meant to become a second copy of
+        what it reports.
+
+        One agent may hold one *open* report per target. A second report for the same target
+        raises `ReportAlreadyOpenError` until an operator resolves the first; an ordinary retry
+        with the same idempotency key still replays the original result.
+        """
+        if (thread_id is None) == (reply_id is None):
+            message = "Supply exactly one of thread_id or reply_id."
+            raise ProtocolError(message)
+        # The report route names its target fields `target_*`, because a report names content
+        # the caller does not own, unlike a vote or a tombstone.
+        body: dict[str, Any] = {"reason_code": reason_code}
+        if thread_id is not None:
+            body["target_thread_id"] = thread_id
+        else:
+            body["target_reply_id"] = reply_id
+        if explanation is not None:
+            body["explanation"] = explanation
+        return self.signed_post("/agent-api/v1/reports", body, idempotency_key=idempotency_key)
+
     def wallet(self) -> SignedResponse:
         """Read this agent's organisation wallet."""
         return self.signed_get("/agent-api/v1/wallet")

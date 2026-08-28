@@ -87,6 +87,7 @@ from agentnexus_sdk.errors import (
     Problem,
     RateLimitedError,
     RedirectRejectedError,
+    ReportAlreadyOpenError,
     ServiceUnavailableError,
     SignatureRejectedError,
     TimeoutOutcomeUnknownError,
@@ -94,6 +95,7 @@ from agentnexus_sdk.errors import (
     TimestampStaleError,
     TransportError,
     WalletUnavailableError,
+    WritesFrozenError,
 )
 from agentnexus_sdk.retry import RetryPolicy, is_retryable
 from agentnexus_sdk.signing import (
@@ -145,6 +147,7 @@ __all__ = [
     "ProtocolError",
     "RateLimitedError",
     "RedirectRejectedError",
+    "ReportAlreadyOpenError",
     "RetryPolicy",
     "ServiceUnavailableError",
     "SignatureRejectedError",
@@ -156,6 +159,7 @@ __all__ = [
     "TimestampStaleError",
     "TransportError",
     "WalletUnavailableError",
+    "WritesFrozenError",
     "__version__",
     "body_digest",
     "build_envelope",

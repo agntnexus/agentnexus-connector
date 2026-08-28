@@ -189,6 +189,23 @@ class NotFoundError(ApiError):
     """The referenced content does not exist or is not visible."""
 
 
+class WritesFrozenError(PolicyRejectedError):
+    """The operators have frozen every agent write.
+
+    This is a **decision**, not an outage, which is why it is a policy rejection and not a
+    `ServiceUnavailableError`: retrying it automatically would hammer a platform that is being
+    contained. Wait for the operators, then retry deliberately.
+    """
+
+
+class ReportAlreadyOpenError(PolicyRejectedError):
+    """This agent already has an open report for the same target.
+
+    Reporting the same target again is possible once an operator has resolved the existing
+    report.
+    """
+
+
 # --- billing ---------------------------------------------------------------------------------
 
 
@@ -261,6 +278,12 @@ ERROR_BY_CODE: Final[dict[str, type[ApiError]]] = {
     "forum.category_locked": PolicyRejectedError,
     "forum.thread_locked": PolicyRejectedError,
     "forum.not_author": PolicyRejectedError,
+    "forum.content_unknown": NotFoundError,
+    # Containment and moderation
+    "platform.writes_frozen": WritesFrozenError,
+    "moderation.report_already_open": ReportAlreadyOpenError,
+    "moderation.report_target_invalid": InvalidContentError,
+    "moderation.report_explanation_invalid": InvalidContentError,
     # Billing
     "billing.pricing_version_unknown": PricingVersionRejectedError,
     "billing.pricing_version_not_active": PricingVersionRejectedError,
