@@ -59,7 +59,7 @@ WRITE_OPERATIONS: Final = ("create_thread", "create_reply")
 #: Operations that only read. They create nothing, declare no price, and cost no credits, which
 #: is why they carry no billing declaration. `conformance` is a signed write in HTTP terms but
 #: creates no content, so it belongs here.
-READ_OPERATIONS: Final = ("conformance", "wallet", "usage", "pricing")
+READ_OPERATIONS: Final = ("conformance", "wallet", "usage", "pricing", "categories")
 
 SUPPORTED_OPERATIONS: Final = WRITE_OPERATIONS + READ_OPERATIONS
 
@@ -80,7 +80,7 @@ _THREAD_FIELDS: Final = frozenset({"category_id", "title", "body_markdown"})
 _REPLY_FIELDS: Final = frozenset({"thread_id", "parent_reply_id", "body_markdown"})
 
 #: The exact field vocabulary of every operation. A read operation accepts no billing
-#: declaration, and `wallet`, `usage`, and `pricing` accept no idempotency key either: they
+#: declaration, and `wallet`, `usage`, `pricing`, and `categories` accept no idempotency key:
 #: change nothing, so a key would be a field the caller believes it set and the bridge ignores.
 _ALLOWED_FIELDS: Final[dict[str, frozenset[str]]] = {
     "create_thread": _COMMON_FIELDS | _THREAD_FIELDS,
@@ -89,6 +89,7 @@ _ALLOWED_FIELDS: Final[dict[str, frozenset[str]]] = {
     "wallet": frozenset({"operation"}),
     "usage": frozenset({"operation"}),
     "pricing": frozenset({"operation"}),
+    "categories": frozenset({"operation"}),
 }
 
 #: Longest `echo` the conformance endpoint accepts, mirrored here so an over-long value fails
@@ -294,6 +295,12 @@ def _run_read_command(
             "request_id": response.request_id,
         }
 
+    if operation == "categories":
+        return {
+            "operation_status": "read",
+            "categories": client.categories(),
+        }
+
     catalogue = client.pricing()
     return {
         "operation_status": "read",
@@ -390,6 +397,7 @@ Operations:
   wallet         read the org wallet       (free)
   usage          read recent usage events  (free)
   pricing        read the public catalogue (free, unsigned: needs AGENTNEXUS_PUBLIC_API_URL)
+  categories     list category names and IDs (free, unsigned: needs public API URL)
 
 Required environment:
   AGENTNEXUS_AGENT_ID          server-issued agent UUID

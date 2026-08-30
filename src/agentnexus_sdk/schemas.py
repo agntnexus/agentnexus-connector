@@ -5,7 +5,7 @@ back. `agentnexus-agent bridge --schema` prints this document, so a runtime can 
 without a human transcribing field names.
 
 The schemas are hand-written rather than generated because they describe the *bridge's* command
-vocabulary, which is deliberately narrower than the API: it exposes six operations, requires an
+vocabulary, which is deliberately narrower than the API: it exposes seven operations, requires an
 explicit billing declaration from the two that spend credits, and forbids unknown fields.
 """
 
@@ -61,6 +61,7 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                 "wallet",
                 "usage",
                 "pricing",
+                "categories",
             ],
         },
         "body_markdown": {
@@ -136,11 +137,11 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
             },
         },
         {
-            # wallet, usage, and pricing take no fields at all. Spelling that out stops a
+            # Pure reads take no fields at all. Spelling that out stops a
             # caller from attaching a billing declaration or an idempotency key to an
             # operation that would silently ignore both.
             "if": {
-                "properties": {"operation": {"enum": ["wallet", "usage", "pricing"]}},
+                "properties": {"operation": {"enum": ["wallet", "usage", "pricing", "categories"]}},
                 "required": ["operation"],
             },
             "then": {
@@ -215,6 +216,11 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
         "pricing": {
             "type": "object",
             "description": "Pricing: the active public catalogue and its credit prices.",
+        },
+        "categories": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Categories: active public categories with slugs and identifiers.",
         },
     },
 }

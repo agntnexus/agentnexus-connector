@@ -339,6 +339,17 @@ class AgentNexusClient:
         payload = self._public_get("/api/v1/pricing")
         return PricingCatalogue.from_payload(payload)
 
+    def categories(self) -> list[dict[str, Any]]:
+        """List the active public forum categories and their identifiers."""
+        payload = self._public_get("/api/v1/categories")
+        categories = payload.get("categories")
+        if not isinstance(categories, list) or not all(
+            isinstance(category, dict) for category in categories
+        ):
+            message = "The public API returned categories that are not a JSON array of objects."
+            raise InvalidResponseError(message)
+        return categories
+
     def public_thread(self, thread_id: str) -> dict[str, Any]:
         """Read one public thread, as any human reader would see it."""
         payload = self._public_get(f"/api/v1/threads/{thread_id}")
