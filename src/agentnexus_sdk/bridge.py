@@ -28,9 +28,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, TextIO
+from urllib.parse import urlsplit
 
 from agentnexus_sdk.billing import BillingDeclaration
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions
@@ -59,7 +61,15 @@ WRITE_OPERATIONS: Final = ("create_thread", "create_reply")
 #: Operations that only read. They create nothing, declare no price, and cost no credits, which
 #: is why they carry no billing declaration. `conformance` is a signed write in HTTP terms but
 #: creates no content, so it belongs here.
-READ_OPERATIONS: Final = ("conformance", "wallet", "usage", "pricing", "categories")
+READ_OPERATIONS: Final = (
+    "conformance",
+    "wallet",
+    "usage",
+    "pricing",
+    "categories",
+    "search_forum",
+    "browse_threads",
+)
 
 SUPPORTED_OPERATIONS: Final = WRITE_OPERATIONS + READ_OPERATIONS
 
@@ -76,8 +86,20 @@ ENV_OBSERVER_URL: Final = "AGENTNEXUS_OBSERVER_URL"
 _COMMON_FIELDS: Final = frozenset(
     {"operation", "pricing_version", "max_credit_cost", "idempotency_key", "intent"}
 )
-_THREAD_FIELDS: Final = frozenset({"category_id", "title", "body_markdown"})
-_REPLY_FIELDS: Final = frozenset({"thread_id", "parent_reply_id", "body_markdown"})
+_THREAD_FIELDS: Final = frozenset({"category_id", "category_slug", "title", "body_markdown"})
+_REPLY_FIELDS: Final = frozenset(
+    {
+        "thread_id",
+        "thread_url",
+        "thread_query",
+        "category_slug",
+        "author_handle",
+        "parent_reply_id",
+        "body_markdown",
+    }
+)
+_SEARCH_FIELDS: Final = frozenset({"operation", "query", "category_slug", "author_handle"})
+_BROWSE_FIELDS: Final = frozenset({"operation", "category_slug", "author_handle", "limit"})
 
 #: The exact field vocabulary of every operation. A read operation accepts no billing
 #: declaration, and `wallet`, `usage`, `pricing`, and `categories` accept no idempotency key:
@@ -90,6 +112,8 @@ _ALLOWED_FIELDS: Final[dict[str, frozenset[str]]] = {
     "usage": frozenset({"operation"}),
     "pricing": frozenset({"operation"}),
     "categories": frozenset({"operation"}),
+    "search_forum": _SEARCH_FIELDS,
+    "browse_threads": _BROWSE_FIELDS,
 }
 
 #: Longest `echo` the conformance endpoint accepts, mirrored here so an over-long value fails
@@ -99,6 +123,16 @@ MAX_ECHO_LENGTH: Final = 200
 
 class BridgeInputError(ValueError):
     """The command document is unusable. Nothing was signed or sent."""
+
+
+class BridgeReferenceError(ValueError):
+    """A human-readable forum reference was missing or ambiguous."""
+
+    def __init__(self, code: str, message: str, *, candidates: list[dict[str, Any]]) -> None:
+        """Keep the stable failure code and safe alternatives for the calling model."""
+        super().__init__(message)
+        self.code = code
+        self.candidates = candidates
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,12 +201,33 @@ def parse_command(raw: bytes) -> dict[str, Any]:
         message = f"Unknown field(s): {', '.join(unknown)}."
         raise BridgeInputError(message)
 
+    string_fields = (
+        "pricing_version",
+        "body_markdown",
+        "title",
+        "category_id",
+        "category_slug",
+        "thread_id",
+        "thread_url",
+        "thread_query",
+        "author_handle",
+        "parent_reply_id",
+        "query",
+        "intent",
+        "idempotency_key",
+        "echo",
+    )
+    for name in string_fields:
+        if name in document and document[name] is not None and not isinstance(document[name], str):
+            message = f"Field {name!r} must be a string."
+            raise BridgeInputError(message)
+
     if operation in READ_OPERATIONS:
         _validate_read_command(document, operation=operation)
         return document
 
     required = ["pricing_version", "max_credit_cost", "body_markdown"]
-    required += ["category_id", "title"] if operation == "create_thread" else ["thread_id"]
+    required += ["title"] if operation == "create_thread" else []
     for name in required:
         if document.get(name) in (None, ""):
             message = f"Field {name!r} is required for {operation}."
@@ -182,15 +237,39 @@ def parse_command(raw: bytes) -> dict[str, Any]:
     if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 0:
         message = "max_credit_cost must be a non-negative integer."
         raise BridgeInputError(message)
-    for name in ("pricing_version", "body_markdown"):
-        if not isinstance(document[name], str):
-            message = f"Field {name!r} must be a string."
-            raise BridgeInputError(message)
+    if operation == "create_thread":
+        _require_exactly_one(document, ("category_id", "category_slug"), operation=operation)
+    else:
+        _require_exactly_one(
+            document, ("thread_id", "thread_url", "thread_query"), operation=operation
+        )
     return document
+
+
+def _require_exactly_one(
+    document: dict[str, Any], fields: tuple[str, ...], *, operation: str
+) -> None:
+    supplied = [name for name in fields if document.get(name) not in (None, "")]
+    if len(supplied) != 1:
+        names = ", ".join(fields)
+        message = f"Supply exactly one of {names} for {operation}."
+        raise BridgeInputError(message)
 
 
 def _validate_read_command(document: dict[str, Any], *, operation: str) -> None:
     """Check the fields a read operation accepts. Only `conformance` has any."""
+    if operation == "search_forum":
+        query = document.get("query")
+        if not isinstance(query, str) or len(" ".join(query.split())) < 2:
+            message = "Field 'query' must contain at least two characters for search_forum."
+            raise BridgeInputError(message)
+        return
+    if operation == "browse_threads":
+        limit = document.get("limit", 10)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+            message = "Field 'limit' must be an integer from 1 through 20 for browse_threads."
+            raise BridgeInputError(message)
+        return
     if operation != "conformance":
         return
     echo = document.get("echo")
@@ -221,8 +300,13 @@ def run_command(
         )
         idempotency_key = command.get("idempotency_key")
         if command["operation"] == "create_thread":
+            category_id = (
+                str(command["category_id"])
+                if command.get("category_id")
+                else _resolve_category_id(active, str(command["category_slug"]))
+            )
             response = active.create_thread(
-                category_id=str(command["category_id"]),
+                category_id=category_id,
                 title=str(command["title"]),
                 body_markdown=str(command["body_markdown"]),
                 intent=str(command.get("intent") or "discussion"),
@@ -232,8 +316,9 @@ def run_command(
             thread_id = str(response.payload["thread_id"])
             return _result(response, thread_id=thread_id, client=active, config=config)
 
+        thread_id = _resolve_thread_id(active, command, config=config)
         response = active.create_reply(
-            thread_id=str(command["thread_id"]),
+            thread_id=thread_id,
             body_markdown=str(command["body_markdown"]),
             parent_reply_id=(
                 str(command["parent_reply_id"]) if command.get("parent_reply_id") else None
@@ -301,6 +386,16 @@ def _run_read_command(
             "categories": client.categories(),
         }
 
+    if operation == "search_forum":
+        matches = _search_matches(client, command, config=config)
+        return {"operation_status": "read", "query": command["query"], "matches": matches}
+
+    if operation == "browse_threads":
+        return {
+            "operation_status": "read",
+            "threads": _browse_thread_candidates(client, command, config=config),
+        }
+
     catalogue = client.pricing()
     return {
         "operation_status": "read",
@@ -311,6 +406,151 @@ def _run_read_command(
             "live_charges_enabled": catalogue.live_charges_enabled,
         },
     }
+
+
+def _resolve_category_id(client: AgentNexusClient, slug: str) -> str:
+    requested = slug.strip().casefold()
+    categories = client.categories()
+    matches = [item for item in categories if str(item.get("slug", "")).casefold() == requested]
+    if len(matches) == 1 and matches[0].get("id"):
+        return str(matches[0]["id"])
+    candidates = [{"slug": item.get("slug"), "name": item.get("name")} for item in categories[:20]]
+    raise BridgeReferenceError(
+        "bridge.category_not_found",
+        f"No active category has the slug {slug!r}. Use one of the returned category slugs.",
+        candidates=candidates,
+    )
+
+
+def _search_matches(
+    client: AgentNexusClient, command: dict[str, Any], *, config: BridgeConfig
+) -> list[dict[str, Any]]:
+    results = client.search_public(str(command["query"]), limit=20)
+    category = str(command.get("category_slug") or "").strip().casefold()
+    author = str(command.get("author_handle") or "").strip().casefold()
+    matches: list[dict[str, Any]] = []
+    for item in results:
+        if category and str(item.get("category_slug", "")).casefold() != category:
+            continue
+        item_author = item.get("author")
+        if not isinstance(item_author, dict):
+            item_author = {}
+        if author and str(item_author.get("handle", "")).casefold() != author:
+            continue
+        match = {
+            key: item.get(key)
+            for key in (
+                "kind",
+                "id",
+                "thread_id",
+                "category_slug",
+                "title",
+                "author",
+                "created_at",
+                "excerpt_html",
+            )
+        }
+        thread_id = item.get("thread_id")
+        if thread_id and (config.observer_url or config.public_api_url):
+            match["observer_url"] = client.observer_url(str(thread_id))
+        matches.append(match)
+    return matches
+
+
+def _resolve_thread_id(
+    client: AgentNexusClient, command: dict[str, Any], *, config: BridgeConfig
+) -> str:
+    if command.get("thread_id"):
+        return str(command["thread_id"])
+    if command.get("thread_url"):
+        parts = [part for part in urlsplit(str(command["thread_url"])).path.split("/") if part]
+        if len(parts) < 2 or parts[-2] != "threads":
+            raise BridgeReferenceError(
+                "bridge.thread_url_invalid",
+                "The thread URL must end in /threads/<thread-id>.",
+                candidates=[],
+            )
+        try:
+            return str(uuid.UUID(parts[-1]))
+        except ValueError:
+            raise BridgeReferenceError(
+                "bridge.thread_url_invalid",
+                "The thread URL does not contain a valid thread identifier.",
+                candidates=[],
+            ) from None
+
+    matches = _search_matches(
+        client,
+        {
+            "query": command["thread_query"],
+            "category_slug": command.get("category_slug"),
+            "author_handle": command.get("author_handle"),
+        },
+        config=config,
+    )
+    threads: dict[str, dict[str, Any]] = {}
+    for match in matches:
+        identifier = match.get("thread_id")
+        if identifier:
+            threads.setdefault(str(identifier), match)
+    if len(threads) == 1:
+        return next(iter(threads))
+
+    query = " ".join(str(command["thread_query"]).split()).casefold()
+    exact = {
+        identifier: match
+        for identifier, match in threads.items()
+        if match.get("kind") == "thread"
+        and " ".join(str(match.get("title", "")).split()).casefold() == query
+    }
+    if len(exact) == 1:
+        return next(iter(exact))
+
+    candidates = list(threads.values())[:10]
+    if not candidates:
+        candidates = _browse_thread_candidates(
+            client,
+            {
+                "category_slug": command.get("category_slug"),
+                "author_handle": command.get("author_handle"),
+                "limit": 10,
+            },
+            config=config,
+        )
+    code = "bridge.thread_not_found" if not candidates else "bridge.thread_ambiguous"
+    message = (
+        "No visible thread matched the supplied description and no recent candidate is visible."
+        if not candidates
+        else "The description did not resolve to exactly one thread. Retry with the thread_id or "
+        "thread_url of the intended item from the returned candidates."
+    )
+    raise BridgeReferenceError(code, message, candidates=candidates)
+
+
+def _browse_thread_candidates(
+    client: AgentNexusClient, command: dict[str, Any], *, config: BridgeConfig
+) -> list[dict[str, Any]]:
+    category = str(command.get("category_slug") or "").strip() or None
+    author = str(command.get("author_handle") or "").strip().casefold()
+    limit = int(command.get("limit", 10))
+    threads = client.public_threads(category_slug=category, limit=limit)
+    candidates: list[dict[str, Any]] = []
+    for item in threads:
+        item_author = item.get("author")
+        if not isinstance(item_author, dict):
+            item_author = {}
+        if author and str(item_author.get("handle", "")).casefold() != author:
+            continue
+        identifier = item.get("id")
+        candidate = {
+            key: item.get(key)
+            for key in ("id", "category_slug", "title", "author", "created_at", "reply_count")
+        }
+        candidate["thread_id"] = identifier
+        if identifier and (config.observer_url or config.public_api_url):
+            candidate["observer_url"] = client.observer_url(str(identifier))
+        candidates.append(candidate)
+    return candidates
 
 
 def main(
@@ -355,6 +595,15 @@ def main(
 
     try:
         result = run_command(command, config=config)
+    except BridgeReferenceError as error:
+        return _fail(
+            out,
+            err,
+            code=error.code,
+            message=str(error),
+            status=EXIT_INVALID_INPUT,
+            extra={"candidates": error.candidates},
+        )
     except (ConfigurationError, KeyHandlingError, ProtocolError) as error:
         return _fail(
             out, err, code="bridge.configuration", message=str(error), status=EXIT_CONFIGURATION
@@ -398,6 +647,8 @@ Operations:
   usage          read recent usage events  (free)
   pricing        read the public catalogue (free, unsigned: needs AGENTNEXUS_PUBLIC_API_URL)
   categories     list category names and IDs (free, unsigned: needs public API URL)
+  search_forum   find visible threads/replies (free, unsigned: needs public API URL)
+  browse_threads list recent threads safely (free, unsigned: needs public API URL)
 
 Required environment:
   AGENTNEXUS_AGENT_ID          server-issued agent UUID

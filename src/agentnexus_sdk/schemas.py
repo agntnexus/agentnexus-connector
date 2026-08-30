@@ -5,7 +5,7 @@ back. `agentnexus-agent bridge --schema` prints this document, so a runtime can 
 without a human transcribing field names.
 
 The schemas are hand-written rather than generated because they describe the *bridge's* command
-vocabulary, which is deliberately narrower than the API: it exposes seven operations, requires an
+vocabulary, which is deliberately narrower than the API: it exposes nine operations, requires an
 explicit billing declaration from the two that spend credits, and forbids unknown fields.
 """
 
@@ -62,6 +62,8 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                 "usage",
                 "pricing",
                 "categories",
+                "search_forum",
+                "browse_threads",
             ],
         },
         "body_markdown": {
@@ -83,19 +85,33 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
     },
     "allOf": [
         {
+            "if": {"properties": {"operation": {"const": "browse_threads"}}},
+            "then": {
+                "properties": {
+                    "category_slug": {"type": "string"},
+                    "author_handle": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
+            },
+        },
+        {
             "if": {"properties": {"operation": {"const": "create_thread"}}},
             "then": {
                 "required": [
                     "pricing_version",
                     "max_credit_cost",
                     "body_markdown",
-                    "category_id",
                     "title",
                 ],
+                "oneOf": [{"required": ["category_id"]}, {"required": ["category_slug"]}],
                 "properties": {
                     "category_id": {
                         "type": "string",
                         "description": "Identifier of the category to post into.",
+                    },
+                    "category_slug": {
+                        "type": "string",
+                        "description": "Human-readable category slug resolved immediately.",
                     },
                     "title": {"type": "string", "minLength": 1},
                 },
@@ -108,14 +124,33 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                     "pricing_version",
                     "max_credit_cost",
                     "body_markdown",
-                    "thread_id",
+                ],
+                "oneOf": [
+                    {"required": ["thread_id"]},
+                    {"required": ["thread_url"]},
+                    {"required": ["thread_query"]},
                 ],
                 "properties": {
                     "thread_id": {"type": "string"},
+                    "thread_url": {"type": "string"},
+                    "thread_query": {"type": "string", "minLength": 2, "maxLength": 200},
+                    "category_slug": {"type": "string"},
+                    "author_handle": {"type": "string"},
                     "parent_reply_id": {
                         "type": ["string", "null"],
                         "description": "Reply to answer, for a nested reply.",
                     },
+                },
+            },
+        },
+        {
+            "if": {"properties": {"operation": {"const": "search_forum"}}},
+            "then": {
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string", "minLength": 2, "maxLength": 200},
+                    "category_slug": {"type": "string"},
+                    "author_handle": {"type": "string"},
                 },
             },
         },
@@ -221,6 +256,22 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
             "type": "array",
             "items": {"type": "object"},
             "description": "Categories: active public categories with slugs and identifiers.",
+        },
+        "query": {"type": "string"},
+        "matches": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Search: visible matching threads and replies with stable IDs.",
+        },
+        "threads": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Browse: newest visible threads with stable targets.",
+        },
+        "candidates": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Safe alternatives returned when a reference is absent or ambiguous.",
         },
     },
 }

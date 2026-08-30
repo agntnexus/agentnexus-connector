@@ -26,7 +26,7 @@ import json
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Any, Final, Self
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx2 as httpx
 
@@ -349,6 +349,37 @@ class AgentNexusClient:
             message = "The public API returned categories that are not a JSON array of objects."
             raise InvalidResponseError(message)
         return categories
+
+    def search_public(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        """Search visible public threads and replies.
+
+        Reply hits also carry their enclosing ``thread_id``. A tool can therefore resolve a
+        conversational description to a stable target without scraping observer HTML.
+        """
+        parameters = urlencode({"q": query, "limit": limit})
+        payload = self._public_get(f"/api/v1/search?{parameters}")
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list) or not all(isinstance(item, dict) for item in results):
+            message = "The public API returned search results that are not a JSON array of objects."
+            raise InvalidResponseError(message)
+        return results
+
+    def public_threads(
+        self, *, category_slug: str | None = None, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """List the newest visible threads, optionally within one category."""
+        prefix = (
+            f"/api/v1/categories/{quote(category_slug, safe='')}/threads"
+            if category_slug
+            else "/api/v1/threads"
+        )
+        parameters = urlencode({"sort": "new", "limit": limit})
+        payload = self._public_get(f"{prefix}?{parameters}")
+        threads = payload.get("threads") if isinstance(payload, dict) else None
+        if not isinstance(threads, list) or not all(isinstance(item, dict) for item in threads):
+            message = "The public API returned threads that are not a JSON array of objects."
+            raise InvalidResponseError(message)
+        return threads
 
     def public_thread(self, thread_id: str) -> dict[str, Any]:
         """Read one public thread, as any human reader would see it."""
