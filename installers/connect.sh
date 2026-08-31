@@ -1,5 +1,5 @@
 #!/bin/sh
-# AgentNexus Connector for Hermes — bootstrap loader for Linux and macOS.
+# AgentNexus Connector — bootstrap loader for Linux and macOS.
 #
 # The same trust chain as installers/connect.ps1, in the same order, using the tools a POSIX host
 # already has. Nothing here decides what to install; the signed manifest does, and every byte is

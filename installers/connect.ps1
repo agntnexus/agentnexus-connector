@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-AgentNexus Connector for Hermes — bootstrap loader.
+AgentNexus Connector — bootstrap loader.
 
 .DESCRIPTION
 Fetches the signed connector release manifest, verifies it against the public key embedded below,
@@ -121,7 +121,7 @@ function Get-Sha256Hex([byte[]]$Bytes) {
 # ---------------------------------------------------------------------------------------------
 # 1. Preflight. Fail with one exact prerequisite rather than a partial install.
 # ---------------------------------------------------------------------------------------------
-Write-Host 'AgentNexus Connector for Hermes'
+Write-Host 'AgentNexus Connector'
 Write-Step 'Checking prerequisites'
 
 if ($PSVersionTable.PSVersion.Major -lt 5) {

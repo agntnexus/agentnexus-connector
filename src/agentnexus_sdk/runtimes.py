@@ -17,12 +17,28 @@ whether it worked. Adding a third runtime means adding an adapter, not a second 
   invitation. Both runtimes filter their environment before spawning a stdio server, which is why
   those variables are declared rather than inherited.
 
-**Verification status, stated plainly.** The Hermes adapter was exercised against a real Hermes
-installation (v0.20.6). The OpenClaw adapter implements the `openclaw mcp` contract this project
-was given — `add`, `list`, `status --verbose`, `doctor <name> --probe` — but no OpenClaw
-installation was available while it was written, so it is covered by tests against a stub CLI that
-implements that contract, not against the real tool. `RuntimeDetection.verified_against` records
-this, and setup prints it, so nobody mistakes a stubbed adapter for a proven one.
+**Verification status, stated plainly.** Both adapters have now driven a real installation end to
+end — Hermes v0.20.6 and OpenClaw 2026.8.1 — from a clean wheel install rather than a repository
+checkout, each runtime held inside its own official isolation so no working configuration was
+touched. Hermes contributed two failures of its own that only a real run could produce: `hermes mcp
+add` asks "Enable all 10 tools?" with no flag to skip it and cancels on EOF, saving nothing while
+appearing to succeed; and its configuration file moves with `HERMES_HOME`, so a guessed path
+inspected and backed up a file that was never the one being written.
+
+The OpenClaw adapter was written first against a *described* contract and
+then corrected against a real OpenClaw 2026.8.1, installed from its official npm distribution and
+driven under OpenClaw's own profile isolation. That run found three defects a stub could never
+have surfaced, because a stub answers to whatever it was told to answer to:
+
+* `mcp add` has no `--transport stdio`. Its `--transport` selects an *HTTP* transport, and a stdio
+  server is expressed by `--command` alone. The stubbed call was rejected outright.
+* `--env` takes exactly one `KEY=VALUE` and is repeated. Passing several after one flag makes the
+  extras positional, and OpenClaw refuses the command.
+* There is no `mcp remove`. Removal is `mcp unset`, so the rollback path was a silent no-op and the
+  recovery text named a command that does not exist.
+
+Tool visibility is read from `mcp probe --json`, which lists discovered capabilities;
+`doctor --probe` reports health and does not enumerate tools.
 """
 
 from __future__ import annotations
@@ -75,6 +91,19 @@ class ServerSpec:
         """`KEY=VALUE` pairs, in a stable order so two runs produce the same command."""
         return [f"{key}={value}" for key, value in sorted(self.environment.items())]
 
+    def as_repeated_env_flags(self, flag: str = "--env") -> list[str]:
+        """Return the same pairs, each behind its own flag.
+
+        Hermes accepts one `--env` followed by every pair; OpenClaw's takes exactly one pair and is
+        repeated, and treats the extras as positional arguments it then refuses. Two CLIs, two
+        spellings of the same data, so the difference is stated here rather than guessed at twice.
+        """
+        return [
+            item
+            for key, value in sorted(self.environment.items())
+            for item in (flag, f"{key}={value}")
+        ]
+
 
 @dataclass(frozen=True, slots=True)
 class ConfigurationOutcome:
@@ -113,9 +142,15 @@ class RuntimeAdapter(Protocol):
 
 
 def _run(
-    runner: Any, arguments: list[str], *, timeout: float = 120.0
+    runner: Any, arguments: list[str], *, timeout: float = 120.0, stdin: str | None = None
 ) -> subprocess.CompletedProcess[str]:
-    """Run a CLI with a fixed argument list. Never a shell, never an interpolated string."""
+    """Run a CLI with a fixed argument list. Never a shell, never an interpolated string.
+
+    `stdin` exists for one real case: Hermes v0.20.6 asks "Enable all 10 tools? [Y/n/select]" after
+    it discovers a server, and offers no flag to skip it. With nothing on stdin it reads EOF and
+    cancels, so a non-interactive run silently saved nothing. See `HermesAdapter.configure`.
+    """
+    extra: dict[str, Any] = {"input": stdin} if stdin is not None else {}
     completed: subprocess.CompletedProcess[str] = runner(
         arguments,
         capture_output=True,
@@ -123,6 +158,7 @@ def _run(
         errors="replace",
         check=False,
         timeout=timeout,
+        **extra,
     )
     return completed
 
@@ -180,10 +216,31 @@ class HermesAdapter:
         )
 
     def _config(self) -> Path:
+        """Where Hermes keeps the file this adapter inspects, backs up, and checks after writing.
+
+        Asked of Hermes rather than guessed. `HERMES_HOME` moves that file, and a guess that
+        ignores it inspects one file while `hermes mcp add` writes another — which is how a real
+        run here ended in "Hermes accepted the entry but the configuration does not contain it",
+        and, worse, how a backup could be taken of a file that was never the one at risk.
+        """
         if self._config_path is not None:
             return self._config_path
+
+        executable = self._which("hermes")
+        if executable is not None:
+            completed = _run(self._runner, [executable, "config", "path"])
+            reported = (completed.stdout or "").strip().splitlines()
+            if completed.returncode == 0 and reported:
+                candidate = Path(reported[-1].strip())
+                if candidate.name:
+                    return candidate
+
+        # Older Hermes releases without `config path`: fall back to its documented locations.
         import os
 
+        home = os.environ.get("HERMES_HOME")
+        if home:
+            return Path(home) / "config.yaml"
         base = os.environ.get("LOCALAPPDATA")
         if base:
             candidate = Path(base) / "hermes" / "config.yaml"
@@ -195,7 +252,21 @@ class HermesAdapter:
         path = self._config()
         if not path.is_file():
             return {}
-        import yaml
+        try:
+            import yaml
+        except ModuleNotFoundError as error:  # pragma: no cover - a broken installation
+            # This surfaced on a clean wheel install, where a bare ModuleNotFoundError traceback
+            # came out of the middle of setup. `hermes mcp list` prints a table with no machine
+            # form, so inspecting the file is the only way to tell an existing entry apart from
+            # ours, and refusing to guess is the whole point of inspecting first.
+            message = "Reading the Hermes configuration needs PyYAML, which is not installed."
+            raise RuntimeIntegrationError(
+                message,
+                recovery=(
+                    "Re-run the bootstrap loader; the connector install appears incomplete. "
+                    "Nothing was changed."
+                ),
+            ) from error
 
         try:
             document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -242,6 +313,14 @@ class HermesAdapter:
             # two AgentNexus servers in one runtime is exactly the duplication to avoid.
             _run(self._runner, [executable, "mcp", "remove", MCP_SERVER_NAME])
 
+        # Hermes v0.20.6 discovers the server's tools and then asks, with no flag to skip it:
+        #   "Enable all 10 tools? [Y/n/select]"  — and, if the probe failed instead,
+        #   "Save config anyway (you can test later)? [y/N]"
+        # A bare newline takes each documented default, which is the answer we want both times:
+        # enable the tools of the server we just registered, and do not save one that would not
+        # start. Answering with a literal "y" would save a broken entry. Nothing is trusted to the
+        # answer either way: the configuration is re-read below and rolled back if our entry is
+        # not in it.
         completed = _run(
             self._runner,
             [
@@ -256,6 +335,8 @@ class HermesAdapter:
                 "--env",
                 *spec.as_env_arguments(),
             ],
+            timeout=300.0,
+            stdin="\n",
         )
         if completed.returncode != 0:
             self.rollback(backup)
@@ -302,12 +383,11 @@ class HermesAdapter:
 class OpenClawAdapter:
     """OpenClaw, through its official `openclaw mcp` registry commands.
 
-    **Unverified against a real installation.** No OpenClaw was available while this was written,
-    so the commands below are the contract this project was given — `add`, `list --json`,
-    `status --verbose`, `doctor <name> --probe` — and the adapter is covered by tests against a
-    stub CLI implementing exactly that contract. `detect()` reports this, and setup prints it, so a
-    stubbed adapter is never mistaken for a proven one. The first real run should be treated as the
-    acceptance test it is.
+    **Verified against a real OpenClaw 2026.8.1**, installed from its official npm distribution and
+    driven under OpenClaw's own profile isolation so no working configuration was touched. The
+    command surface used here — `mcp add` with `--command`/`--arg`/repeated `--env`, `mcp list
+    --json`, `mcp status --verbose`, `mcp doctor <name> --probe`, `mcp probe <name> --json`, and
+    `mcp unset <name>` — was read off that installation, not off a description of it.
 
     The adapter deliberately does not fall back to editing OpenClaw's internal files when a command
     is missing: guessing an undocumented on-disk format is how an integration corrupts somebody's
@@ -317,8 +397,14 @@ class OpenClawAdapter:
     name = "openclaw"
     display_name = "OpenClaw"
 
-    #: Below this, the registry commands this adapter needs are assumed absent.
-    minimum_version: Final = (0, 1, 0)
+    #: The oldest OpenClaw this adapter has actually been run against. Older releases may well
+    #: work, but `mcp unset` and `mcp probe --json` were confirmed here and nowhere else, and an
+    #: installer that quietly assumes an unverified command surface is how configurations get
+    #: half-written. Raise this only after running against the version you are raising it to.
+    minimum_version: Final = (2026, 8, 1)
+
+    #: The exact installation this adapter was proven against.
+    verified_version: Final = "2026.8.1"
 
     def __init__(self, *, which: Any = shutil.which, runner: Any = subprocess.run) -> None:
         """Build the adapter, with the process seams a test can stand in."""
@@ -339,10 +425,7 @@ class OpenClawAdapter:
             installed=True,
             version=version,
             executable=executable,
-            verified_against=(
-                "a stub CLI implementing the documented `openclaw mcp` contract, "
-                "not a real OpenClaw installation"
-            ),
+            verified_against=f"a real OpenClaw {self.verified_version} installation",
         )
 
     def _require_supported(self) -> str:
@@ -361,8 +444,8 @@ class OpenClawAdapter:
             if parts and parts < self.minimum_version:
                 minimum = ".".join(str(part) for part in self.minimum_version)
                 message = (
-                    f"OpenClaw {detection.version} is older than {minimum}, which is the first "
-                    "version with the `openclaw mcp` registry commands this connector uses."
+                    f"OpenClaw {detection.version} is older than {minimum}, which is the oldest "
+                    "release this connector has been run against."
                 )
                 raise RuntimeIntegrationError(
                     message, recovery="Upgrade OpenClaw, then re-run setup."
@@ -414,7 +497,7 @@ class OpenClawAdapter:
                 message,
                 recovery=(
                     f"Inspect it with `openclaw mcp status --verbose`. If it is no longer needed, "
-                    f"remove it with `openclaw mcp remove {MCP_SERVER_NAME}` and re-run setup. "
+                    f"remove it with `openclaw mcp unset {MCP_SERVER_NAME}` and re-run setup. "
                     "Nothing was changed."
                 ),
             )
@@ -430,6 +513,8 @@ class OpenClawAdapter:
         else:
             backup = None
 
+        # A stdio server is `--command` alone: OpenClaw's `--transport` selects an HTTP transport,
+        # and passing `stdio` to it is rejected. `--env` carries one pair and is repeated.
         completed = _run(
             self._runner,
             [
@@ -437,40 +522,72 @@ class OpenClawAdapter:
                 "mcp",
                 "add",
                 MCP_SERVER_NAME,
-                "--transport",
-                "stdio",
                 "--command",
                 spec.command,
-                "--env",
-                *spec.as_env_arguments(),
+                "--connect-timeout",
+                "60",
+                *spec.as_repeated_env_flags(),
             ],
         )
         if completed.returncode != 0:
-            self.rollback(backup)
+            problem = self._remove_entry()
             message = f"`openclaw mcp add` failed: {(completed.stderr or completed.stdout)[-400:]}"
             raise RuntimeIntegrationError(
                 message,
-                recovery=(
+                recovery=problem
+                or (
                     "No entry was added. Run `openclaw mcp status --verbose` to see the current "
                     "state; your key and identity are unaffected."
                 ),
             )
 
         if self.existing_entry() is None:
-            self.rollback(backup)
+            problem = self._remove_entry()
             message = "OpenClaw accepted the entry but does not list it."
-            raise RuntimeIntegrationError(message, recovery="Run `openclaw mcp status --verbose`.")
+            raise RuntimeIntegrationError(
+                message, recovery=problem or "Run `openclaw mcp status --verbose`."
+            )
 
         return ConfigurationOutcome(
             changed=True, backup=backup, detail=f"registered with {executable}"
         )
 
     def rollback(self, backup: Path | None) -> None:
-        """Remove the entry this adapter added. OpenClaw owns its own file; we do not rewrite it."""
+        """Remove the entry this adapter added. OpenClaw owns its own file; we do not rewrite it.
+
+        `mcp unset`, not `mcp remove`: OpenClaw has no `remove`, so the earlier spelling left a
+        half-written entry in place while reporting a clean rollback.
+        """
+        self._remove_entry()
+
+    def _remove_entry(self) -> str | None:
+        """Remove the entry, returning what stopped it if anything did.
+
+        OpenClaw guards its own configuration file against a sharp size drop and will refuse the
+        write — a real refusal seen here, `size-drop:1218->358`, when the AgentNexus entry is most
+        of the file. That refusal has to surface: reporting a clean rollback while the entry is
+        still registered is worse than reporting the problem. We do not work around the guard by
+        editing the file ourselves, which is exactly the thing this adapter exists not to do.
+        """
         executable = self._which("openclaw")
         if executable is None:
-            return
-        _run(self._runner, [executable, "mcp", "remove", MCP_SERVER_NAME])
+            return None
+        completed = _run(self._runner, [executable, "mcp", "unset", MCP_SERVER_NAME])
+        if self.existing_entry() is None:
+            return None
+        detail = (completed.stderr or completed.stdout or "").strip()
+        if "size-drop" in detail or "Config write rejected" in detail:
+            return (
+                "OpenClaw refused to rewrite its configuration file, because removing the entry "
+                "would shrink it sharply and that is its own guard against a truncated config. "
+                f"The `{MCP_SERVER_NAME}` entry is still registered. Look at the file OpenClaw "
+                f"named, then remove the entry yourself with `openclaw mcp unset "
+                f"{MCP_SERVER_NAME}`."
+            )
+        return (
+            f"The `{MCP_SERVER_NAME}` entry could not be removed and is still registered: "
+            f"{detail[-200:]}"
+        )
 
     def verify(self) -> list[str]:
         """Ask the runtime to confirm the server, returning what it reported."""
@@ -483,7 +600,9 @@ class OpenClawAdapter:
             raise RuntimeIntegrationError(message)
         notes.append("`openclaw mcp status --verbose` reported the registry")
 
-        probe = _run(self._runner, [executable, "mcp", "doctor", MCP_SERVER_NAME, "--probe"])
+        probe = _run(
+            self._runner, [executable, "mcp", "doctor", MCP_SERVER_NAME, "--probe"], timeout=180.0
+        )
         combined = f"{probe.stdout or ''}\n{probe.stderr or ''}"
         if probe.returncode != 0:
             if re.search(r"sandbox|tool profile|permission|policy|denied", combined, re.I):
@@ -505,18 +624,63 @@ class OpenClawAdapter:
                 recovery=f"Run `openclaw mcp doctor {MCP_SERVER_NAME} --probe` to see the detail.",
             )
 
-        missing = sorted(tool for tool in EXPECTED_TOOLS if tool not in combined)
+        notes.append(f"`openclaw mcp doctor {MCP_SERVER_NAME} --probe` reported no issues")
+
+        # `doctor` answers "is it healthy"; it does not enumerate tools. `probe --json` does, so
+        # the tool check reads a structured capability list rather than grepping prose that a
+        # future release is free to reword.
+        discovered = _run(
+            self._runner, [executable, "mcp", "probe", MCP_SERVER_NAME, "--json"], timeout=180.0
+        )
+        if discovered.returncode != 0:
+            message = f"`openclaw mcp probe {MCP_SERVER_NAME} --json` could not connect."
+            raise RuntimeIntegrationError(
+                message,
+                recovery=(
+                    f"Run `openclaw mcp probe {MCP_SERVER_NAME} --json` to see what it reports. "
+                    "Your key and identity are unaffected."
+                ),
+            )
+        exposed = _tool_names(discovered.stdout or "")
+        missing = sorted(
+            tool for tool in EXPECTED_TOOLS if not any(tool in name for name in exposed)
+        )
         if missing:
             message = f"OpenClaw did not expose the expected AgentNexus tools: {missing}."
             raise RuntimeIntegrationError(
                 message,
                 recovery=(
                     "Start a new OpenClaw session so it re-discovers the server, then run "
-                    f"`openclaw mcp doctor {MCP_SERVER_NAME} --probe` again."
+                    f"`openclaw mcp probe {MCP_SERVER_NAME} --json` again."
                 ),
             )
         notes.append(f"probe exposed {', '.join(sorted(EXPECTED_TOOLS))}")
         return notes
+
+
+def _tool_names(payload: str) -> set[str]:
+    """Every tool name in an `openclaw mcp probe --json` document.
+
+    Names are matched loosely by the caller because a runtime may namespace them; what matters
+    here is reading the structured list rather than the surrounding prose.
+    """
+    try:
+        document = json.loads(payload or "{}")
+    except json.JSONDecodeError as error:
+        message = "`openclaw mcp probe --json` did not return JSON."
+        raise RuntimeIntegrationError(
+            message, recovery="Run that command yourself to see what OpenClaw reports."
+        ) from error
+    names: set[str] = set()
+    for tool in document.get("tools", []) if isinstance(document, dict) else []:
+        if isinstance(tool, str):
+            names.add(tool)
+        elif isinstance(tool, dict):
+            for key in ("name", "toolName", "qualifiedName"):
+                value = tool.get(key)
+                if isinstance(value, str):
+                    names.add(value)
+    return names
 
 
 def _matches(entry: dict[str, Any], spec: ServerSpec) -> bool:
@@ -524,6 +688,10 @@ def _matches(entry: dict[str, Any], spec: ServerSpec) -> bool:
     command = entry.get("command")
     environment = entry.get("env") or entry.get("environment") or {}
     if not isinstance(environment, dict):
+        return False
+    # This adapter never registers arguments, so an entry carrying any is somebody else's, and
+    # treating it as ours would let a rerun report "already configured" over a different server.
+    if entry.get("args"):
         return False
     return (
         command == spec.command

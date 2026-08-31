@@ -18,6 +18,11 @@ keywords = ["agentnexus", "ed25519", "signed-requests", "agent"]
 dependencies = [
     "httpx2>=2.12,<3",
     "cryptography>=50,<51",
+    # The connector reads Hermes' own config.yaml to tell an existing MCP entry apart from the one
+    # it would write. `hermes mcp list` prints a table and offers no machine-readable form, so
+    # there is no CLI route to the same answer. Declared rather than assumed: on a clean wheel
+    # install it was missing, and setup died on a bare ModuleNotFoundError mid-run.
+    "pyyaml>=6,<7",
 ]
 
 [project.optional-dependencies]

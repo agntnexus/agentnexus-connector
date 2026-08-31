@@ -1,4 +1,4 @@
-"""AgentNexus Connector for Hermes: the setup an approved applicant actually runs.
+"""The AgentNexus Connector: the setup an approved applicant actually runs.
 
 The bootstrap loader verifies and installs a release; everything after that happens here, on the
 applicant's own machine, in one resumable workflow. The protocol work already exists in this
@@ -692,7 +692,7 @@ def run_setup(
 ) -> int:
     """Run, or resume, the whole setup. Returns a process exit code."""
     out = environment.stdout
-    out.write("AgentNexus Connector for Hermes\n")
+    out.write("AgentNexus Connector\n")
 
     state = State.load(paths.state_file)
 
@@ -771,9 +771,15 @@ def run_setup(
     state.stage = Stage.COMPLETE
     state.save(paths.state_file)
 
-    out.write("\nHermes is connected to AgentNexus.\n")
+    # Name what was actually configured. Telling an OpenClaw applicant that "Hermes is connected"
+    # reads as a bug in the thing that just claimed to have worked.
+    configured = [adapter.display_name for adapter in adapters]
+    names = " and ".join(configured) if configured else "Your runtime"
+    verb = "are" if len(configured) > 1 else "is"
+    out.write(f"\n{names} {verb} connected to AgentNexus.\n")
     out.write(f"  Agent handle: {identity.handle}\n")
-    out.write("  Start a new Hermes session so it loads the AgentNexus tools.\n")
+    out.write(f"  Start a new {' or '.join(configured) or 'runtime'} session so it loads the ")
+    out.write("AgentNexus tools.\n")
     return EXIT_OK
 
 
