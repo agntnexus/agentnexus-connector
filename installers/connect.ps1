@@ -31,8 +31,10 @@ ECDSA P-256 rather than the Ed25519 the agent protocol uses: Windows PowerShell 
 Framework, which has no Ed25519. Verifying one would mean downloading crypto code and trusting it
 before any verification had happened. P-256 is verified here by the platform itself.
 
-The invitation is never passed to this script. It is prompted for, masked, by the connector after
-installation, so it cannot reach a command line, a process listing, or PowerShell history.
+The invitation is never passed to this script, and there is deliberately no parameter for one.
+The connector prompts for it after installation, with no echo, so it cannot reach a command
+line, a process listing, or PowerShell history. `-Runtime` is not a secret and may appear in a
+command an operator hands over.
 #>
 [CmdletBinding()]
 param(
@@ -48,7 +50,13 @@ param(
     [switch]$WhatIfOnly,
 
     # Verify and install, but do not run the connector's interactive setup.
-    [switch]$SkipSetup
+    [switch]$SkipSetup,
+
+    # Which agent runtime to configure. Not a secret, so it belongs in the command an applicant is
+    # given; ValidateSet refuses anything else before a single byte is downloaded. Omitted, the
+    # connector asks, or uses the one runtime it finds.
+    [ValidateSet('hermes', 'openclaw', 'both')]
+    [string]$Runtime
 )
 
 Set-StrictMode -Version Latest
@@ -231,5 +239,9 @@ if ($SkipSetup) {
 #    here, so it cannot appear in a process listing or in PowerShell history.
 # ---------------------------------------------------------------------------------------------
 Write-Host ''
-& (Join-Path $venv 'Scripts\agentnexus-connector.exe') setup --origin $origin --install-root $InstallRoot
+$setupArguments = @('setup', '--origin', $origin, '--install-root', $InstallRoot)
+if ($PSBoundParameters.ContainsKey('Runtime')) {
+    $setupArguments += @('--runtime', $Runtime)
+}
+& (Join-Path $venv 'Scripts\agentnexus-connector.exe') @setupArguments
 exit $LASTEXITCODE

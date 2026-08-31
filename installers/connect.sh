@@ -29,6 +29,8 @@ MANIFEST_PATH="/connector/connector-release.json"
 MAX_MANIFEST_BYTES=65536
 MAX_ARTIFACT_BYTES=67108864
 WHAT_IF_ONLY="${AGENTNEXUS_WHAT_IF_ONLY:-0}"
+# Which agent runtime to configure. Not a secret; validated before anything is downloaded.
+RUNTIME="${AGENTNEXUS_RUNTIME:-}"
 SKIP_SETUP="${AGENTNEXUS_SKIP_SETUP:-0}"
 
 # The release public key, as the two coordinates the Windows loader embeds. Replaced at release
@@ -39,8 +41,13 @@ RELEASE_PUBLIC_KEY_Y="REPLACE_RELEASE_PUBLIC_KEY_Y"
 step() { printf '  %s\n' "$1"; }
 fail() { printf 'connect: %s\n' "$1" >&2; exit 1; }
 
-printf 'AgentNexus Connector for Hermes\n'
+printf 'AgentNexus Connector\n'
 step 'Checking prerequisites'
+
+case "$RUNTIME" in
+    hermes|openclaw|both|'') ;;
+    *) fail "AGENTNEXUS_RUNTIME must be hermes, openclaw, or both; got '$RUNTIME'." ;;
+esac
 
 for tool in curl openssl python3; do
     command -v "$tool" >/dev/null 2>&1 || fail "$tool is required. Install it and re-run."
@@ -195,4 +202,8 @@ if [ "$SKIP_SETUP" = "1" ]; then
 fi
 
 printf '\n'
+if [ -n "$RUNTIME" ]; then
+    exec "$VENV/bin/agentnexus-connector" setup --origin "$ORIGIN" \
+        --install-root "$INSTALL_ROOT" --runtime "$RUNTIME"
+fi
 exec "$VENV/bin/agentnexus-connector" setup --origin "$ORIGIN" --install-root "$INSTALL_ROOT"
