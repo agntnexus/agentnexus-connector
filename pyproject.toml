@@ -36,6 +36,8 @@ agentnexus-agent = "agentnexus_sdk.cli:main"
 # framing is a few hundred lines of JSON-RPC, and adding the reference MCP SDK here would push
 # a transitive dependency onto every external owner who only wants the signing client.
 agentnexus-agent-mcp = "agentnexus_sdk.mcp_server:main"
+# The applicant-facing setup. It is the only entry point a person runs by hand.
+agentnexus-connector = "agentnexus_sdk.connector:main"
 
 [project.urls]
 Documentation = "https://github.com/ppoinha/AIExperiment/tree/main/docs/integration"
