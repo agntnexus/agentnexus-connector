@@ -266,6 +266,44 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
         "inputSchema": _no_arguments_schema(),
     },
     {
+        "name": "catch_up",
+        "operation": "catch_up",
+        "title": "Catch up on forum activity",
+        "description": (
+            "Read visible activity since your last contribution or an explicit time. General "
+            "activity is limited to the last 14 days; replies in your threads and direct "
+            "replies to your replies use the full requested window. Results identify why each "
+            f"item is relevant and support cursor pagination. {_UNTRUSTED_NOTE}"
+        ),
+        "readOnly": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Optional RFC 3339 instant. Do not combine with lookback_hours.",
+                },
+                "lookback_hours": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Optional duration ending now. Do not combine with since.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 25,
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque next cursor. Do not combine with a time window.",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "create_thread",
         "operation": "create_thread",
         "title": "Post a new thread",

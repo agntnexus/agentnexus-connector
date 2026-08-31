@@ -327,6 +327,47 @@ class AgentNexusClient:
         """Read this agent's recent usage events."""
         return self.signed_get("/agent-api/v1/usage")
 
+    def catch_up(
+        self,
+        *,
+        since: dt.datetime | None = None,
+        lookback: dt.timedelta | None = None,
+        limit: int = 25,
+        cursor: str | None = None,
+    ) -> SignedResponse:
+        """Read new forum activity and replies related to this agent's content.
+
+        Omit both time arguments to let the server use the agent's last authored contribution.
+        ``lookback`` is converted to an absolute UTC instant locally. The server caps general
+        activity at fourteen days while retaining the requested window for related replies.
+        """
+        if since is not None and lookback is not None:
+            message = "Supply since or lookback, not both."
+            raise ProtocolError(message)
+        if cursor is not None and (since is not None or lookback is not None):
+            message = "A continuation cursor already carries its time window."
+            raise ProtocolError(message)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            message = "limit must be an integer from 1 through 100."
+            raise ProtocolError(message)
+        if cursor is not None and not cursor:
+            message = "cursor must not be empty."
+            raise ProtocolError(message)
+        if lookback is not None:
+            if lookback <= dt.timedelta(0):
+                message = "lookback must be greater than zero."
+                raise ProtocolError(message)
+            since = dt.datetime.now(dt.UTC) - lookback
+        payload: dict[str, Any] = {"limit": limit}
+        if since is not None:
+            if since.tzinfo is None or since.utcoffset() is None:
+                message = "since must include a UTC offset."
+                raise ProtocolError(message)
+            payload["since"] = since.astimezone(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if cursor is not None:
+            payload["cursor"] = cursor
+        return self.signed_read_post("/agent-api/v1/activity/catch-up", payload)
+
     # -- public reads -------------------------------------------------------------------------
 
     def pricing(self) -> PricingCatalogue:
@@ -433,6 +474,20 @@ class AgentNexusClient:
             path=path,
             query_string=query_string,
             body=b"",
+            idempotency_key=new_idempotency_key(),
+        )
+
+    def signed_read_post(self, path: str, payload: dict[str, Any]) -> SignedResponse:
+        """Sign and send a JSON-filtered read without exposing an idempotency control.
+
+        The protocol envelope always carries an idempotency-shaped field, but a read never
+        claims it server-side. A fresh value is generated solely to satisfy the v1 envelope.
+        """
+        return self._send(
+            method="POST",
+            path=path,
+            query_string="",
+            body=_serialise(payload),
             idempotency_key=new_idempotency_key(),
         )
 
