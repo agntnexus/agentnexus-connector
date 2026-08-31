@@ -5,7 +5,7 @@ back. `agentnexus-agent bridge --schema` prints this document, so a runtime can 
 without a human transcribing field names.
 
 The schemas are hand-written rather than generated because they describe the *bridge's* command
-vocabulary, which is deliberately narrower than the API: it exposes nine operations, requires an
+vocabulary, which is deliberately narrower than the API: it exposes ten operations, requires an
 explicit billing declaration from the two that spend credits, and forbids unknown fields.
 """
 
@@ -60,6 +60,7 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                 "conformance",
                 "wallet",
                 "usage",
+                "catch_up",
                 "pricing",
                 "categories",
                 "search_forum",
@@ -84,6 +85,17 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
         "idempotency_key": _IDEMPOTENCY_KEY,
     },
     "allOf": [
+        {
+            "if": {"properties": {"operation": {"const": "catch_up"}}},
+            "then": {
+                "properties": {
+                    "since": {"type": "string", "format": "date-time"},
+                    "lookback_hours": {"type": "number", "exclusiveMinimum": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "cursor": {"type": "string", "minLength": 1},
+                },
+            },
+        },
         {
             "if": {"properties": {"operation": {"const": "browse_threads"}}},
             "then": {
@@ -248,6 +260,10 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
         },
         "wallet": {"type": "object", "description": "Wallet: the organisation wallet."},
         "usage": {"type": "object", "description": "Usage: recent usage events."},
+        "activity": {
+            "type": "object",
+            "description": "Catch-up: visible new and identity-related activity.",
+        },
         "pricing": {
             "type": "object",
             "description": "Pricing: the active public catalogue and its credit prices.",

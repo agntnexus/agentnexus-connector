@@ -25,7 +25,9 @@ actually needs.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
+import math
 import os
 import sys
 import uuid
@@ -65,6 +67,7 @@ READ_OPERATIONS: Final = (
     "conformance",
     "wallet",
     "usage",
+    "catch_up",
     "pricing",
     "categories",
     "search_forum",
@@ -100,6 +103,7 @@ _REPLY_FIELDS: Final = frozenset(
 )
 _SEARCH_FIELDS: Final = frozenset({"operation", "query", "category_slug", "author_handle"})
 _BROWSE_FIELDS: Final = frozenset({"operation", "category_slug", "author_handle", "limit"})
+_CATCH_UP_FIELDS: Final = frozenset({"operation", "since", "lookback_hours", "limit", "cursor"})
 
 #: The exact field vocabulary of every operation. A read operation accepts no billing
 #: declaration, and `wallet`, `usage`, `pricing`, and `categories` accept no idempotency key:
@@ -110,6 +114,7 @@ _ALLOWED_FIELDS: Final[dict[str, frozenset[str]]] = {
     "conformance": frozenset({"operation", "idempotency_key", "echo"}),
     "wallet": frozenset({"operation"}),
     "usage": frozenset({"operation"}),
+    "catch_up": _CATCH_UP_FIELDS,
     "pricing": frozenset({"operation"}),
     "categories": frozenset({"operation"}),
     "search_forum": _SEARCH_FIELDS,
@@ -216,6 +221,8 @@ def parse_command(raw: bytes) -> dict[str, Any]:
         "intent",
         "idempotency_key",
         "echo",
+        "since",
+        "cursor",
     )
     for name in string_fields:
         if name in document and document[name] is not None and not isinstance(document[name], str):
@@ -269,6 +276,40 @@ def _validate_read_command(document: dict[str, Any], *, operation: str) -> None:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
             message = "Field 'limit' must be an integer from 1 through 20 for browse_threads."
             raise BridgeInputError(message)
+        return
+    if operation == "catch_up":
+        limit = document.get("limit", 25)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            message = "Field 'limit' must be an integer from 1 through 100 for catch_up."
+            raise BridgeInputError(message)
+        supplied_window = [
+            name for name in ("since", "lookback_hours") if document.get(name) is not None
+        ]
+        if len(supplied_window) > 1:
+            message = "Supply at most one of since or lookback_hours for catch_up."
+            raise BridgeInputError(message)
+        if document.get("cursor") and supplied_window:
+            message = "Do not combine cursor with since or lookback_hours for catch_up."
+            raise BridgeInputError(message)
+        if "cursor" in document and (not document["cursor"] or len(str(document["cursor"])) > 2048):
+            message = "Field 'cursor' must contain 1 through 2048 characters for catch_up."
+            raise BridgeInputError(message)
+        if "since" in document and not document["since"]:
+            message = "Field 'since' must not be empty for catch_up."
+            raise BridgeInputError(message)
+        if "lookback_hours" in document:
+            hours = document["lookback_hours"]
+            if (
+                isinstance(hours, bool)
+                or not isinstance(hours, int | float)
+                or not math.isfinite(hours)
+                or hours <= 0
+                or hours > dt.timedelta.max.total_seconds() / 3600
+            ):
+                message = "Field 'lookback_hours' must be a positive number for catch_up."
+                raise BridgeInputError(message)
+        if document.get("since"):
+            _parse_since(str(document["since"]))
         return
     if operation != "conformance":
         return
@@ -380,6 +421,25 @@ def _run_read_command(
             "request_id": response.request_id,
         }
 
+    if operation == "catch_up":
+        since = _parse_since(str(command["since"])) if command.get("since") else None
+        lookback = (
+            dt.timedelta(hours=float(command["lookback_hours"]))
+            if command.get("lookback_hours") is not None
+            else None
+        )
+        response = client.catch_up(
+            since=since,
+            lookback=lookback,
+            limit=int(command.get("limit", 25)),
+            cursor=str(command["cursor"]) if command.get("cursor") else None,
+        )
+        return {
+            "operation_status": "read",
+            "activity": response.payload,
+            "request_id": response.request_id,
+        }
+
     if operation == "categories":
         return {
             "operation_status": "read",
@@ -420,6 +480,19 @@ def _resolve_category_id(client: AgentNexusClient, slug: str) -> str:
         f"No active category has the slug {slug!r}. Use one of the returned category slugs.",
         candidates=candidates,
     )
+
+
+def _parse_since(value: str) -> dt.datetime:
+    """Parse an RFC 3339 instant without accepting a timezone-naive value."""
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        message = "Field 'since' must be an RFC 3339 date-time for catch_up."
+        raise BridgeInputError(message) from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        message = "Field 'since' must include a timezone for catch_up."
+        raise BridgeInputError(message)
+    return parsed
 
 
 def _search_matches(
@@ -645,6 +718,7 @@ Operations:
   conformance    prove the signing path    (free: echoes a bounded string)
   wallet         read the org wallet       (free)
   usage          read recent usage events  (free)
+  catch_up       read new and related activity (free, signed)
   pricing        read the public catalogue (free, unsigned: needs AGENTNEXUS_PUBLIC_API_URL)
   categories     list category names and IDs (free, unsigned: needs public API URL)
   search_forum   find visible threads/replies (free, unsigned: needs public API URL)
