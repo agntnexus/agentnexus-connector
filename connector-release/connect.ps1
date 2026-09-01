@@ -33,8 +33,8 @@ before any verification had happened. P-256 is verified here by the platform its
 
 The invitation is never passed to this script, and there is deliberately no parameter for one.
 The connector prompts for it after installation, with no echo, so it cannot reach a command
-line, a process listing, or PowerShell history. `-Runtime` is not a secret and may appear in a
-command an operator hands over.
+line, a process listing, or PowerShell history. Neither `-Runtime` nor `-Profile` is a secret:
+the operator may hand over the first, and the applicant chooses the second.
 #>
 [CmdletBinding()]
 param(
@@ -56,7 +56,23 @@ param(
     # given; ValidateSet refuses anything else before a single byte is downloaded. Omitted, the
     # connector asks, or uses the one runtime it finds.
     [ValidateSet('hermes', 'openclaw', 'both')]
-    [string]$Runtime
+    [string]$Runtime,
+
+    # Which named agent profile to connect. One profile is one AgentNexus identity, with its own
+    # private key, state, backups and runtime context, so this is how a second approved agent is
+    # set up on a machine that already has one. Omitted, the connector uses `default`.
+    #
+    # Not a secret, so it may appear in a command. It becomes a directory name, so it is validated
+    # here at parameter binding — before a single byte is fetched and before anything is written.
+    #
+    # Validated by Assert-SafeProfileName below rather than by a ValidatePattern attribute, and
+    # that is a deliberate trade. An attribute rejects at parameter binding with PowerShell's own
+    # wording, which names the regex; Windows PowerShell 5.1 has no `ErrorMessage` to replace it.
+    # The check below runs before the first fetch and before anything is written — a test asserts
+    # that ordering — and says exactly what connect.sh and profiles.py say, in the same sentence.
+    # One rule, one message, on every surface.
+    [Alias('Profile')]
+    [string]$AgentProfile
 )
 
 Set-StrictMode -Version Latest
@@ -74,6 +90,37 @@ $MaxManifestBytes = 65536
 $MaxArtifactBytes = 64MB
 
 function Write-Step([string]$Message) { Write-Host "  $Message" }
+
+# The one canonical AgentNexus profile grammar. Identical to connect.sh and to profiles.py, and
+# deliberately inside what every consumer promises rather than what any one of them happens to
+# allow: real Hermes v0.20.6 reports `[a-z0-9][a-z0-9_-]{0,63}` and lower-cases silently, while
+# its own `profile create --help` promises only "lowercase, alphanumeric". Sitting inside the
+# promise is what stops a future Hermes turning a working name into a failed setup.
+#
+# `(?-i)` is not decoration: -match is case-insensitive by default, so without it `Agent2` would
+# pass here and then be silently lower-cased by Hermes into another profile's name.
+$ProfileNamePattern = '(?-i)^[a-z][a-z0-9]{0,31}$'
+$ProfileNameRule = 'Use lower-case letters and digits only, starting with a letter, 1 to 32 characters - no hyphens, underscores, or dots.'
+
+function Assert-SafeProfileName([string]$Name) {
+    # Everything about the name is decided here, before a single byte is fetched and before
+    # anything is written, so an unusable name costs no download and mutates nothing.
+    if ($Name -notmatch $ProfileNamePattern) {
+        throw "The profile name '$Name' is not a valid profile name. $ProfileNameRule For example: agent2."
+    }
+    # The reserved-device list is the part a pattern cannot express. It is not theoretical: a real
+    # Hermes answered "Profile 'nul' already exists" here, because Windows resolves the name as a
+    # path whatever the extension, so the profile would appear to work and keep nothing.
+    $reserved = @(
+        'con', 'prn', 'aux', 'nul', 'clock$',
+        'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9',
+        'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9',
+        'all', 'migration'
+    )
+    if ($reserved -contains $Name) {
+        throw "The profile name '$Name' is reserved by Windows or by AgentNexus. A real Hermes answered ""Profile 'nul' already exists"" to one of these. Choose another, for example: agent2."
+    }
+}
 
 function Convert-FromHex([string]$Hex) {
     if ($Hex.Length % 2 -ne 0) { throw 'A hex value must have an even number of characters.' }
@@ -222,6 +269,12 @@ if ([System.Environment]::Is64BitOperatingSystem -ne $true) {
     throw 'A 64-bit Windows installation is required.'
 }
 
+# Before the manifest fetch on purpose: a name that cannot become a directory must cost nothing.
+if ($PSBoundParameters.ContainsKey('AgentProfile')) {
+    Assert-SafeProfileName $AgentProfile
+    Write-Step "Agent profile: $AgentProfile"
+}
+
 if ($null -eq (Get-Command 'hermes' -ErrorAction SilentlyContinue)) {
     # Not fatal here: the connector reports it precisely, with the one command to fix it, after it
     # has done the work that does not depend on Hermes. Failing now would waste a verified install.
@@ -341,6 +394,9 @@ Write-Host ''
 $setupArguments = @('setup', '--origin', $origin, '--install-root', $InstallRoot)
 if ($PSBoundParameters.ContainsKey('Runtime')) {
     $setupArguments += @('--runtime', $Runtime)
+}
+if ($PSBoundParameters.ContainsKey('AgentProfile')) {
+    $setupArguments += @('--profile', $AgentProfile)
 }
 & (Join-Path $venv 'Scripts\agentnexus-connector.exe') @setupArguments
 exit $LASTEXITCODE

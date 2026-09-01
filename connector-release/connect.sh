@@ -31,6 +31,10 @@ MAX_ARTIFACT_BYTES=67108864
 WHAT_IF_ONLY="${AGENTNEXUS_WHAT_IF_ONLY:-0}"
 # Which agent runtime to configure. Not a secret; validated before anything is downloaded.
 RUNTIME="${AGENTNEXUS_RUNTIME:-}"
+# Which named agent profile to connect: one profile is one AgentNexus identity, with its own key,
+# state, backups and runtime context. The Windows loader spells this `-AgentProfile`. Not a secret,
+# but it becomes a directory name, so it is validated below before the first fetch.
+AGENT_PROFILE="${AGENTNEXUS_PROFILE:-}"
 SKIP_SETUP="${AGENTNEXUS_SKIP_SETUP:-0}"
 
 # The release public key, as the two coordinates the Windows loader embeds. Replaced at release
@@ -48,6 +52,36 @@ case "$RUNTIME" in
     hermes|openclaw|both|'') ;;
     *) fail "AGENTNEXUS_RUNTIME must be hermes, openclaw, or both; got '$RUNTIME'." ;;
 esac
+
+# The one canonical AgentNexus profile grammar, in the form `sh` has: lower-case letters and
+# digits, starting with a letter, 1 to 32 characters. Identical to connect.ps1 and to profiles.py,
+# down to the sentence it prints. Checked here, before the first fetch, so a name that cannot
+# become a directory costs no download and touches no file.
+#
+# It is deliberately inside what every consumer promises rather than what any one of them happens
+# to allow: real Hermes v0.20.6 reports `[a-z0-9][a-z0-9_-]{0,63}` and lower-cases its input
+# silently, while its own `profile create --help` promises only "lowercase, alphanumeric".
+PROFILE_NAME_RULE="Use lower-case letters and digits only, starting with a letter, 1 to 32 characters - no hyphens, underscores, or dots."
+if [ -n "$AGENT_PROFILE" ]; then
+    case "$AGENT_PROFILE" in
+        [a-z]*) ;;
+        *) fail "The profile name '$AGENT_PROFILE' is not a valid profile name. $PROFILE_NAME_RULE For example: agent2." ;;
+    esac
+    case "$AGENT_PROFILE" in
+        *[!a-z0-9]*)
+            fail "The profile name '$AGENT_PROFILE' is not a valid profile name. $PROFILE_NAME_RULE For example: agent2." ;;
+    esac
+    if [ "${#AGENT_PROFILE}" -gt 32 ]; then
+        fail "The profile name '$AGENT_PROFILE' is not a valid profile name. $PROFILE_NAME_RULE For example: agent2."
+    fi
+    # The part a pattern cannot express. Not theoretical: a real Hermes answered "Profile 'nul'
+    # already exists", because Windows resolves the name as a path whatever the extension.
+    case "$AGENT_PROFILE" in
+        con|prn|aux|nul|com[1-9]|lpt[1-9]|all|migration)
+            fail "The profile name '$AGENT_PROFILE' is reserved by Windows or by AgentNexus. Choose another, for example: agent2." ;;
+    esac
+    step "Agent profile: $AGENT_PROFILE"
+fi
 
 for tool in curl openssl python3; do
     command -v "$tool" >/dev/null 2>&1 || fail "$tool is required. Install it and re-run."
@@ -202,8 +236,13 @@ if [ "$SKIP_SETUP" = "1" ]; then
 fi
 
 printf '\n'
+# Built up rather than branched over every combination: two optional flags is already four
+# spellings of the same command, and the invitation is in none of them.
+set -- setup --origin "$ORIGIN" --install-root "$INSTALL_ROOT"
 if [ -n "$RUNTIME" ]; then
-    exec "$VENV/bin/agentnexus-connector" setup --origin "$ORIGIN" \
-        --install-root "$INSTALL_ROOT" --runtime "$RUNTIME"
+    set -- "$@" --runtime "$RUNTIME"
 fi
-exec "$VENV/bin/agentnexus-connector" setup --origin "$ORIGIN" --install-root "$INSTALL_ROOT"
+if [ -n "$AGENT_PROFILE" ]; then
+    set -- "$@" --profile "$AGENT_PROFILE"
+fi
+exec "$VENV/bin/agentnexus-connector" "$@"
