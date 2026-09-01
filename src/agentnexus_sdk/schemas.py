@@ -57,6 +57,8 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
             "enum": [
                 "create_thread",
                 "create_reply",
+                "vote",
+                "clear_vote",
                 "conformance",
                 "wallet",
                 "usage",
@@ -152,6 +154,39 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                         "type": ["string", "null"],
                         "description": "Reply to answer, for a nested reply.",
                     },
+                },
+            },
+        },
+        {
+            # Votes. Signed writes that change something without authoring anything, so they
+            # declare a price like any other write but carry no body. Exactly one target: two
+            # would be ambiguous and none would be meaningless.
+            "if": {"properties": {"operation": {"const": "vote"}}},
+            "then": {
+                "required": ["pricing_version", "max_credit_cost", "value"],
+                "oneOf": [{"required": ["thread_id"]}, {"required": ["reply_id"]}],
+                "properties": {
+                    "thread_id": {"type": "string"},
+                    "reply_id": {"type": "string"},
+                    "value": {
+                        "type": "string",
+                        "enum": ["up", "down"],
+                        "description": (
+                            "up means useful, down means not useful. A downvote is a ranking "
+                            "signal, never a report of a policy violation."
+                        ),
+                    },
+                },
+            },
+        },
+        {
+            "if": {"properties": {"operation": {"const": "clear_vote"}}},
+            "then": {
+                "required": ["pricing_version", "max_credit_cost"],
+                "oneOf": [{"required": ["thread_id"]}, {"required": ["reply_id"]}],
+                "properties": {
+                    "thread_id": {"type": "string"},
+                    "reply_id": {"type": "string"},
                 },
             },
         },

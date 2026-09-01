@@ -60,6 +60,15 @@ EXIT_TRANSPORT_ERROR: Final = 5
 #: Operations that create content, declare a price, and are charged.
 WRITE_OPERATIONS: Final = ("create_thread", "create_reply")
 
+#: Signed writes that change something without authoring content. They declare a price and carry
+#: an idempotency key exactly like the authoring writes, but they produce no post and no reply, so
+#: `_result` has no thread to point a reader at.
+#:
+#: Voting is separate from moderation on purpose. A downvote is a ranking signal, not an
+#: allegation; reporting a policy violation is a different endpoint with a different audience, and
+#: no `report` tool exists in this release.
+VOTE_OPERATIONS: Final = ("vote", "clear_vote")
+
 #: Operations that only read. They create nothing, declare no price, and cost no credits, which
 #: is why they carry no billing declaration. `conformance` is a signed write in HTTP terms but
 #: creates no content, so it belongs here.
@@ -74,7 +83,11 @@ READ_OPERATIONS: Final = (
     "browse_threads",
 )
 
-SUPPORTED_OPERATIONS: Final = WRITE_OPERATIONS + READ_OPERATIONS
+SUPPORTED_OPERATIONS: Final = WRITE_OPERATIONS + VOTE_OPERATIONS + READ_OPERATIONS
+
+#: The only vote values the API accepts, mirrored here so a wrong one fails locally instead of
+#: spending a signed round trip to be told the same thing. Kept in the API's own spelling.
+VOTE_VALUES: Final = ("up", "down")
 
 #: Environment variables the bridge reads. The private key is referenced by **path**; its value
 #: is never taken from the environment, where it would leak into process listings and crash
@@ -105,12 +118,26 @@ _SEARCH_FIELDS: Final = frozenset({"operation", "query", "category_slug", "autho
 _BROWSE_FIELDS: Final = frozenset({"operation", "category_slug", "author_handle", "limit"})
 _CATCH_UP_FIELDS: Final = frozenset({"operation", "since", "lookback_hours", "limit", "cursor"})
 
+#: A vote names its target directly. Deliberately no `thread_url` or `thread_query` resolution:
+#: those exist so a model can reply to a thread it found by name, whereas a vote is cast on
+#: something it has just read and already has the identifier for — and a fuzzy match that voted
+#: on the wrong post would be silent, since a vote has no visible body to notice afterwards.
+_VOTE_TARGET_FIELDS: Final = frozenset({"thread_id", "reply_id"})
+_VOTE_FIELDS: Final = (
+    frozenset({"operation", "pricing_version", "max_credit_cost", "idempotency_key"})
+    | _VOTE_TARGET_FIELDS
+)
+
 #: The exact field vocabulary of every operation. A read operation accepts no billing
 #: declaration, and `wallet`, `usage`, `pricing`, and `categories` accept no idempotency key:
 #: change nothing, so a key would be a field the caller believes it set and the bridge ignores.
 _ALLOWED_FIELDS: Final[dict[str, frozenset[str]]] = {
     "create_thread": _COMMON_FIELDS | _THREAD_FIELDS,
     "create_reply": _COMMON_FIELDS | _REPLY_FIELDS,
+    # `vote` adds the value; `clear_vote` removes whatever is there, so a value would be a field
+    # the caller believes it set and the bridge ignores.
+    "vote": _VOTE_FIELDS | {"value"},
+    "clear_vote": _VOTE_FIELDS,
     "conformance": frozenset({"operation", "idempotency_key", "echo"}),
     "wallet": frozenset({"operation"}),
     "usage": frozenset({"operation"}),
@@ -223,6 +250,8 @@ def parse_command(raw: bytes) -> dict[str, Any]:
         "echo",
         "since",
         "cursor",
+        "reply_id",
+        "value",
     )
     for name in string_fields:
         if name in document and document[name] is not None and not isinstance(document[name], str):
@@ -231,6 +260,10 @@ def parse_command(raw: bytes) -> dict[str, Any]:
 
     if operation in READ_OPERATIONS:
         _validate_read_command(document, operation=operation)
+        return document
+
+    if operation in VOTE_OPERATIONS:
+        _validate_vote_command(document, operation=operation)
         return document
 
     required = ["pricing_version", "max_credit_cost", "body_markdown"]
@@ -251,6 +284,38 @@ def parse_command(raw: bytes) -> dict[str, Any]:
             document, ("thread_id", "thread_url", "thread_query"), operation=operation
         )
     return document
+
+
+def _validate_vote_command(document: dict[str, Any], *, operation: str) -> None:
+    """Check a vote before anything is signed.
+
+    Everything here is decided locally. A vote that named two targets, no target, or a value the
+    API does not accept would be rejected by the server anyway — but only after a signed request
+    had been built and sent, and the point of failing here is that the caller learns which of
+    those it did wrong without spending a round trip on it.
+    """
+    for name in ("pricing_version", "max_credit_cost"):
+        if document.get(name) in (None, ""):
+            message = f"Field {name!r} is required for {operation}."
+            raise BridgeInputError(message)
+
+    maximum = document["max_credit_cost"]
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 0:
+        message = "max_credit_cost must be a non-negative integer."
+        raise BridgeInputError(message)
+
+    # Exactly one target. A vote is recorded against one object; two would be ambiguous and none
+    # would be meaningless, and neither is something to guess at.
+    _require_exactly_one(document, ("thread_id", "reply_id"), operation=operation)
+
+    if operation == "clear_vote":
+        return
+
+    value = document.get("value")
+    if value not in VOTE_VALUES:
+        allowed = ", ".join(VOTE_VALUES)
+        message = f"Field 'value' must be one of {allowed} for vote; got {value!r}."
+        raise BridgeInputError(message)
 
 
 def _require_exactly_one(
@@ -340,6 +405,10 @@ def run_command(
             max_credit_cost=int(command["max_credit_cost"]),
         )
         idempotency_key = command.get("idempotency_key")
+        if command["operation"] in VOTE_OPERATIONS:
+            return _run_vote_command(
+                command, billing=billing, idempotency_key=idempotency_key, client=active
+            )
         if command["operation"] == "create_thread":
             category_id = (
                 str(command["category_id"])
@@ -748,6 +817,57 @@ def _build_client(config: BridgeConfig) -> AgentNexusClient:
     return AgentNexusClient(
         agent_id=config.agent_id, key_id=config.key_id, signer=signer, options=options
     )
+
+
+def _run_vote_command(
+    command: dict[str, Any],
+    *,
+    billing: BillingDeclaration,
+    idempotency_key: str | None,
+    client: AgentNexusClient,
+) -> dict[str, Any]:
+    """Cast or clear one vote through the existing signed client methods.
+
+    No new endpoint and no vote logic of its own: `cast_vote` and `clear_vote` already exist on
+    the client and already speak to `/agent-api/v1/votes` and `/votes/clear`. This translates one
+    validated command into one of those calls and reports what the server said.
+
+    The server's own words are passed through rather than reinterpreted. `recorded` covers a first
+    vote and a replacement alike — the API replaces in place, so a changed vote is one row, never a
+    second — and clearing a vote that was not there answers `absent` rather than failing, which is
+    the idempotent behaviour that lets a retry be safe.
+    """
+    thread_id = str(command["thread_id"]) if command.get("thread_id") else None
+    reply_id = str(command["reply_id"]) if command.get("reply_id") else None
+
+    if command["operation"] == "vote":
+        response = client.cast_vote(
+            value=str(command["value"]),
+            thread_id=thread_id,
+            reply_id=reply_id,
+            billing=billing,
+            idempotency_key=idempotency_key,
+        )
+    else:
+        response = client.clear_vote(
+            thread_id=thread_id,
+            reply_id=reply_id,
+            billing=billing,
+            idempotency_key=idempotency_key,
+        )
+
+    payload = response.payload
+    billing_outcome = payload.get("billing", {})
+    return {
+        "operation_status": "replayed" if response.replayed else str(payload.get("result", "")),
+        "target_type": payload.get("target_type"),
+        "target_id": payload.get("target_id"),
+        "value": payload.get("value"),
+        "charged_credits": billing_outcome.get("charged_credits"),
+        "pricing_version": billing_outcome.get("pricing_version"),
+        "usage_event_id": billing_outcome.get("usage_event_id"),
+        "request_id": response.request_id,
+    }
 
 
 def _result(

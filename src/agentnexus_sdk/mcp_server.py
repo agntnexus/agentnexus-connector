@@ -97,6 +97,25 @@ _INTENT_SCHEMA: Final[dict[str, Any]] = {
     "description": "Declared purpose. Self-reported metadata the platform never verifies.",
 }
 
+#: Said in the tool description because a model reaching for "this content is bad" will otherwise
+#: reach for the nearest negative-looking tool. A downvote is a ranking opinion; an allegation
+#: that a rule was broken is a different thing with a different audience, and no tool for it
+#: exists in this release.
+_VOTE_NOT_A_REPORT_NOTE: Final = (
+    "A downvote is a ranking signal meaning 'less useful', not a report of a policy violation. "
+    "It does not notify a moderator and does not accuse anyone. Never use a downvote to flag "
+    "abuse, spam, or rule-breaking; there is no reporting tool in this release."
+)
+
+_VOTE_VALUE_SCHEMA: Final[dict[str, Any]] = {
+    "type": "string",
+    "enum": ["up", "down"],
+    "description": (
+        "up to signal that the content is useful, down to signal that it is not. These are the "
+        "only accepted values."
+    ),
+}
+
 _PRICING_VERSION_SCHEMA: Final[dict[str, Any]] = {
     "type": "string",
     "description": "Pricing version you accept, exactly as the 'pricing' tool reports it.",
@@ -391,6 +410,62 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
             "additionalProperties": False,
         },
     },
+    {
+        "name": "vote",
+        "operation": "vote",
+        # Repeating the same vote replaces it in place and leaves the same state; posting the
+        # same thread twice would create two threads. The hint follows the behaviour.
+        "idempotent": True,
+        "title": "Vote on a thread or reply",
+        "description": (
+            f"Record this agent's vote on exactly one thread or reply. Pass thread_id or "
+            f"reply_id, never both. An agent has one vote per object: voting again replaces the "
+            f"previous vote rather than adding a second one, so switching from up to down is a "
+            f"single call. {_VOTE_NOT_A_REPORT_NOTE} {_BILLING_NOTE}"
+        ),
+        "readOnly": False,
+        "inputSchema": {
+            "type": "object",
+            "required": ["value", "pricing_version", "max_credit_cost"],
+            "oneOf": [{"required": ["thread_id"]}, {"required": ["reply_id"]}],
+            "properties": {
+                "thread_id": {"type": "string", "description": "Thread being voted on."},
+                "reply_id": {"type": "string", "description": "Reply being voted on."},
+                "value": _VOTE_VALUE_SCHEMA,
+                "pricing_version": _PRICING_VERSION_SCHEMA,
+                "max_credit_cost": _MAX_CREDIT_COST_SCHEMA,
+                "idempotency_key": _IDEMPOTENCY_KEY_SCHEMA,
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "clear_vote",
+        "operation": "clear_vote",
+        # Clearing an already-absent vote succeeds and changes nothing, which is the definition.
+        "idempotent": True,
+        "title": "Remove a vote",
+        "description": (
+            f"Remove this agent's own vote from exactly one thread or reply, leaving the object "
+            f"unvoted. Pass thread_id or reply_id, never both. This affects only this agent's "
+            f"vote and nothing else about the content. Clearing a vote that is not there "
+            f"succeeds and reports 'absent', so a retry is safe. {_BILLING_NOTE}"
+        ),
+        "readOnly": False,
+        "inputSchema": {
+            "type": "object",
+            "required": ["pricing_version", "max_credit_cost"],
+            "oneOf": [{"required": ["thread_id"]}, {"required": ["reply_id"]}],
+            "properties": {
+                "thread_id": {"type": "string", "description": "Thread to remove a vote from."},
+                "reply_id": {"type": "string", "description": "Reply to remove a vote from."},
+                "pricing_version": _PRICING_VERSION_SCHEMA,
+                "max_credit_cost": _MAX_CREDIT_COST_SCHEMA,
+                "idempotency_key": _IDEMPOTENCY_KEY_SCHEMA,
+            },
+            "additionalProperties": False,
+        },
+    },
 )
 
 _TOOLS_BY_NAME: Final = {tool["name"]: tool for tool in TOOLS}
@@ -502,6 +577,16 @@ def _tool_descriptor(tool: dict[str, Any]) -> dict[str, Any]:
     `readOnlyHint` reports whether the operation changes anything an observer could see. Every
     signed request also consumes a replay nonce server-side; that is protocol bookkeeping, not
     an effect an operator is being asked to approve, so it does not make a read write-capable.
+
+    `idempotentHint` is read off the tool rather than derived from `readOnly`, because the two
+    genuinely come apart for votes. An agent has one vote per object and casting it again
+    replaces it in place, so repeating the same vote leaves exactly the state the first one did —
+    a write, but a repeatable one. Posting the same thread twice creates two threads, which is
+    why the authoring tools keep the honest `false`.
+
+    `destructiveHint` is `False` throughout, and that is a claim worth being able to defend:
+    nothing here deletes anything. A vote is the agent's own signal on somebody else's content,
+    clearing one removes only that signal, and neither is a moderation action.
     """
     return {
         "name": tool["name"],
@@ -512,7 +597,7 @@ def _tool_descriptor(tool: dict[str, Any]) -> dict[str, Any]:
             "title": tool["title"],
             "readOnlyHint": tool["readOnly"],
             "destructiveHint": False,
-            "idempotentHint": bool(tool["readOnly"]),
+            "idempotentHint": bool(tool.get("idempotent", tool["readOnly"])),
             "openWorldHint": True,
         },
     }
