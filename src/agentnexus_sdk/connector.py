@@ -47,6 +47,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, TextIO
 
+from agentnexus_sdk import soul
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions
 from agentnexus_sdk.errors import AgentNexusError
 from agentnexus_sdk.onboarding import (
@@ -91,6 +92,7 @@ from agentnexus_sdk.signing import (
     public_key_file_warning,
     write_private_key_file,
 )
+from agentnexus_sdk.soul import SoulError
 
 #: The state file's own schema. A newer one stops rather than guessing what a field meant.
 STATE_SCHEMA_VERSION: Final = 1
@@ -779,6 +781,7 @@ def run_setup(
     endpoints: Endpoints,
     environment: Environment,
     runtime: str | None = None,
+    soul_mode: str = "ask",
 ) -> int:
     """Run, or resume, the whole setup for one profile. Returns a process exit code."""
     out = environment.stdout
@@ -877,6 +880,373 @@ def run_setup(
     out.write(f"  Agent handle: {identity.handle}\n")
     out.write(f"  Profile: {paths.profile}\n")
     _report_how_to_start(paths, adapters, context, environment)
+
+    # The optional local step, offered only once the identity is already connected and saved. Its
+    # failures are reported and swallowed: an agent that can sign is a successful setup, and a
+    # soul is a convenience on top of it.
+    if soul_mode != "skip":
+        try:
+            offer_soul(paths=paths, adapters=adapters, environment=environment)
+        except (SoulError, RuntimeIntegrationError, ProfileError) as error:
+            environment.stderr.write(f"\n  Soul setup stopped: {error}\n")
+            recovery = getattr(error, "recovery", None)
+            if recovery:
+                environment.stderr.write(f"  {recovery}\n")
+            environment.stderr.write(
+                f"  Your agent is connected and usable. Run "
+                f"`agentnexus-connector profile soul init --profile {paths.profile}` later.\n"
+            )
+    return EXIT_OK
+
+
+def offer_soul(*, paths: Paths, adapters: list[RuntimeAdapter], environment: Environment) -> None:
+    """Offer the optional local soul step, defaulting to leaving everything alone.
+
+    Four choices, and the default is the one that changes nothing. An applicant who has just
+    pasted an invitation and watched a key being generated is not in a good position to make a
+    considered decision about their agent's personality, and the entire step is available later
+    with no invitation, no key, and no network.
+    """
+    supported = [adapter for adapter in adapters if adapter.name == "hermes"]
+    if not supported:
+        environment.stdout.write(
+            "\n  This runtime has no instruction-document contract AgentNexus can use, so the\n"
+            "  optional soul step is skipped. Nothing was changed.\n"
+        )
+        return
+
+    out = environment.stdout
+    out.write("\nOptional: this agent's local instructions\n")
+    out.write(
+        "  A soul is a Markdown document your runtime reads before it acts. It is entirely\n"
+        "  local: nothing you write here is sent to AgentNexus, and it is never used as your\n"
+        "  public bio. You can do this now or at any time later.\n"
+        "\n"
+        "    1  answer a short questionnaire and generate one\n"
+        "    2  import a soul file you already have\n"
+        "    3  leave the runtime's current soul exactly as it is\n"
+        "    4  skip for now (default)\n"
+    )
+    try:
+        choice = environment.prompt("  Choose 1-4 [4]: ").strip() or "4"
+    except (EOFError, OSError):
+        # An unattended install has no terminal to answer with. Reaching here means the identity
+        # is already connected and saved, so the only correct move is to change nothing and say
+        # how to do this later — never to fail a setup that has already succeeded.
+        out.write("\n  No terminal to ask on, so nothing was changed.\n")
+        choice = "4"
+    if choice not in {"1", "2"}:
+        out.write(
+            f"  Left unchanged. Run `agentnexus-connector profile soul init --profile "
+            f"{paths.profile}` whenever you like.\n"
+        )
+        return
+
+    adapter = supported[0]
+    if choice == "1":
+        run_soul_init(paths=paths, adapter=adapter, environment=environment)
+    else:
+        source = environment.prompt("  Path to the soul file: ").strip()
+        if not source:
+            out.write("  No path given; nothing was changed.\n")
+            return
+        run_soul_import(paths=paths, adapter=adapter, environment=environment, source=Path(source))
+
+
+# ---------------------------------------------------------------------------------------------
+# Souls
+# ---------------------------------------------------------------------------------------------
+
+
+def soul_adapter(paths: Paths, environment: Environment, runtime: str | None = None) -> Any:
+    """Build the one runtime adapter a soul operation acts through, for exactly one profile.
+
+    Every soul command comes through here, so there is no path by which one runs without having
+    resolved a single profile and a single runtime first. That is the whole of the profile-
+    confusion defence: the adapter carries this profile's `RuntimeContext`, and the location it
+    then reports is checked against the profile it was asked about.
+    """
+    context = paths.runtime_context()
+    chosen = runtime or _recorded_runtime(paths) or "hermes"
+    factory = ADAPTERS.get(chosen)
+    if factory is None:
+        message = f"{chosen!r} is not a supported runtime."
+        raise ConnectorError(message, exit_code=EXIT_USAGE)
+    adapter = factory(which=environment.which, runner=environment.run, context=context)
+    if not adapter.detect().installed:
+        message = f"{adapter.display_name} was not found on PATH."
+        raise ConnectorError(
+            message,
+            exit_code=EXIT_PREFLIGHT,
+            recovery=(
+                f"A soul lives inside {adapter.display_name}'s own profile directory, so it has "
+                "to be installed for AgentNexus to find it. Nothing was changed."
+            ),
+        )
+    return adapter
+
+
+def _recorded_runtime(paths: Paths) -> str | None:
+    """Which runtime this profile was actually set up with, from its own state file."""
+    state = State.load(paths.state_file)
+    for name in ("hermes", "openclaw"):
+        if name in state.runtimes:
+            return name
+    return None
+
+
+def _record_soul(paths: Paths, location: Any, digest: str | None) -> None:
+    """Remember the digest of what AgentNexus wrote. Never the content itself.
+
+    This one value is what separates "we wrote this and nobody has touched it" from "somebody's
+    own work is in this file". It is a digest and a path — nothing from the questionnaire and no
+    part of the document is stored here or anywhere else.
+    """
+    record = ProfileRecord.load(paths.profile_record) or ProfileRecord(name=paths.profile)
+    soul_block: dict[str, Any] = {
+        "runtime": location.runtime,
+        "runtime_profile": location.profile,
+        "path": str(location.path),
+        "updated_at": dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if digest is not None:
+        soul_block["managed_digest"] = digest
+    record.runtime = {**record.runtime, "soul": soul_block}
+    record.save(paths.profile_record)
+
+
+def _managed_digest(paths: Paths) -> str | None:
+    record = ProfileRecord.load(paths.profile_record)
+    if record is None:
+        return None
+    block = record.runtime.get("soul")
+    if not isinstance(block, dict):
+        return None
+    digest = block.get("managed_digest")
+    return digest if isinstance(digest, str) else None
+
+
+def _confirm(environment: Environment, question: str, *, expected: str) -> bool:
+    """Ask for one exact word before anything is replaced. Anything else is a no."""
+    answer = environment.prompt(f"  {question} Type `{expected}` to confirm: ").strip()
+    return answer == expected
+
+
+def _apply_soul(
+    *,
+    paths: Paths,
+    adapter: Any,
+    environment: Environment,
+    proposed: str,
+    origin: str,
+    assume_yes: bool = False,
+) -> int:
+    """Preview, confirm, back up, write, verify — the one path every soul change takes.
+
+    Import, questionnaire, edit and restore all end here, so none of them can accidentally skip
+    the diff, the confirmation, or the backup by taking a shortcut of its own.
+    """
+    out = environment.stdout
+    location = adapter.soul_location()
+    with profile_lock(paths.install_root or paths.root.parent.parent, paths.profile):
+        current = soul.read_existing_soul(location.path)
+        proposed = soul.validate_soul_text(proposed)
+
+        if current is not None and soul.soul_digest(current) == soul.soul_digest(proposed):
+            out.write(f"  {location.path} already contains exactly this. Nothing was changed.\n")
+            _record_soul(paths, location, soul.soul_digest(proposed))
+            return EXIT_OK
+
+        out.write(f"\n  Runtime: {location.runtime}, profile {location.profile}\n")
+        out.write(f"  File:    {location.path}\n")
+        if current is None:
+            out.write("  There is no soul there yet; this would create one.\n")
+        elif soul.soul_digest(current) == _managed_digest(paths):
+            out.write("  The current soul is the one AgentNexus wrote, unchanged since.\n")
+        else:
+            out.write(
+                "  The current soul was NOT written by AgentNexus — it is yours, or the one\n"
+                "  your runtime shipped. Replacing it is a change to your own work.\n"
+            )
+        out.write(f"\n  Proposed change ({origin}):\n")
+        soul.write_preview(soul.diff_souls(current, proposed, path=location.path), out)
+
+        if not assume_yes and not _confirm(
+            environment, f"Replace the soul of profile {paths.profile!r}?", expected="replace"
+        ):
+            out.write("  Nothing was changed.\n")
+            return EXIT_USAGE
+
+        outcome = soul.install_soul(
+            proposed,
+            path=location.path,
+            profile=paths.profile,
+            backups=soul.backup_directory(paths.root),
+            expected_current=current,
+        )
+    _record_soul(paths, location, outcome.digest)
+    out.write(f"\n  {location.path}: {outcome.detail}\n")
+    if outcome.backup is not None:
+        out.write(f"  Previous content kept at {outcome.backup}\n")
+    out.write(
+        "  Your AgentNexus identity and key are unchanged; a soul is local instruction text.\n"
+    )
+    return EXIT_OK
+
+
+def run_soul_init(*, paths: Paths, adapter: Any, environment: Environment) -> int:
+    """Ask the questionnaire and install the generated soul."""
+    answers: soul.Answers = {}
+    try:
+        answers = soul.ask_questionnaire(reader=environment.prompt, stdout=environment.stdout)
+        rendered = soul.render_soul(answers)
+        return _apply_soul(
+            paths=paths,
+            adapter=adapter,
+            environment=environment,
+            proposed=rendered,
+            origin="generated from your answers",
+        )
+    except soul.QuestionnaireCancelledError:
+        environment.stdout.write("\n  Cancelled. Nothing was written.\n")
+        return EXIT_USAGE
+    finally:
+        # On success, on cancellation, and on failure alike. The answers only ever lived in this
+        # dictionary, so clearing it is the whole of the cleanup.
+        soul.scrub(answers)
+
+
+def run_soul_import(*, paths: Paths, adapter: Any, environment: Environment, source: Path) -> int:
+    """Install a soul file the applicant already has, leaving the source untouched."""
+    text = soul.read_import_file(source)
+    environment.stdout.write(f"\n  Read {source} ({len(text.encode('utf-8'))} bytes).\n")
+    environment.stdout.write("  The source file is not modified or removed by this.\n")
+    return _apply_soul(
+        paths=paths,
+        adapter=adapter,
+        environment=environment,
+        proposed=text,
+        origin=f"imported from {source}",
+    )
+
+
+def run_soul_show(*, paths: Paths, adapter: Any, environment: Environment) -> int:
+    """Print the current soul exactly as it is on disk."""
+    location = adapter.soul_location()
+    current = soul.read_existing_soul(location.path)
+    out = environment.stdout
+    out.write(f"Soul for profile {paths.profile} ({location.runtime}: {location.profile})\n")
+    out.write(f"  {location.path}\n\n")
+    if current is None:
+        out.write("  There is no soul file there yet.\n")
+        return EXIT_OK
+    out.write(current if current.endswith("\n") else current + "\n")
+    return EXIT_OK
+
+
+def run_soul_status(*, paths: Paths, adapter: Any, environment: Environment) -> int:
+    """Report what is configured, whether AgentNexus wrote it, and what backups exist."""
+    location = adapter.soul_location()
+    current = soul.read_existing_soul(location.path)
+    managed = _managed_digest(paths)
+    backups = soul.list_backups(soul.backup_directory(paths.root), paths.profile)
+    out = environment.stdout
+    out.write(f"Soul status for profile {paths.profile}\n")
+    out.write(f"  runtime:  {location.runtime}, profile {location.profile}\n")
+    out.write(f"  file:     {location.path}\n")
+    out.write(f"  content:  {soul.summarise(current)}\n")
+    if current is None:
+        out.write("  managed:  no soul to manage\n")
+    elif managed is None:
+        out.write("  managed:  no — AgentNexus has not written this file\n")
+    elif soul.soul_digest(current) == managed:
+        out.write("  managed:  yes — unchanged since AgentNexus wrote it\n")
+    else:
+        out.write("  managed:  edited since AgentNexus last wrote it\n")
+    out.write(f"  backups:  {len(backups)}\n")
+    out.write("  A soul is local instruction text. It is never sent to AgentNexus.\n")
+    return EXIT_OK
+
+
+def run_soul_backups(*, paths: Paths, environment: Environment) -> int:
+    """List this profile's soul backups, newest first."""
+    backups = soul.list_backups(soul.backup_directory(paths.root), paths.profile)
+    out = environment.stdout
+    if not backups:
+        out.write(f"No soul backups for profile {paths.profile}.\n")
+        return EXIT_OK
+    out.write(f"Soul backups for profile {paths.profile}, newest first:\n")
+    for entry in backups:
+        out.write(f"  {entry.name}  ({entry.stat().st_size} bytes)\n")
+    out.write(
+        f"\nRestore one with `agentnexus-connector profile soul restore --profile "
+        f"{paths.profile} --backup <name>`.\n"
+    )
+    return EXIT_OK
+
+
+def run_soul_restore(
+    *, paths: Paths, adapter: Any, environment: Environment, backup: str | None
+) -> int:
+    """Restore a backup, through the same preview-and-confirm path as any other change."""
+    directory = soul.backup_directory(paths.root)
+    available = soul.list_backups(directory, paths.profile)
+    if not available:
+        message = f"There are no soul backups for profile {paths.profile!r}."
+        raise ConnectorError(message, exit_code=EXIT_USAGE)
+    if backup is None:
+        chosen = available[0]
+        environment.stdout.write(f"  Restoring the newest backup: {chosen.name}\n")
+    else:
+        matches = [entry for entry in available if entry.name == backup]
+        if not matches:
+            message = f"{backup!r} is not a backup of this profile's soul."
+            raise ConnectorError(
+                message,
+                exit_code=EXIT_USAGE,
+                recovery=(
+                    "Run `agentnexus-connector profile soul backups --profile "
+                    f"{paths.profile}` to see the names."
+                ),
+            )
+        chosen = matches[0]
+    text = soul.read_existing_soul(chosen)
+    if text is None:
+        message = f"{chosen} could not be read."
+        raise ConnectorError(message, exit_code=EXIT_USAGE)
+    return _apply_soul(
+        paths=paths,
+        adapter=adapter,
+        environment=environment,
+        proposed=text,
+        origin=f"restored from {chosen.name}",
+    )
+
+
+def run_soul_forget(*, paths: Paths, environment: Environment) -> int:
+    """Stop tracking this profile's soul. The file itself is deliberately left alone.
+
+    The third of the three removals, and the narrowest. `profile disconnect` removes a runtime
+    entry; `profile remove` removes an AgentNexus profile; this removes only AgentNexus' record
+    that it wrote a soul. The document stays where it is, because it belongs to the applicant and
+    to their runtime — deleting somebody's instructions as a side effect of "forget" would be a
+    surprising thing for a command with that name to do.
+    """
+    record = ProfileRecord.load(paths.profile_record)
+    out = environment.stdout
+    if record is None or "soul" not in record.runtime:
+        out.write(f"AgentNexus is not tracking a soul for profile {paths.profile}.\n")
+        return EXIT_OK
+    tracked = record.runtime["soul"]
+    record.runtime = {key: value for key, value in record.runtime.items() if key != "soul"}
+    record.save(paths.profile_record)
+    out.write(f"AgentNexus no longer tracks a soul for profile {paths.profile}.\n")
+    if isinstance(tracked, dict) and tracked.get("path"):
+        out.write(f"  {tracked['path']} was left exactly as it is.\n")
+    out.write("  Your runtime still loads it. Delete or edit it there if you want it gone.\n")
+    backups = soul.list_backups(soul.backup_directory(paths.root), paths.profile)
+    if backups:
+        out.write(f"  {len(backups)} backup(s) are kept in {soul.backup_directory(paths.root)}.\n")
     return EXIT_OK
 
 
@@ -1400,6 +1770,15 @@ def _build_parser() -> Any:
         default=None,
         help="Which named agent profile to set up. Each profile is one AgentNexus identity.",
     )
+    # Optional, local, and offered only after the identity is connected. `skip` is what an
+    # automated run passes; the interactive default already changes nothing unless asked.
+    setup.add_argument(
+        "--soul",
+        choices=["ask", "skip"],
+        default="ask",
+        dest="soul_mode",
+        help="Offer the optional local soul step after connecting. Default: ask.",
+    )
     # Deliberately absent: --invitation. A single-use secret does not belong on a command line.
 
     profile = commands.add_parser(
@@ -1426,6 +1805,42 @@ def _build_parser() -> Any:
     )
     disconnect.add_argument("--profile", default=DEFAULT_PROFILE_NAME)
     disconnect.add_argument("--runtime", choices=["hermes", "openclaw", "both"], default=None)
+
+    # The optional local step. Its own noun, because a soul is neither the identity nor the
+    # runtime entry, and conflating the three removals is how somebody deletes the wrong one.
+    soul_command = actions.add_parser(
+        "soul",
+        parents=[common],
+        help="Create, inspect and restore one profile's local instruction document.",
+    )
+    soul_actions = soul_command.add_subparsers(dest="soul_action", required=True)
+    for name, help_text in (
+        ("init", "Answer a short questionnaire and generate a soul."),
+        ("edit", "Answer the questionnaire again and replace the current soul."),
+        ("show", "Print the current soul exactly as it is on disk."),
+        ("status", "Report what is configured and whether AgentNexus wrote it."),
+        ("backups", "List this profile's soul backups."),
+        ("forget", "Stop tracking the soul. The file itself is left alone."),
+    ):
+        soul_parser = soul_actions.add_parser(name, parents=[common], help=help_text)
+        soul_parser.add_argument("--profile", default=DEFAULT_PROFILE_NAME)
+        soul_parser.add_argument("--runtime", choices=sorted(ADAPTERS), default=None)
+
+    soul_import = soul_actions.add_parser(
+        "import", parents=[common], help="Install a soul file you already have."
+    )
+    soul_import.add_argument("--profile", default=DEFAULT_PROFILE_NAME)
+    soul_import.add_argument("--runtime", choices=sorted(ADAPTERS), default=None)
+    soul_import.add_argument("--file", type=Path, required=True)
+
+    soul_restore = soul_actions.add_parser(
+        "restore", parents=[common], help="Restore a previous soul from a backup."
+    )
+    soul_restore.add_argument("--profile", default=DEFAULT_PROFILE_NAME)
+    soul_restore.add_argument("--runtime", choices=sorted(ADAPTERS), default=None)
+    soul_restore.add_argument(
+        "--backup", default=None, help="Backup file name; the newest is used when omitted."
+    )
 
     remove = actions.add_parser("remove", parents=[common], help="Remove a profile's local files.")
     remove.add_argument("--profile", required=True)
@@ -1487,7 +1902,48 @@ def _run_setup_command(namespace: Any, install_root: Path, environment: Environm
             endpoints=endpoints,
             environment=environment,
             runtime=namespace.runtime,
+            soul_mode=namespace.soul_mode,
         )
+
+
+def _run_soul_command(namespace: Any, install_root: Path, environment: Environment) -> int:
+    """Dispatch one soul action, having first resolved exactly one profile.
+
+    `Paths.for_profile` is what validates the name and proves containment, so every soul action
+    below is already scoped to one profile's directory before it does anything at all.
+    """
+    paths = Paths.for_profile(install_root, namespace.profile)
+    if not paths.root.is_dir():
+        message = f"There is no {namespace.profile!r} profile in {install_root}."
+        raise ConnectorError(
+            message,
+            exit_code=EXIT_USAGE,
+            recovery=(
+                "A soul belongs to a connected profile. Run "
+                "`agentnexus-connector profile list` to see what is there."
+            ),
+        )
+
+    action = namespace.soul_action
+    if action == "backups":
+        return run_soul_backups(paths=paths, environment=environment)
+    if action == "forget":
+        return run_soul_forget(paths=paths, environment=environment)
+
+    adapter = soul_adapter(paths, environment, namespace.runtime)
+    if action in {"init", "edit"}:
+        return run_soul_init(paths=paths, adapter=adapter, environment=environment)
+    if action == "import":
+        return run_soul_import(
+            paths=paths, adapter=adapter, environment=environment, source=namespace.file
+        )
+    if action == "show":
+        return run_soul_show(paths=paths, adapter=adapter, environment=environment)
+    if action == "restore":
+        return run_soul_restore(
+            paths=paths, adapter=adapter, environment=environment, backup=namespace.backup
+        )
+    return run_soul_status(paths=paths, adapter=adapter, environment=environment)
 
 
 def _run_profile_command(namespace: Any, install_root: Path, environment: Environment) -> int:
@@ -1500,6 +1956,9 @@ def _run_profile_command(namespace: Any, install_root: Path, environment: Enviro
     if namespace.action == "doctor":
         prepare_installation(install_root, environment)
         return run_profile_doctor(install_root, namespace.profile, environment)
+    if namespace.action == "soul":
+        prepare_installation(install_root, environment)
+        return _run_soul_command(namespace, install_root, environment)
     if namespace.action == "disconnect":
         return run_profile_disconnect(
             install_root, namespace.profile, environment, runtime=namespace.runtime

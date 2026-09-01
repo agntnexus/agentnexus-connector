@@ -101,6 +101,10 @@ PROFILE_ENVIRONMENT_VARIABLE: Final = "AGENTNEXUS_PROFILE"
 #: it are the same agent; two that disagree are two agents, and one may never overwrite the other.
 IDENTITY_ENVIRONMENT_VARIABLE: Final = "AGENTNEXUS_AGENT_ID"
 
+#: What Hermes calls a profile's instruction document. Read off a real v0.20.6, which reports
+#: `SOUL.md:` in `hermes profile show` and names the same file in its `--ignore-rules` help.
+HERMES_SOUL_FILENAME: Final = "SOUL.md"
+
 
 def mcp_server_name(profile: str) -> str:
     """Return the MCP entry name one profile owns. Deterministic, and unique per profile.
@@ -248,6 +252,27 @@ class ServerSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class SoulLocation:
+    """Where one profile's instruction document lives, and how that was established.
+
+    `directory` is what the runtime itself reported, never a guess at a home directory. The
+    distinction matters: `HERMES_HOME` moves the whole installation and a profile moves inside it,
+    so a path assembled from environment variables would be right until the day it silently was
+    not — and the thing being overwritten is a document somebody wrote.
+    """
+
+    runtime: str
+    profile: str
+    directory: Path
+    filename: str
+
+    @property
+    def path(self) -> Path:
+        """The soul file itself."""
+        return self.directory / self.filename
+
+
+@dataclass(frozen=True, slots=True)
 class ConfigurationOutcome:
     """What an adapter did, so the caller can report and roll back precisely."""
 
@@ -292,6 +317,10 @@ class RuntimeAdapter(Protocol):
 
     def start_hint(self) -> list[str]:
         """Say how the applicant starts this runtime as this profile."""
+        ...
+
+    def soul_location(self) -> SoulLocation:
+        """Where this profile's instruction document lives, as the runtime itself reports it."""
         ...
 
 
@@ -749,6 +778,78 @@ class HermesAdapter:
         notes.append("the shared Hermes configuration does not carry this profile's entry")
         return notes
 
+    def soul_location(self) -> SoulLocation:
+        """Ask Hermes where this profile lives, and put its soul file inside that directory.
+
+        `hermes profile show <name>` prints a `Path:` line naming the profile's own directory, and
+        a `SOUL.md:` line confirming that the file is a thing this runtime has. Both were read off
+        a real v0.20.6. That command is the contract used here — not `HERMES_HOME`, not a guessed
+        `~/.hermes`, and not the `-p` selector's implied location — because the thing about to be
+        rewritten is a document the applicant wrote, and a path that is merely usually right is not
+        good enough for that.
+
+        The answer is then checked against the profile it was asked about: a named profile whose
+        directory does not carry its own name is a refusal, since it would mean writing one agent's
+        soul into another agent's context.
+        """
+        executable = self._which("hermes")
+        if executable is None:
+            message = "Hermes is not on PATH, so it cannot say where this profile's soul lives."
+            raise RuntimeIntegrationError(
+                message, recovery="Install Hermes, confirm `hermes --version` runs, and try again."
+            )
+        target = self._context.hermes_profile or DEFAULT_PROFILE_NAME
+        completed = _run(self._runner, [executable, "profile", "show", target], timeout=120.0)
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()[-200:]
+            message = f"`hermes profile show {target}` failed: {detail}"
+            raise RuntimeIntegrationError(
+                message,
+                recovery=(
+                    f"Run `hermes profile show {target}` yourself. Nothing was changed. If the "
+                    "profile does not exist, re-run setup for this AgentNexus profile first."
+                ),
+            )
+
+        directory: Path | None = None
+        for line in (completed.stdout or "").splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith("path:"):
+                reported = stripped.split(":", 1)[1].strip()
+                if reported:
+                    directory = Path(reported)
+                break
+        if directory is None:
+            message = f"`hermes profile show {target}` did not report a path."
+            raise RuntimeIntegrationError(
+                message,
+                recovery=(
+                    "This Hermes does not report a profile path in the form this connector reads, "
+                    "so it cannot prove which soul file it would write. Nothing was changed."
+                ),
+            )
+        if not directory.is_dir():
+            message = f"Hermes reports profile {target!r} at {directory}, which is not a directory."
+            raise RuntimeIntegrationError(message, recovery="Nothing was changed.")
+
+        # A named profile must live in a directory that names it. `default` deliberately does not:
+        # a real Hermes reports the installation root for it, which is exactly right.
+        if target != DEFAULT_PROFILE_NAME and target not in directory.resolve().parts:
+            message = (
+                f"Hermes reports profile {target!r} at {directory}, which is not that profile's "
+                "own directory."
+            )
+            raise RuntimeIntegrationError(
+                message,
+                recovery=(
+                    "Writing there could put this agent's instructions into another agent's "
+                    f"context. Nothing was changed. Check `hermes profile show {target}`."
+                ),
+            )
+        return SoulLocation(
+            runtime=self.name, profile=target, directory=directory, filename=HERMES_SOUL_FILENAME
+        )
+
     def start_hint(self) -> list[str]:
         """Say how the applicant starts Hermes as this profile, in Hermes' own terms."""
         target = self._context.hermes_profile
@@ -1119,6 +1220,28 @@ class OpenClawAdapter:
             )
         notes.append("the shared OpenClaw registry does not carry this profile's entry")
         return notes
+
+    def soul_location(self) -> SoulLocation:
+        """Refuse: no OpenClaw instruction-document contract has been established.
+
+        This is the honest answer rather than a placeholder. The OpenClaw command surface used
+        elsewhere in this adapter was read off a real 2026.8.1 installation; nothing equivalent is
+        known for an instruction document, no OpenClaw is installed on the machine this was written
+        on, and this repository holds no authoritative material describing one.
+
+        Guessing a filename would be worse than refusing. The operation this feeds is "back up and
+        replace a document the applicant wrote", and pointing that at a path nobody verified is how
+        a connector destroys somebody's work while reporting success.
+        """
+        message = "AgentNexus does not know where OpenClaw keeps a profile's instruction document."
+        raise RuntimeIntegrationError(
+            message,
+            recovery=(
+                "Nothing was read or changed. The soul commands support Hermes today. Configure "
+                "this agent's instructions through OpenClaw's own documented mechanism, or run "
+                "the soul commands against a Hermes profile with `--runtime hermes`."
+            ),
+        )
 
     def start_hint(self) -> list[str]:
         """Say how the applicant starts OpenClaw as this profile.
