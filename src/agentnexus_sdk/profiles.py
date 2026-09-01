@@ -8,11 +8,12 @@ context.
 
 **The name is the whole attack surface here.** It arrives from a command line and becomes a
 directory name, a lock file name, and an MCP entry name, so it is validated before anything is
-downloaded or written: lower-case ASCII only, so two profiles cannot collide by case on Windows;
-no separator, traversal segment, control character, or reserved device name; and the resolved
-directory has to sit directly under this installation's own profiles root, with no reparse point
-anywhere on the way there. A name that fails any of those is refused rather than sanitised —
-quietly rewriting somebody's profile name is how two agents end up sharing one key.
+downloaded or written. One canonical grammar covers every consumer at once — lower-case letters
+and digits, starting with a letter, 1 to 32 characters — plus a reserved-device refusal the pattern
+cannot express, and a containment check that the resolved directory sits directly under this
+installation's own profiles root with no reparse point on the way there. A name that fails any of
+those is refused rather than sanitised: quietly rewriting somebody's profile name is how two agents
+end up sharing one key.
 
 **What is deliberately *not* here.** No invitation, no key material, and no capability value ever
 reaches a profile record. `profile.json` carries the name, the addresses setup was pointed at, and
@@ -62,9 +63,28 @@ PROFILE_SCHEMA_VERSION: Final = 1
 
 MAX_PROFILE_NAME_LENGTH: Final = 32
 
-#: Lower-case only, so `Agent1` and `agent1` cannot become two profiles on Linux and one on
-#: Windows. Hyphens inside, never at either end, so a name can never be read as an option.
-PROFILE_NAME_PATTERN: Final = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$")
+#: One canonical grammar: lower-case letters and digits, starting with a letter, 1 to 32
+#: characters. `agent2` is the shape; `second-agent`, `agent_2`, `Agent2` and `2agent` are not.
+#:
+#: **This is deliberately narrower than any single consumer requires, because it has to satisfy
+#: all of them at once and keep satisfying them.** What each one actually accepts was measured
+#: rather than assumed:
+#:
+#: * Real Hermes v0.20.6 reports its own rule in its refusal message — `[a-z0-9][a-z0-9_-]{0,63}`
+#:   — and lower-cases the input before applying it, so `Agent2` silently becomes `agent2`. Its
+#:   `profile create --help` says only "lowercase, alphanumeric", which is *stricter* than what
+#:   the build accepts. Sitting inside the documented promise rather than the observed behaviour
+#:   is what keeps a future Hermes from turning a working profile name into a failed setup.
+#: * Windows resolves a device name as a path whatever the extension, which is not theoretical
+#:   here: `hermes profile create nul` answered "Profile 'nul' already exists". Hence the
+#:   reserved set below, which the pattern alone cannot express.
+#: * A leading letter, and no leading or trailing hyphen, keeps the name from being read as an
+#:   option by PowerShell or a POSIX shell, or as a number by anything.
+#:
+#: A name outside this is refused with the one correction that fixes it. It is never rewritten:
+#: Hermes' own silent lower-casing is exactly the behaviour that would let two AgentNexus
+#: profiles collapse into one runtime context, and this connector must not add a second one.
+PROFILE_NAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9]{0,31}$")
 
 #: Names Windows resolves to a device rather than a directory, whatever the extension. Creating
 #: `.../profiles/nul` succeeds in appearance and writes to the null device.
@@ -95,6 +115,37 @@ class ProfileError(Exception):
 # Names
 # ---------------------------------------------------------------------------------------------
 
+#: The name every message and every document uses when it needs to show one. It satisfies the
+#: canonical grammar, and a test asserts that, so the example can never drift from the rule.
+EXAMPLE_NAME: Final = "agent2"
+
+#: The rule in one sentence. Every refusal ends with it, so an applicant reads the whole rule
+#: once rather than discovering it one rejection at a time.
+NAME_RULE: Final = (
+    "Use lower-case letters and digits only, starting with a letter, 1 to "
+    f"{MAX_PROFILE_NAME_LENGTH} characters — no hyphens, underscores, or dots"
+)
+
+
+def _suggest(value: str) -> str | None:
+    """Return the nearest valid name, when stripping the disallowed characters leaves one."""
+    reduced = "".join(
+        character for character in value.lower() if character.isascii() and character.isalnum()
+    )
+    reduced = reduced.lstrip("0123456789")[:MAX_PROFILE_NAME_LENGTH]
+    return reduced if PROFILE_NAME_PATTERN.match(reduced) else None
+
+
+def _try_instead(candidate: str) -> str:
+    """Name the corrected form when there is one, and the example when there is not."""
+    suggestion = candidate if PROFILE_NAME_PATTERN.match(candidate) else _suggest(candidate)
+    return f"Try `{suggestion or EXAMPLE_NAME}`."
+
+
+def _use_only(value: str) -> str:
+    """Build the single correction message every grammar refusal carries."""
+    return f"{NAME_RULE}. {_try_instead(value)}"
+
 
 def validate_profile_name(value: str) -> str:
     """Return `value` unchanged if it is a safe profile name, or refuse with the reason.
@@ -105,14 +156,14 @@ def validate_profile_name(value: str) -> str:
     """
     if not isinstance(value, str) or value == "":
         message = "A profile name is required."
-        raise ProfileError(message, recovery="Choose a short name such as `agent1`.")
+        raise ProfileError(message, recovery=f"Choose a short name such as `{EXAMPLE_NAME}`.")
 
     if len(value) > MAX_PROFILE_NAME_LENGTH:
         message = (
             f"The profile name is {len(value)} characters; the maximum is "
             f"{MAX_PROFILE_NAME_LENGTH}."
         )
-        raise ProfileError(message)
+        raise ProfileError(message, recovery=f"Shorten it, for example to `{EXAMPLE_NAME}`.")
 
     # Checked before the pattern so each refusal names the actual problem rather than "not
     # allowed", which is what an applicant needs in order to pick a different name.
@@ -120,38 +171,34 @@ def validate_profile_name(value: str) -> str:
         message = f"The profile name {value!r} contains a path separator."
         raise ProfileError(
             message,
-            recovery="A profile name is a single name, never a path. Try `agent1`.",
+            recovery=f"A profile name is a single name, never a path. Try `{EXAMPLE_NAME}`.",
         )
     if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
         message = "The profile name contains a control character."
-        raise ProfileError(message)
+        raise ProfileError(message, recovery=_use_only(value))
     if value in {".", ".."} or value.startswith("."):
         message = f"The profile name {value!r} is a directory traversal segment."
-        raise ProfileError(message)
+        raise ProfileError(message, recovery=_use_only(value))
     if value != value.lower():
         message = f"The profile name {value!r} contains upper-case letters."
         raise ProfileError(
             message,
             recovery=(
-                "Profile names are lower-case, so that two names cannot mean one directory on "
-                f"Windows and two on Linux. Try `{value.lower()}`."
+                "Profile names are lower-case. Hermes silently lower-cases a profile name, so "
+                "two spellings would become one runtime context while staying two directories "
+                f"on Linux. {_try_instead(value.lower())}"
             ),
         )
     if PROFILE_NAME_PATTERN.match(value) is None:
-        message = f"The profile name {value!r} is not a safe directory name."
-        raise ProfileError(
-            message,
-            recovery=(
-                "Use lower-case letters, digits, and inner hyphens only, 1 to "
-                f"{MAX_PROFILE_NAME_LENGTH} characters, for example `agent1` or `research-bot`."
-            ),
-        )
+        message = f"The profile name {value!r} is not a valid profile name."
+        raise ProfileError(message, recovery=_use_only(value))
     if value in RESERVED_PROFILE_NAMES:
         message = f"The profile name {value!r} is reserved."
         raise ProfileError(
             message,
             recovery=(
-                "Windows resolves that name to a device rather than a directory. Pick another."
+                "Windows resolves that name to a device rather than a directory — a real Hermes "
+                f"answered \"Profile 'nul' already exists\" to it. {_try_instead(EXAMPLE_NAME)}"
             ),
         )
     return value

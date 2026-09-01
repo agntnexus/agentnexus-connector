@@ -64,11 +64,14 @@ param(
     #
     # Not a secret, so it may appear in a command. It becomes a directory name, so it is validated
     # here at parameter binding — before a single byte is fetched and before anything is written.
-    # Lower-case only: `Agent1` and `agent1` would be one directory on Windows and two on Linux.
-    # `(?-i)` is not decoration. ValidatePattern matches case-insensitively by default, so without
-    # it `Agent1` binds and reintroduces exactly that collision.
+    #
+    # Validated by Assert-SafeProfileName below rather than by a ValidatePattern attribute, and
+    # that is a deliberate trade. An attribute rejects at parameter binding with PowerShell's own
+    # wording, which names the regex; Windows PowerShell 5.1 has no `ErrorMessage` to replace it.
+    # The check below runs before the first fetch and before anything is written — a test asserts
+    # that ordering — and says exactly what connect.sh and profiles.py say, in the same sentence.
+    # One rule, one message, on every surface.
     [Alias('Profile')]
-    [ValidatePattern('(?-i)^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$')]
     [string]$AgentProfile
 )
 
@@ -88,11 +91,26 @@ $MaxArtifactBytes = 64MB
 
 function Write-Step([string]$Message) { Write-Host "  $Message" }
 
+# The one canonical AgentNexus profile grammar. Identical to connect.sh and to profiles.py, and
+# deliberately inside what every consumer promises rather than what any one of them happens to
+# allow: real Hermes v0.20.6 reports `[a-z0-9][a-z0-9_-]{0,63}` and lower-cases silently, while
+# its own `profile create --help` promises only "lowercase, alphanumeric". Sitting inside the
+# promise is what stops a future Hermes turning a working name into a failed setup.
+#
+# `(?-i)` is not decoration: -match is case-insensitive by default, so without it `Agent2` would
+# pass here and then be silently lower-cased by Hermes into another profile's name.
+$ProfileNamePattern = '(?-i)^[a-z][a-z0-9]{0,31}$'
+$ProfileNameRule = 'Use lower-case letters and digits only, starting with a letter, 1 to 32 characters - no hyphens, underscores, or dots.'
+
 function Assert-SafeProfileName([string]$Name) {
-    # ValidatePattern already refused separators, traversal, control characters and upper case.
-    # What it cannot express is the reserved-device list: `.../profiles/nul` looks like a
-    # directory and writes to the null device, so the profile would appear to work and keep
-    # nothing. Checked before the first fetch, so an unusable name costs no download.
+    # Everything about the name is decided here, before a single byte is fetched and before
+    # anything is written, so an unusable name costs no download and mutates nothing.
+    if ($Name -notmatch $ProfileNamePattern) {
+        throw "The profile name '$Name' is not a valid profile name. $ProfileNameRule For example: agent2."
+    }
+    # The reserved-device list is the part a pattern cannot express. It is not theoretical: a real
+    # Hermes answered "Profile 'nul' already exists" here, because Windows resolves the name as a
+    # path whatever the extension, so the profile would appear to work and keep nothing.
     $reserved = @(
         'con', 'prn', 'aux', 'nul', 'clock$',
         'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9',
@@ -100,7 +118,7 @@ function Assert-SafeProfileName([string]$Name) {
         'all', 'migration'
     )
     if ($reserved -contains $Name) {
-        throw "The profile name '$Name' is reserved by Windows or by AgentNexus. Choose another, for example 'agent2'."
+        throw "The profile name '$Name' is reserved by Windows or by AgentNexus. A real Hermes answered ""Profile 'nul' already exists"" to one of these. Choose another, for example: agent2."
     }
 }
 

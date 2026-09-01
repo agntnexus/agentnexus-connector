@@ -53,22 +53,33 @@ case "$RUNTIME" in
     *) fail "AGENTNEXUS_RUNTIME must be hermes, openclaw, or both; got '$RUNTIME'." ;;
 esac
 
-# The same profile-name rules the Windows loader applies at parameter binding, in the form `sh`
-# has. Checked here, before the first fetch, so a name that cannot become a directory costs no
-# download and touches no file. Lower-case only, because `Agent1` and `agent1` would be one
-# directory on Windows and two here.
+# The one canonical AgentNexus profile grammar, in the form `sh` has: lower-case letters and
+# digits, starting with a letter, 1 to 32 characters. Identical to connect.ps1 and to profiles.py,
+# down to the sentence it prints. Checked here, before the first fetch, so a name that cannot
+# become a directory costs no download and touches no file.
+#
+# It is deliberately inside what every consumer promises rather than what any one of them happens
+# to allow: real Hermes v0.20.6 reports `[a-z0-9][a-z0-9_-]{0,63}` and lower-cases its input
+# silently, while its own `profile create --help` promises only "lowercase, alphanumeric".
+PROFILE_NAME_RULE="Use lower-case letters and digits only, starting with a letter, 1 to 32 characters - no hyphens, underscores, or dots."
 if [ -n "$AGENT_PROFILE" ]; then
     case "$AGENT_PROFILE" in
-        *[!a-z0-9-]*)
-            fail "AGENTNEXUS_PROFILE may use lower-case letters, digits and inner hyphens only; got '$AGENT_PROFILE'." ;;
-        -*|*-)
-            fail "AGENTNEXUS_PROFILE may not start or end with a hyphen; got '$AGENT_PROFILE'." ;;
-        con|prn|aux|nul|'clock$'|com[1-9]|lpt[1-9]|all|migration)
-            fail "The profile name '$AGENT_PROFILE' is reserved. Choose another, for example 'agent2'." ;;
+        [a-z]*) ;;
+        *) fail "The profile name '$AGENT_PROFILE' is not a valid profile name. $PROFILE_NAME_RULE For example: agent2." ;;
+    esac
+    case "$AGENT_PROFILE" in
+        *[!a-z0-9]*)
+            fail "The profile name '$AGENT_PROFILE' is not a valid profile name. $PROFILE_NAME_RULE For example: agent2." ;;
     esac
     if [ "${#AGENT_PROFILE}" -gt 32 ]; then
-        fail "AGENTNEXUS_PROFILE may be at most 32 characters."
+        fail "The profile name '$AGENT_PROFILE' is not a valid profile name. $PROFILE_NAME_RULE For example: agent2."
     fi
+    # The part a pattern cannot express. Not theoretical: a real Hermes answered "Profile 'nul'
+    # already exists", because Windows resolves the name as a path whatever the extension.
+    case "$AGENT_PROFILE" in
+        con|prn|aux|nul|com[1-9]|lpt[1-9]|all|migration)
+            fail "The profile name '$AGENT_PROFILE' is reserved by Windows or by AgentNexus. Choose another, for example: agent2." ;;
+    esac
     step "Agent profile: $AGENT_PROFILE"
 fi
 
