@@ -924,6 +924,43 @@ def smoke_test(
 # ---------------------------------------------------------------------------------------------
 
 
+def _refuse_occupied_runtime_profile(
+    adapters: list[RuntimeAdapter], paths: Paths, environment: Environment
+) -> None:
+    """Stop when this runtime profile already belongs to a different AgentNexus identity.
+
+    Only reached on a fresh redemption, which by definition produces a new agent id: an existing
+    entry here therefore belongs to somebody else, and configuring over it would take another
+    agent's runtime away from it. A resume never reaches this, because a resume has its identity
+    already and reuses the entry it owns.
+
+    Checked before the invitation is read so that a name clash costs nothing. The alternative --
+    finding out after redemption -- spends a single-use capability and needs a replacement.
+    """
+    for adapter in adapters:
+        entry = adapter.existing_entry()
+        if entry is None:
+            continue
+        environment_block = entry.get("env") if isinstance(entry, dict) else None
+        owner = ""
+        if isinstance(environment_block, dict):
+            owner = str(environment_block.get("AGENTNEXUS_AGENT_ID") or "")
+        message = (
+            f"The {adapter.display_name} profile {paths.profile!r} already has an AgentNexus "
+            "agent configured, and this invitation would create a different one."
+        )
+        raise ConnectorError(
+            message,
+            exit_code=EXIT_USAGE,
+            recovery=(
+                "Nothing was changed and your invitation was not used. Choose another name and "
+                f"run the same command with it, or run `agentnexus-connector profile status "
+                f"--profile {paths.profile}` to see the agent that is already there"
+                + (f" (agent {owner})." if owner else ".")
+            ),
+        )
+
+
 def run_setup(
     *,
     paths: Paths,
@@ -931,8 +968,13 @@ def run_setup(
     environment: Environment,
     runtime: str | None = None,
     soul_mode: str = "ask",
+    adapters: list[RuntimeAdapter] | None = None,
 ) -> int:
-    """Run, or resume, the whole setup for one profile. Returns a process exit code."""
+    """Run, or resume, the whole setup for one profile. Returns a process exit code.
+
+    `adapters` is a test seam, in the same spirit as `Environment`: standing in a runtime beats a
+    suite that installs Hermes. A real run passes nothing and the adapters are selected below.
+    """
     out = environment.stdout
     out.write("AgentNexus Connector\n")
     out.write(f"  Profile: {paths.profile} ({paths.isolation} runtime context)\n")
@@ -959,8 +1001,7 @@ def run_setup(
     out.write("  Prerequisites present\n")
 
     context = paths.runtime_context()
-    context.prepare()
-    adapters = select_adapters(runtime, environment, context)
+    adapters = adapters if adapters is not None else select_adapters(runtime, environment, context)
 
     if state.stage == Stage.COMPLETE:
         out.write("\nSetup already completed on this machine. Re-checking the connection.\n")
@@ -978,8 +1019,14 @@ def run_setup(
             signer = load_private_key_file(Path(state.private_key_path))
         except KeyHandlingError as error:
             raise ConnectorError(str(error), exit_code=EXIT_KEY) from error
+        context.prepare()
         out.write(f"\nResuming the setup for {identity.handle}\n")
     else:
+        # Before anything is asked for or spent: a runtime profile of this name that already
+        # holds somebody else's AgentNexus entry is a collision, and redeeming first would burn a
+        # single-use invitation to discover a name clash.
+        _refuse_occupied_runtime_profile(adapters, paths, environment)
+        context.prepare()
         out.write("\nAutonomy attestation (requirement G-004)\n")
         out.write(f"{ATTESTATION_STATEMENT_V1}\n")
         _announce_new_profile(paths, environment)
