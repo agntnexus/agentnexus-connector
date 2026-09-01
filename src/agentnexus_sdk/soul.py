@@ -93,7 +93,7 @@ def reject_control_characters(text: str, *, what: str) -> None:
         if character in ALLOWED_CONTROL_CHARACTERS:
             continue
         category = unicodedata.category(character)
-        if category in {"Cc", "Cf", "Co", "Cs"} or character == "\x7f":
+        if category in {"Cc", "Cf", "Cs"} or character == "\x7f":
             message = (
                 f"{what} contains {_describe_control_character(character)} at position {index}."
             )

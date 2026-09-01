@@ -41,6 +41,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -98,6 +99,7 @@ from agentnexus_sdk.soul import SoulError
 
 #: The state file's own schema. A newer one stops rather than guessing what a field meant.
 STATE_SCHEMA_VERSION: Final = 1
+PERSONALITY_SCHEMA_VERSION: Final = "agentnexus-personality-v1"
 
 #: Ports this setup may open. TCP/22 is deliberately absent: the connector never needs SSH, and a
 #: preflight that quietly probed it would suggest the applicant needs shell access, which is the
@@ -182,6 +184,11 @@ class Paths:
     def backups(self) -> Path:
         """Copies of runtime configuration taken before this setup changes it."""
         return self.root / "backups"
+
+    @property
+    def personality_staging(self) -> Path:
+        """Private resumable staging for the exact draft fetched by this profile."""
+        return self.root / "staging" / "personality-draft.json"
 
     @property
     def runtime_home(self) -> Path:
@@ -978,6 +985,251 @@ def smoke_test(
         ) from error
 
 
+@dataclass(frozen=True, slots=True)
+class WaitingPersonalityDraft:
+    """The exact private draft version staged for one local profile."""
+
+    draft_id: str
+    version: int
+    schema_version: str
+    answers: dict[str, str]
+    installed_digest: str | None = None
+
+    def document(self) -> dict[str, Any]:
+        """Return the private staging document; callers must never log it."""
+        return {
+            "draft_id": self.draft_id,
+            "version": self.version,
+            "schema_version": self.schema_version,
+            "answers": self.answers,
+            "installed_digest": self.installed_digest,
+        }
+
+
+def _parse_personality_draft(value: object) -> WaitingPersonalityDraft:
+    """Refuse a delivered shape or schema this connector cannot render exactly."""
+    if not isinstance(value, dict) or set(value) != {
+        "draft_id",
+        "version",
+        "schema_version",
+        "answers",
+    }:
+        raise ConnectorError(
+            "The private personality draft does not match this connector's contract.",
+            exit_code=EXIT_RUNTIME,
+            recovery="Update the connector and resume setup; your invitation is not needed again.",
+        )
+    try:
+        uuid.UUID(str(value["draft_id"]))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ConnectorError(
+            "The private personality draft has an invalid identifier.",
+            exit_code=EXIT_RUNTIME,
+        ) from error
+    version = value["version"]
+    schema_version = value["schema_version"]
+    answers = value["answers"]
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version < 1
+        or schema_version != PERSONALITY_SCHEMA_VERSION
+        or not isinstance(answers, dict)
+    ):
+        raise ConnectorError(
+            "The private personality draft uses an unsupported version or shape.",
+            exit_code=EXIT_RUNTIME,
+            recovery="Update the connector and resume setup; your invitation is not needed again.",
+        )
+    questions = {question.key: question for question in soul.QUESTIONS}
+    cleaned: dict[str, str] = {}
+    for key, raw in answers.items():
+        if not isinstance(key, str) or key not in questions or not isinstance(raw, str):
+            raise ConnectorError(
+                "The private personality draft contains an unknown field.",
+                exit_code=EXIT_RUNTIME,
+            )
+        question = questions[key]
+        optional = dataclasses.replace(question, required=False)
+        try:
+            answer = soul.validate_answer(optional, raw)
+        except SoulError as error:
+            raise ConnectorError(
+                "The private personality draft contains text this connector will not render.",
+                exit_code=EXIT_RUNTIME,
+            ) from error
+        if key == "identity" and ("\n" in answer or len(answer) > 400):
+            raise ConnectorError(
+                "The private personality draft contains an invalid identity answer.",
+                exit_code=EXIT_RUNTIME,
+            )
+        if answer:
+            cleaned[key] = answer
+    if not cleaned or sum(len(key) + len(answer) for key, answer in cleaned.items()) > 12_000:
+        raise ConnectorError(
+            "The private personality draft is empty or too large.", exit_code=EXIT_RUNTIME
+        )
+    return WaitingPersonalityDraft(
+        draft_id=str(value["draft_id"]),
+        version=version,
+        schema_version=schema_version,
+        answers=cleaned,
+    )
+
+
+def _write_personality_stage(path: Path, draft: WaitingPersonalityDraft) -> None:
+    """Atomically stage private answers under the profile's own hardened directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    soul.require_real_location(path)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    payload = (json.dumps(draft.document(), sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, payload)
+    finally:
+        os.close(descriptor)
+    try:
+        if os.name == "posix":
+            os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _acknowledge_personality(client: AgentNexusClient, draft: WaitingPersonalityDraft) -> None:
+    response = client.signed_read_post(
+        "/agent-api/v1/personality-draft/acknowledge",
+        {
+            "draft_id": draft.draft_id,
+            "version": draft.version,
+            "schema_version": draft.schema_version,
+        },
+    )
+    if response.payload.get("acknowledged") is not True:
+        raise ConnectorError(
+            "The server did not confirm the personality draft acknowledgement.",
+            exit_code=EXIT_CONNECTIVITY,
+        )
+
+
+def offer_delivered_soul(
+    *,
+    paths: Paths,
+    adapters: list[RuntimeAdapter],
+    identity: Identity,
+    signer: Ed25519Signer,
+    endpoints: Endpoints,
+    environment: Environment,
+) -> bool:
+    """Fetch, stage, preview, install and acknowledge a website-authored soul."""
+    supported = [adapter for adapter in adapters if adapter.name == "hermes"]
+    if not supported:
+        return False
+    options = ClientOptions(
+        base_url=endpoints.agent_api_url,
+        public_base_url=endpoints.public_api_url,
+        observer_base_url=endpoints.observer_url,
+    )
+    with AgentNexusClient(
+        agent_id=identity.agent_id, key_id=identity.key_id, signer=signer, options=options
+    ) as client:
+        response = client.signed_get("/agent-api/v1/personality-draft")
+        raw = response.payload.get("draft")
+        if raw is None:
+            paths.personality_staging.unlink(missing_ok=True)
+            return False
+        draft = _parse_personality_draft(raw)
+
+        # Preserve a verified-write marker across an acknowledgement outage, but only for the
+        # same exact immutable server version. Answers still come from the fresh signed response.
+        if paths.personality_staging.is_file():
+            try:
+                staged = json.loads(paths.personality_staging.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                staged = None
+            if (
+                isinstance(staged, dict)
+                and staged.get("draft_id") == draft.draft_id
+                and staged.get("version") == draft.version
+                and staged.get("schema_version") == draft.schema_version
+                and isinstance(staged.get("installed_digest"), str)
+            ):
+                draft = dataclasses.replace(draft, installed_digest=staged["installed_digest"])
+        _write_personality_stage(paths.personality_staging, draft)
+
+        adapter = supported[0]
+        location = adapter.soul_location()
+        current = soul.read_existing_soul(location.path)
+        if (
+            draft.installed_digest
+            and current is not None
+            and soul.soul_digest(current) == draft.installed_digest
+        ):
+            _acknowledge_personality(client, draft)
+            paths.personality_staging.unlink(missing_ok=True)
+            environment.stdout.write(
+                "\n  Confirmed the previously installed private personality draft.\n"
+            )
+            return True
+
+        environment.stdout.write(
+            "\nA private personality draft from this agent's application is waiting.\n"
+            "  It will be rendered locally and shown as an exact diff before any write.\n"
+            "    1  preview it and choose whether to install\n"
+            "    2  leave it waiting for a later setup run (default)\n"
+            "    3  discard it permanently without installing\n"
+        )
+        try:
+            choice = environment.ask("  Choose 1-3 [2]: ").strip() or "2"
+        except (EOFError, OSError):
+            environment.stdout.write(
+                "\n  No terminal to ask on, so the private draft remains waiting.\n"
+            )
+            choice = "2"
+        if choice == "3":
+            discarded = client.signed_read_post(
+                "/agent-api/v1/personality-draft/discard", {"draft_id": draft.draft_id}
+            )
+            if discarded.payload.get("discarded") is not True:
+                raise ConnectorError(
+                    "The server did not confirm the personality draft discard.",
+                    exit_code=EXIT_CONNECTIVITY,
+                )
+            paths.personality_staging.unlink(missing_ok=True)
+            environment.stdout.write("  The private personality draft was discarded.\n")
+            return True
+        if choice != "1":
+            environment.stdout.write("  Left waiting; nothing local was changed.\n")
+            return True
+
+        proposed = soul.render_soul(draft.answers)
+        result = _apply_soul(
+            paths=paths,
+            adapter=adapter,
+            environment=environment,
+            proposed=proposed,
+            origin="the private application questionnaire",
+        )
+        if result != EXIT_OK:
+            return True
+        written = soul.read_existing_soul(location.path)
+        managed = _managed_digest(paths)
+        if written is None or managed is None or soul.soul_digest(written) != managed:
+            raise ConnectorError(
+                "The installed personality draft did not verify after writing.",
+                exit_code=EXIT_RUNTIME,
+            )
+        installed = dataclasses.replace(draft, installed_digest=managed)
+        _write_personality_stage(paths.personality_staging, installed)
+        _acknowledge_personality(client, installed)
+        paths.personality_staging.unlink(missing_ok=True)
+        environment.stdout.write("  The private server-side draft has been acknowledged.\n")
+        return True
+
+
 # ---------------------------------------------------------------------------------------------
 # The workflow
 # ---------------------------------------------------------------------------------------------
@@ -1147,7 +1399,22 @@ def run_setup(
     # soul is a convenience on top of it.
     if soul_mode != "skip":
         try:
-            offer_soul(paths=paths, adapters=adapters, environment=environment)
+            delivered = offer_delivered_soul(
+                paths=paths,
+                adapters=adapters,
+                identity=identity,
+                signer=signer,
+                endpoints=endpoints,
+                environment=environment,
+            )
+            if not delivered:
+                offer_soul(paths=paths, adapters=adapters, environment=environment)
+        except AgentNexusError as error:
+            environment.stderr.write(f"\n  Private personality delivery stopped: {error}\n")
+            environment.stderr.write(
+                "  Your agent is connected and usable. Re-run setup later; it resumes without "
+                "the invitation.\n"
+            )
         except (SoulError, RuntimeIntegrationError, ProfileError) as error:
             environment.stderr.write(f"\n  Soul setup stopped: {error}\n")
             recovery = getattr(error, "recovery", None)
