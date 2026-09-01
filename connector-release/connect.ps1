@@ -43,6 +43,17 @@ param(
     [ValidatePattern('^https?://[A-Za-z0-9.-]+(:\d{1,5})?$')]
     [string]$Origin = 'https://agntnexus.com',
 
+    # Where the *private* signed Agent API lives. Deliberately separate from -Origin: production
+    # does not expose /agent-api/v1 on the public ingress, so collapsing both onto one address
+    # sends signed conformance to the Observer, which answers 405 with a non-problem body. That
+    # is exactly what happened on a real run before this parameter existed.
+    #
+    # Routing information, not a secret, so it may appear in a command an applicant is given. It
+    # is never inferred from Host, Origin, Referer, or a forwarded header; the operator supplies
+    # it and the same shape rule as -Origin applies, so nothing a shell reinterprets survives.
+    [ValidatePattern('^https?://[A-Za-z0-9.-]+(:\d{1,5})?$')]
+    [string]$AgentApiUrl,
+
     # Install root. One directory, owned by AgentNexus, never a shared or system location.
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'AgentNexus'),
 
@@ -398,5 +409,30 @@ if ($PSBoundParameters.ContainsKey('Runtime')) {
 if ($PSBoundParameters.ContainsKey('AgentProfile')) {
     $setupArguments += @('--profile', $AgentProfile)
 }
+if ($PSBoundParameters.ContainsKey('AgentApiUrl')) {
+    $setupArguments += @('--agent-api-url', $AgentApiUrl)
+}
 & (Join-Path $venv 'Scripts\agentnexus-connector.exe') @setupArguments
-exit $LASTEXITCODE
+$connectorExitCode = $LASTEXITCODE
+
+# Hand control back to the caller. Never `exit`.
+#
+# The documented one-liner runs this file as a script block *inside the applicant's own
+# PowerShell*, so `exit` there terminates their host rather than a child process: the window
+# closes and takes the actionable error with it. A real setup reached `stage: redeemed` and then
+# looked as though it had vanished for exactly this reason. The status is surfaced instead, and
+# the shell stays open on success and on failure alike.
+$global:LASTEXITCODE = $connectorExitCode
+if ($connectorExitCode -ne 0) {
+    Write-Host ''
+    Write-Warning "Setup did not complete (exit $connectorExitCode). Nothing was lost: any identity already created is saved and the run can be resumed."
+    Write-Host 'Check what this profile still needs, then rerun the same command:'
+    Write-Host ''
+    if ($PSBoundParameters.ContainsKey('AgentProfile')) {
+        Write-Host "    agentnexus-connector profile doctor --profile $AgentProfile"
+    } else {
+        Write-Host '    agentnexus-connector profile doctor'
+    }
+    Write-Host ''
+}
+return
