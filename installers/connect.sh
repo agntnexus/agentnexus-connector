@@ -35,6 +35,11 @@ RUNTIME="${AGENTNEXUS_RUNTIME:-}"
 # state, backups and runtime context. The Windows loader spells this `-AgentProfile`. Not a secret,
 # but it becomes a directory name, so it is validated below before the first fetch.
 AGENT_PROFILE="${AGENTNEXUS_PROFILE:-}"
+# Where the *private* signed Agent API lives, kept separate from ORIGIN for the same reason
+# the Windows loader keeps them apart: production does not expose /agent-api/v1 on the public
+# ingress, so one collapsed address sends signed conformance to the Observer. Routing
+# information rather than a secret, and never inferred from a header.
+agent_api_url="${AGENTNEXUS_AGENT_API_URL:-}"
 SKIP_SETUP="${AGENTNEXUS_SKIP_SETUP:-0}"
 
 # The release public key, as the two coordinates the Windows loader embeds. Replaced at release
@@ -52,6 +57,17 @@ case "$RUNTIME" in
     hermes|openclaw|both|'') ;;
     *) fail "AGENTNEXUS_RUNTIME must be hermes, openclaw, or both; got '$RUNTIME'." ;;
 esac
+
+# Same shape as the origin: scheme, host, optional port, and nothing a shell could reinterpret.
+if [ -n "$agent_api_url" ]; then
+    case "$agent_api_url" in
+        http://*|https://*) ;;
+        *) fail "AGENTNEXUS_AGENT_API_URL must be an http(s) URL; got '$agent_api_url'." ;;
+    esac
+    case "$agent_api_url" in
+        *[!A-Za-z0-9:/.-]*) fail "AGENTNEXUS_AGENT_API_URL contains an unsupported character." ;;
+    esac
+fi
 
 # The one canonical AgentNexus profile grammar, in the form `sh` has: lower-case letters and
 # digits, starting with a letter, 1 to 32 characters. Identical to connect.ps1 and to profiles.py,
@@ -86,6 +102,19 @@ fi
 for tool in curl openssl python3; do
     command -v "$tool" >/dev/null 2>&1 || fail "$tool is required. Install it and re-run."
 done
+if [ -n "$agent_api_url" ]; then
+    python3 - "$agent_api_url" <<'PYTHON'
+import re
+import sys
+
+value = sys.argv[1]
+if re.fullmatch(r"https?://[A-Za-z0-9.-]+(?::\d{1,5})?", value) is None:
+    raise SystemExit(
+        "connect: AGENTNEXUS_AGENT_API_URL must be an http(s) origin with no path, "
+        "query, fragment, credentials, or shell metacharacters."
+    )
+PYTHON
+fi
 command -v hermes >/dev/null 2>&1 || \
     step 'Hermes was not found on PATH; the connector will tell you exactly what to install.'
 
@@ -244,5 +273,10 @@ if [ -n "$RUNTIME" ]; then
 fi
 if [ -n "$AGENT_PROFILE" ]; then
     set -- "$@" --profile "$AGENT_PROFILE"
+fi
+# The private signed Agent API, separate from the public origin for the same reason the Windows
+# loader keeps them apart: production does not publish /agent-api/v1 on the public ingress.
+if [ -n "$agent_api_url" ]; then
+    set -- "$@" --agent-api-url "$agent_api_url"
 fi
 exec "$VENV/bin/agentnexus-connector" "$@"

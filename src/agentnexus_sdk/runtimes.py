@@ -324,6 +324,15 @@ class RuntimeAdapter(Protocol):
         ...
 
 
+#: What Hermes' own confirmation prompts take as their documented default.
+#:
+#: `mcp remove` asks `Remove server '<name>'? [Y/n]`, and `mcp add` asks `Enable all N tools?
+#: [Y/n/select]`. Neither has a flag to skip it, and both read from stdin. An empty line accepts
+#: the default in each case, which is what a non-interactive run wants: remove the entry we are
+#: replacing, and enable the tools of the server we just registered.
+CONFIRM_DEFAULT: Final = "\n"
+
+
 def _run(
     runner: Any,
     arguments: list[str],
@@ -345,15 +354,33 @@ def _run(
     extra: dict[str, Any] = {"input": stdin} if stdin is not None else {}
     if env is not None:
         extra["env"] = env
-    completed: subprocess.CompletedProcess[str] = runner(
-        arguments,
-        capture_output=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-        timeout=timeout,
-        **extra,
-    )
+    try:
+        completed: subprocess.CompletedProcess[str] = runner(
+            arguments,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=timeout,
+            **extra,
+        )
+    except subprocess.TimeoutExpired as error:
+        # A hung runtime is a normal failure, not a crash. Letting `TimeoutExpired` escape put a
+        # Python traceback in front of an applicant who then had no idea whether their identity
+        # had survived — and on Windows the trace was the last thing on screen before the window
+        # closed. The command is named because it is the useful part; nothing else about it is.
+        name = Path(arguments[0]).name if arguments else "the runtime"
+        message = (
+            f"{name} did not respond within {timeout:.0f} seconds and was stopped. "
+            "It may be waiting for an answer to a prompt this connector cannot see."
+        )
+        raise RuntimeIntegrationError(
+            message,
+            recovery=(
+                "Run the same command yourself in a terminal to see what it is asking, then "
+                "re-run setup for this profile. Nothing was changed."
+            ),
+        ) from error
     return completed
 
 
@@ -563,15 +590,51 @@ class HermesAdapter:
             backup = backup.with_suffix(".yaml")
             shutil.copy2(config, backup)
 
+        # Everything from here on can leave the configuration part-changed, so every failure —
+        # including a runtime that hangs and is stopped — restores the backup before it is
+        # reported. Removing our old entry and failing to add the new one would otherwise leave
+        # the profile with no AgentNexus server at all.
+        try:
+            return self._replace_entry(executable, spec, existing=existing, backup=backup)
+        except RuntimeIntegrationError:
+            self.rollback(backup)
+            raise
+
+    def _replace_entry(
+        self,
+        executable: str,
+        spec: ServerSpec,
+        *,
+        existing: dict[str, Any] | None,
+        backup: Path | None,
+    ) -> ConfigurationOutcome:
+        """Remove any previous entry and register this one. Caller restores the backup on error."""
         if existing is not None:
             # Replacing our own earlier entry rather than adding beside it: `hermes mcp add`
             # refuses a duplicate name, and two AgentNexus servers in one profile is exactly
             # the duplication to avoid.
-            _run(
+            removal = _run(
                 self._runner,
                 self._command(executable, "mcp", "remove", self._server_name),
+                # Hermes v0.20.6 asks `Remove server '<name>'? [Y/n]` and offers no flag to skip
+                # it. With captured output the prompt is invisible, and with no stdin the child
+                # waits for an answer that never comes until the timeout. A bare newline takes the
+                # documented default, which is the answer we want.
+                stdin=CONFIRM_DEFAULT,
                 env=self._environment(),
             )
+            # Verified rather than assumed: `mcp add` refuses a duplicate name, so continuing
+            # after a removal that silently failed would fail confusingly one step later.
+            if removal.returncode != 0 or self.existing_entry() is not None:
+                detail = (removal.stderr or removal.stdout or "").strip()[-200:]
+                message = f"The previous `{self._server_name}` entry could not be removed: {detail}"
+                raise RuntimeIntegrationError(
+                    message,
+                    recovery=(
+                        f"Run `hermes mcp remove {self._server_name}` yourself, then re-run "
+                        "setup for this profile."
+                    ),
+                )
 
         # Hermes v0.20.6 discovers the server's tools and then asks, with no flag to skip it:
         #   "Enable all 10 tools? [Y/n/select]"  — and, if the probe failed instead,
@@ -726,6 +789,8 @@ class HermesAdapter:
         completed = _run(
             self._runner,
             self._command(executable, "mcp", "remove", self._server_name),
+            # Same confirmation prompt as the replacement path above.
+            stdin=CONFIRM_DEFAULT,
             env=self._environment(),
         )
         if self.existing_entry() is None:

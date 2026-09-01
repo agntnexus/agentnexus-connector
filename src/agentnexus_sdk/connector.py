@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, TextIO
+from urllib.parse import urlsplit
 
 from agentnexus_sdk import soul
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions
@@ -284,6 +285,22 @@ class Endpoints:
         return parsed.port or (443 if parsed.scheme == "https" else 80)
 
 
+def _entry_point_directory() -> Path | None:
+    """Return the directory this process's console script was launched from, if there is one.
+
+    `sys.argv[0]` is the console script a packaged install created, so its parent is the
+    `Scripts`/`bin` directory holding every sibling entry point of the same wheel. Returns `None`
+    when the connector was started some other way (``python -m``, a test), where `PATH` discovery
+    is the right answer instead.
+    """
+    try:
+        candidate = Path(sys.argv[0]).resolve()
+    except (OSError, ValueError, IndexError):  # pragma: no cover - defensive
+        return None
+    parent = candidate.parent
+    return parent if parent.is_dir() else None
+
+
 @dataclass
 class Environment:
     """Everything setup touches outside its own directory, injected so a test can stand it in.
@@ -298,6 +315,17 @@ class Environment:
     prompt: Callable[[str], str] = getpass.getpass
     which: Callable[[str], str | None] = shutil.which
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
+    #: Where this connector's own entry points live, used to find its packaged siblings.
+    #:
+    #: A packaged install puts `agentnexus-agent-mcp` next to `agentnexus-connector` in the
+    #: virtual environment's `Scripts`/`bin`. Running the connector by absolute path does not add
+    #: that directory to the parent shell's `PATH`, so `shutil.which` alone reported an executable
+    #: visibly beside it as missing.
+    #:
+    #: `None` means "no packaged installation to look in", which is the development and test
+    #: layout: `PATH` discovery is then the right answer. `main` sets it from `sys.argv[0]` for a
+    #: real run, so this never depends on whichever process happens to be executing.
+    executable_directory: Path | None = None
     tcp_probe: Callable[[str, int, float], bool] | None = None
     python_version: tuple[int, int] = field(default_factory=lambda: sys.version_info[:2])
     system: str = field(default_factory=platform.system)
@@ -520,6 +548,127 @@ def redeem(
 # ---------------------------------------------------------------------------------------------
 
 
+#: The packaged MCP entry point, named once so the two lookups cannot disagree.
+MCP_EXECUTABLE_NAME: Final = "agentnexus-agent-mcp"
+
+#: Origins that are a developer's own machine rather than a deployment.
+_LOCAL_HOSTS: Final = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})  # noqa: S104
+
+
+def resolve_mcp_executable(environment: Environment) -> str:
+    """Return the absolute path of this connector's own MCP server executable.
+
+    Sibling first, `PATH` second. That order is the fix for a real packaging defect: the wheel
+    installs `agentnexus-agent-mcp` beside `agentnexus-connector`, but launching the connector by
+    absolute path leaves that directory off the caller's `PATH`, so a `which`-only lookup failed
+    on an executable that was present all along. Applicants must not have to edit `PATH` to
+    install an agent.
+
+    Whatever is found is verified before it is handed to a runtime: it must be a regular file, and
+    a `PATH` hit must not claim to be the sibling while living somewhere else. A runtime
+    configuration records this path and spawns it later, so an unchecked value here would be a
+    command somebody else could arrange to have run.
+    """
+    directory = environment.executable_directory
+    if directory is not None:
+        for suffix in (".exe", "") if os.name == "nt" else ("", ".exe"):
+            candidate = directory / f"{MCP_EXECUTABLE_NAME}{suffix}"
+            if candidate.is_file() and (os.name == "nt" or os.access(candidate, os.X_OK)):
+                return str(candidate)
+
+    found = environment.which(MCP_EXECUTABLE_NAME)
+    if found is not None:
+        if directory is None:
+            # No packaged installation to contain the lookup to: this is the development layout,
+            # and `shutil.which` has already checked that what it returned exists and can be run.
+            return found
+        path = Path(found)
+        if path.resolve().parent != directory.resolve():
+            # A development layout has no installation directory to compare against. A packaged
+            # one does, and a `PATH` entry pointing outside it is not this connector's sibling.
+            message = (
+                f"{MCP_EXECUTABLE_NAME} was found on PATH at {path}, which is not beside this "
+                "connector."
+            )
+            raise ConnectorError(
+                message,
+                exit_code=EXIT_RUNTIME,
+                recovery=(
+                    "Re-run the bootstrap loader so the runtime is configured with this "
+                    "installation's own MCP server."
+                ),
+            )
+        return str(path)
+
+    message = "The AgentNexus MCP server executable was not found beside this connector."
+    raise ConnectorError(
+        message,
+        exit_code=EXIT_RUNTIME,
+        recovery="Re-run the bootstrap loader; the connector install appears incomplete.",
+    )
+
+
+def endpoints_for(
+    *,
+    origin: str,
+    agent_api_url: str | None,
+    onboarding_base_url: str | None,
+    public_api_url: str | None,
+    observer_url: str | None,
+) -> Endpoints:
+    """Resolve the four addresses setup talks to, keeping the private plane separate.
+
+    The public origin is never used as the private Agent API endpoint on a public deployment.
+    Production deliberately does not publish `/agent-api/v1` on the public ingress, so collapsing
+    both onto one address sends a signed conformance request to the Observer, which answers 405
+    with a non-problem body — exactly what a real run hit. The endpoint is supplied by the loader
+    as routing information; it is never inferred from a header or from the site origin.
+
+    A loopback or explicitly private origin is exempt, because the local Compose stack really does
+    serve every plane from one address and refusing it would break development for no gain.
+    """
+    resolved_origin = origin.rstrip("/")
+    resolved_agent = (agent_api_url or "").rstrip("/")
+    if not resolved_agent:
+        if _is_local_origin(resolved_origin):
+            resolved_agent = resolved_origin
+        else:
+            message = (
+                "No private Agent API endpoint was supplied, and the public site origin "
+                f"{resolved_origin!r} is not one."
+            )
+            raise ConnectorError(
+                message,
+                exit_code=EXIT_USAGE,
+                recovery=(
+                    "Re-run the command your operator gave you: it carries --agent-api-url. "
+                    "The signed agent API is not published on the public site."
+                ),
+            )
+    elif resolved_agent == resolved_origin and not _is_local_origin(resolved_origin):
+        message = (
+            f"The private Agent API endpoint {resolved_agent!r} is the public site origin. "
+            "The signed agent API is not published there."
+        )
+        raise ConnectorError(
+            message,
+            exit_code=EXIT_USAGE,
+            recovery="Ask your operator for the private agent API address for this deployment.",
+        )
+    return Endpoints(
+        onboarding_base_url=(onboarding_base_url or resolved_origin).rstrip("/"),
+        agent_api_url=resolved_agent,
+        public_api_url=(public_api_url or resolved_origin).rstrip("/"),
+        observer_url=(observer_url or resolved_origin).rstrip("/"),
+    )
+
+
+def _is_local_origin(origin: str) -> bool:
+    """Return whether this origin is a developer's own machine rather than a deployment."""
+    host = (urlsplit(origin).hostname or "").lower()
+    return host in _LOCAL_HOSTS or host.endswith(".localhost")
+
+
 def build_server_spec(
     *,
     identity: Identity,
@@ -534,14 +683,7 @@ def build_server_spec(
     invitation: a runtime configuration file is not a place for either, and both runtimes filter
     their environment before spawning a stdio server, which is why these are declared here.
     """
-    command = environment.which("agentnexus-agent-mcp")
-    if command is None:
-        message = "The AgentNexus MCP server executable was not found beside this connector."
-        raise ConnectorError(
-            message,
-            exit_code=EXIT_RUNTIME,
-            recovery="Re-run the bootstrap loader; the connector install appears incomplete.",
-        )
+    command = resolve_mcp_executable(environment)
     variables = {
         "AGENTNEXUS_AGENT_ID": identity.agent_id,
         "AGENTNEXUS_KEY_ID": identity.key_id,
@@ -1440,14 +1582,30 @@ def prepare_installation(install_root: Path, environment: Environment) -> Migrat
 # ---------------------------------------------------------------------------------------------
 
 
+def is_incomplete(summary: ProfileSummary) -> bool:
+    """Return whether this profile has an identity but nothing that can use it yet.
+
+    The state a real run ended in and nothing reported: redeemed, key on disk, `runtimes: none`.
+    It is resumable, and saying so is the difference between an applicant rerunning one command
+    and an applicant believing their agent had vanished.
+    """
+    return summary.connected and not summary.runtimes
+
+
+def resume_command(profile: str) -> str:
+    """Return the exact command that finishes an interrupted setup, carrying no invitation."""
+    return f"agentnexus-connector setup --profile {profile}"
+
+
 def _describe(summary: ProfileSummary) -> str:
     state = summary.stage or "not started"
     handle = summary.handle or "—"
     key = "key present" if summary.key_present else "NO KEY"
     runtimes = ", ".join(summary.runtimes) or "none"
+    marker = "  INCOMPLETE" if is_incomplete(summary) else ""
     return (
         f"  {summary.name:<24} {handle:<24} {state:<20} {summary.isolation:<9} "
-        f"{key}; runtimes: {runtimes}"
+        f"{key}; runtimes: {runtimes}{marker}"
     )
 
 
@@ -1463,6 +1621,11 @@ def run_profile_list(install_root: Path, environment: Environment) -> int:
     out.write(f"  {'PROFILE':<24} {'HANDLE':<24} {'STAGE':<20} {'RUNTIME':<9} STATE\n")
     for summary in summaries:
         out.write(_describe(summary) + "\n")
+    incomplete = [summary for summary in summaries if is_incomplete(summary)]
+    if incomplete:
+        out.write("\nSome profiles have an identity but no runtime configured. Finish them with:\n")
+        for summary in incomplete:
+            out.write(f"  {resume_command(summary.name)}\n")
     return EXIT_OK
 
 
@@ -1480,6 +1643,12 @@ def run_profile_status(install_root: Path, profile: str, environment: Environmen
     out.write(f"  private key: {'present' if summary.key_present else 'missing'}\n")
     out.write(f"  runtimes:    {', '.join(summary.runtimes) or 'none'}\n")
     out.write(f"  isolation:   {summary.isolation}\n")
+    if is_incomplete(summary):
+        out.write(
+            "  state:       INCOMPLETE — the identity is saved but no runtime is configured.\n"
+            "               Finish it. The invitation is already used and none is needed:\n"
+            f"                 {resume_command(summary.name)}\n"
+        )
     if record is not None and record.endpoints.get("agent_api_url"):
         out.write(f"  agent API:   {record.endpoints['agent_api_url']}\n")
     if record is not None and record.runtime.get("server_name"):
@@ -1530,6 +1699,19 @@ def run_profile_doctor(install_root: Path, profile: str, environment: Environmen
         out.write(f"  connected as {summary.handle}\n")
     else:
         out.write("  no identity yet; run setup for this profile\n")
+
+    # A redeemed identity with no configured runtime is half a setup, not a healthy profile. The
+    # real failure this catches: `no problems found` for a profile at `stage: redeemed` with
+    # `runtimes: none`, which left the applicant with no way to tell that setup had stopped.
+    if summary.connected and not summary.runtimes:
+        problems.append(
+            "This profile has an identity but no runtime is configured, so nothing can use it "
+            "yet. Setup stopped part way through. Resume it — the identity and key are already "
+            "saved, and no new invitation is needed:\n"
+            f"      agentnexus-connector setup --profile {profile}"
+        )
+    elif summary.connected:
+        out.write(f"  runtimes configured: {', '.join(summary.runtimes)}\n")
 
     record = ProfileRecord.load(paths.profile_record)
     if record is None and summary.connected:
@@ -1859,7 +2041,7 @@ def _build_parser() -> Any:
 
 def main(argv: Sequence[str] | None = None, environment: Environment | None = None) -> int:
     """Entry point for `agentnexus-connector`."""
-    environment = environment or Environment()
+    environment = environment or Environment(executable_directory=_entry_point_directory())
     namespace = _build_parser().parse_args(argv)
     install_root = namespace.install_root or default_install_root(environment)
 
@@ -1887,12 +2069,12 @@ def _run_setup_command(namespace: Any, install_root: Path, environment: Environm
         profile=profile,
         install_root=Path(install_root),
     )
-    origin = str(namespace.origin).rstrip("/")
-    endpoints = Endpoints(
-        onboarding_base_url=namespace.onboarding_base_url or origin,
-        agent_api_url=namespace.agent_api_url or origin,
-        public_api_url=namespace.public_api_url or origin,
-        observer_url=namespace.observer_url or origin,
+    endpoints = endpoints_for(
+        origin=str(namespace.origin),
+        agent_api_url=namespace.agent_api_url,
+        onboarding_base_url=namespace.onboarding_base_url,
+        public_api_url=namespace.public_api_url,
+        observer_url=namespace.observer_url,
     )
     # One profile at a time. Two runs of the same profile could otherwise interleave a key
     # creation with a redemption and produce an identity whose key is not the one on disk.
