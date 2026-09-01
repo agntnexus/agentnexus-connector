@@ -206,6 +206,62 @@ class RuntimeContext:
         return {**os.environ, **self.overlay}
 
 
+#: What a runtime prints in place of a model when a profile has none. The em dash is what
+#: real Hermes 0.20.6 uses; the others are the shapes other builds print.
+_NO_MODEL_MARKERS: Final = frozenset({"", "-", "—", "–", "none"})  # noqa: RUF001
+
+
+#: How Hermes actually decides whether a context file is loaded.
+#:
+#: Not a CLI command — there is no `hermes context scan`, and inventing one produced a gate that
+#: could never fire. `agent/prompt_builder.py::_scan_context_content` is what reads `SOUL.md`, and
+#: it delegates to `tools/threat_patterns.py::scan_for_threats(content, scope="context")`. Both
+#: names are asserted by the snippet below, so a Hermes release that moves or renames either one
+#: makes this connector refuse rather than quietly check nothing.
+HERMES_SCANNER_MODULE: Final = "tools.threat_patterns"
+HERMES_SCANNER_FUNCTION: Final = "scan_for_threats"
+HERMES_SCANNER_CALLER: Final = "agent.prompt_builder._scan_context_content"
+
+#: Marks the one line of the subprocess' output this connector parses, so that a warning or a
+#: deprecation notice printed by the runtime cannot be mistaken for a verdict.
+HERMES_SCAN_SENTINEL: Final = "AGENTNEXUS_SCAN "
+
+#: Run inside the Hermes installation's own interpreter, against the Hermes source tree.
+#:
+#: Deliberately a reproduction of `_scan_context_content`, not an approximation of it: the leading
+#: BOM is stripped exactly as that function strips it, and the scope is the same `"context"`.
+#: Anything else would answer a different question from the one Hermes asks at load time.
+HERMES_SCAN_SOURCE: Final = """
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from tools.threat_patterns import scan_for_threats
+from agent.prompt_builder import _scan_context_content as _contract
+
+content = open(sys.argv[2], encoding="utf-8").read()
+if content.startswith(chr(65279)):
+    content = content[1:]
+sys.stdout.write("AGENTNEXUS_SCAN " + json.dumps(scan_for_threats(content, scope="context")))
+"""
+
+
+@dataclass(frozen=True)
+class ModelStatus:
+    """Whether a runtime profile has a usable model provider, as the runtime itself reports it.
+
+    Three states, not two. `configured` says the runtime named a model; `known` says the runtime
+    could be asked at all. A runtime that did not answer has not said yes, and reporting that as
+    configured would reintroduce exactly the failure this type exists for: a real run reported a
+    successful setup for a profile Hermes described as `Model: —`, and the applicant's first
+    message failed with `No LLM provider configured`.
+    """
+
+    configured: bool
+    known: bool
+    detail: str
+
+
 class RuntimeIntegrationError(Exception):
     """A runtime-integration failure carrying an actionable recovery step."""
 
@@ -297,6 +353,18 @@ class RuntimeAdapter(Protocol):
 
     def configure(self, spec: ServerSpec, *, backup_directory: Path) -> ConfigurationOutcome:
         """Register or update the entry, backing up whatever it replaces."""
+        ...
+
+    def model_status(self) -> ModelStatus:
+        """Report whether this runtime profile has a usable model provider."""
+        ...
+
+    def scan_context(self, path: Path) -> list[str]:
+        """Return this runtime's own findings for a candidate context file.
+
+        An empty list means the runtime would load it. A `NotImplementedError` means this runtime
+        publishes no such check, which is missing evidence rather than a clean result.
+        """
         ...
 
     def rollback(self, backup: Path | None) -> None:
@@ -781,6 +849,178 @@ class HermesAdapter:
         if backup is not None and backup.is_file():
             shutil.copy2(backup, self._config())
 
+    def model_status(self) -> ModelStatus:
+        """Ask Hermes whether this profile has a usable model provider.
+
+        A fresh isolated profile inherits nothing: no model, no provider credentials, no gateway.
+        That is the correct behaviour — cloning another profile's credentials without being asked
+        would be worse — but it means a profile can be perfectly connected to AgentNexus and still
+        unable to answer a single message.
+
+        Parsed from `profile show`, which prints `Model: —` for a profile with none. A non-zero
+        exit is reported as *unknown* rather than unconfigured: this connector cannot tell the
+        difference between "no model" and "this Hermes build says it differently".
+        """
+        executable = self._which("hermes")
+        if executable is None:
+            return ModelStatus(configured=False, known=False, detail="Hermes is not installed.")
+        completed = _run(
+            self._runner,
+            self._command(executable, "profile", "show", self._context.profile or "default"),
+            timeout=60.0,
+            env=self._environment(),
+        )
+        if completed.returncode != 0:
+            return ModelStatus(
+                configured=False,
+                known=False,
+                detail="Hermes could not report this profile's model configuration.",
+            )
+        for line in (completed.stdout or "").splitlines():
+            stripped = line.strip()
+            if not stripped.lower().startswith("model:"):
+                continue
+            value = stripped.split(":", 1)[1].strip()
+            # Hermes prints an em dash for "none"; other builds print a hyphen or the word.
+            if value.lower() in _NO_MODEL_MARKERS:
+                return ModelStatus(configured=False, known=True, detail=stripped)
+            return ModelStatus(configured=True, known=True, detail=stripped)
+        return ModelStatus(
+            configured=False,
+            known=False,
+            detail="Hermes did not report a model for this profile.",
+        )
+
+    def scan_context(self, path: Path) -> list[str]:
+        """Ask Hermes' own scanner whether it would load this context file.
+
+        This is the gate that a real 0.20.6 run proved necessary: it installed a valid `SOUL.md`,
+        reported success, and then answered as the stock identity because Hermes had blocked the
+        file with `role_pretend`. Nothing this connector can inspect on its own would have caught
+        that — only Hermes' own verdict does.
+
+        Hermes exposes that verdict as a Python function rather than a subcommand, so this runs
+        the installation's interpreter against the installation's source tree and calls it. The
+        installation is *asked* where it lives, for the same reason `_config` asks: a guess
+        inspects one tree while the runtime loads another.
+
+        Every failure is a refusal, never a clean scan. A missing installation, an unreadable
+        install directory, an absent interpreter, a renamed scanner or an unparsable answer all
+        raise, because reporting "no findings" for a check that did not run would disable this
+        gate on exactly the installations where it does not work.
+        """
+        executable = self._which("hermes")
+        if executable is None:
+            message = "Hermes is not installed, so its context check cannot be run."
+            raise RuntimeIntegrationError(
+                message, recovery="Install Hermes, then run the soul step again."
+            )
+        root, version = self._installation()
+        interpreter = self._scanner_interpreter(root)
+        completed = _run(
+            self._runner,
+            [str(interpreter), "-c", HERMES_SCAN_SOURCE, str(root), str(path)],
+            timeout=120.0,
+            env=self._environment(),
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()[-200:]
+            raise RuntimeIntegrationError(
+                f"Hermes could not check this document: {detail}"
+                if detail
+                else "Hermes could not check this document.",
+                recovery=(
+                    f"Nothing was written. This connector calls {HERMES_SCANNER_MODULE}."
+                    f"{HERMES_SCANNER_FUNCTION} in your Hermes {version or 'installation'}; if "
+                    "that release moved it, install the soul yourself after reviewing it."
+                ),
+            )
+        return self._parse_scan(completed.stdout or "", path=path, version=version)
+
+    def _installation(self) -> tuple[Path, str | None]:
+        """Ask Hermes where it is installed and which version answered.
+
+        `hermes --version` prints an `Install directory:` line. That directory is the source tree
+        whose scanner decides what this profile loads, so it is the only tree worth scanning
+        against.
+        """
+        executable = self._which("hermes")
+        if executable is None:
+            message = "Hermes is not installed, so its context check cannot be run."
+            raise RuntimeIntegrationError(
+                message, recovery="Install Hermes, then run the soul step again."
+            )
+        completed = _run(self._runner, [executable, "--version"], timeout=60.0)
+        matched = re.search(r"v?(\d+\.\d+\.\d+)", completed.stdout or "")
+        version = matched.group(1) if matched else None
+        directory: Path | None = None
+        for line in (completed.stdout or "").splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith("install directory:"):
+                directory = Path(stripped.split(":", 1)[1].strip())
+                break
+        if directory is None or not directory.is_dir():
+            raise RuntimeIntegrationError(
+                "Hermes did not report an install directory, so its context check cannot be run.",
+                recovery=(
+                    "Nothing was written. Run `hermes --version` yourself to see what it "
+                    "reports, or install the soul yourself after reviewing it."
+                ),
+            )
+        return directory, version
+
+    def _scanner_interpreter(self, root: Path) -> Path:
+        """Return the interpreter that has Hermes' own dependencies importable.
+
+        The connector's interpreter is not a substitute: it would import a different copy of the
+        rules, or fail to import them at all, and either answer would be about the wrong runtime.
+        """
+        for relative in (
+            "venv/Scripts/python.exe",
+            "venv/bin/python",
+            ".venv/Scripts/python.exe",
+            ".venv/bin/python",
+        ):
+            candidate = root / relative
+            if candidate.exists():
+                return candidate
+        raise RuntimeIntegrationError(
+            f"No Hermes interpreter was found under {root}, so its context check cannot be run.",
+            recovery=(
+                "Nothing was written. Reinstall Hermes, or install the soul yourself after "
+                "reviewing it."
+            ),
+        )
+
+    def _parse_scan(self, stdout: str, *, path: Path, version: str | None) -> list[str]:
+        """Turn the scanner's answer into findings, refusing anything that is not an answer."""
+        for line in stdout.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith(HERMES_SCAN_SENTINEL):
+                continue
+            payload = stripped[len(HERMES_SCAN_SENTINEL) :]
+            try:
+                identifiers = json.loads(payload)
+            except ValueError as error:
+                raise RuntimeIntegrationError(
+                    "Hermes' context check returned something this connector cannot read.",
+                    recovery="Nothing was written. Install the soul yourself after reviewing it.",
+                ) from error
+            if not identifiers:
+                return []
+            # Phrased exactly as Hermes phrases it in its own log, so an applicant searching for
+            # the message they saw there finds this one.
+            return [f"Context file {path.name} blocked: {', '.join(str(i) for i in identifiers)}"]
+        raise RuntimeIntegrationError(
+            f"Hermes {version or ''} did not answer this connector's context check.".replace(
+                "  ", " "
+            ),
+            recovery=(
+                "Nothing was written. Install the soul yourself after reviewing it, or report "
+                "this Hermes version to AgentNexus."
+            ),
+        )
+
     def remove_entry(self) -> str | None:
         """Remove this profile's entry through Hermes' own CLI, and confirm it is gone."""
         executable = self._which("hermes")
@@ -1025,6 +1265,29 @@ class OpenClawAdapter:
     def existing_entry(self) -> dict[str, Any] | None:
         """Return this profile's AgentNexus MCP entry, if the runtime already has it."""
         return self._entry_named(self._server_name, environment=self._environment())
+
+    def model_status(self) -> ModelStatus:
+        """Report unknown: OpenClaw exposes no model-configuration query this connector calls.
+
+        Unknown rather than configured, for the same reason the context scanner refuses rather
+        than returning no findings: absent evidence is not evidence.
+        """
+        return ModelStatus(
+            configured=False,
+            known=False,
+            detail="OpenClaw exposes no model-configuration query this connector can call.",
+        )
+
+    def scan_context(self, path: Path) -> list[str]:
+        """Refuse, because OpenClaw publishes no context-file check this connector can call.
+
+        Saying so is the honest answer and the safe one. Returning an empty list would claim that
+        OpenClaw had accepted a document it was never shown, and that claim is exactly what the
+        real Hermes `role_pretend` failure proved a connector must not make.
+        """
+        del path
+        message = "OpenClaw publishes no context-file scanner this connector can call."
+        raise NotImplementedError(message)
 
     def _entry_named(
         self, name: str, *, environment: dict[str, str] | None

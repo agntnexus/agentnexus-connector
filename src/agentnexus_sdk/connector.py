@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, Final, TextIO
 from urllib.parse import urlsplit
 
-from agentnexus_sdk import soul
+from agentnexus_sdk import soul, soul_scan
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions
 from agentnexus_sdk.errors import AgentNexusError
 from agentnexus_sdk.onboarding import (
@@ -80,6 +80,7 @@ from agentnexus_sdk.runtimes import (
     ADAPTERS,
     PROFILE_ENVIRONMENT_VARIABLE,
     ConfigurationOutcome,
+    ModelStatus,
     RuntimeAdapter,
     RuntimeContext,
     RuntimeIntegrationError,
@@ -759,6 +760,64 @@ def verify_runtimes(adapters: list[RuntimeAdapter], environment: Environment) ->
             ) from error
 
 
+def collect_model_readiness(adapters: list[Any]) -> list[tuple[str, ModelStatus]]:
+    """Ask every configured runtime about its model provider, treating a refusal as unknown.
+
+    A runtime that raises has not said this profile is usable, and a setup that has already
+    succeeded must not be turned into a failure by a question about a separate concern. So the
+    error becomes an honest "could not be asked" rather than either a crash or a silent yes.
+    """
+    statuses: list[tuple[str, ModelStatus]] = []
+    for adapter in adapters:
+        try:
+            status = adapter.model_status()
+        except RuntimeIntegrationError as error:
+            status = ModelStatus(configured=False, known=False, detail=str(error))
+        statuses.append((adapter.display_name, status))
+    return statuses
+
+
+def report_model_readiness(
+    statuses: list[tuple[str, ModelStatus]], *, profile: str, environment: Environment
+) -> bool:
+    """Say plainly whether this profile can actually hold a conversation yet.
+
+    Separate from "connected to AgentNexus", which by this point is already true and proven by a
+    signed conformance and catch-up. The real failure this exists for: a run that reported success
+    for a profile whose first message then failed with `No LLM provider configured`. Both
+    statements were about different things, and only one of them was being made.
+
+    Returns whether every runtime reported a usable provider, so a caller can decide what to
+    print next without re-deriving it.
+    """
+    out = environment.stdout
+    ready = all(status.configured for _name, status in statuses)
+    if ready:
+        for name, status in statuses:
+            out.write(f"  {name} model: {status.detail}\n")
+        return True
+
+    out.write(
+        "\n  Connected to AgentNexus, but not yet able to hold a conversation.\n"
+        "  These are two different things, and only the first one is done:\n"
+    )
+    for name, status in statuses:
+        if status.configured:
+            out.write(f"    {name}: {status.detail}\n")
+        elif status.known:
+            out.write(f"    {name}: no model provider is configured for this profile.\n")
+        else:
+            out.write(f"    {name}: could not be asked — {status.detail}\n")
+    out.write(
+        "\n  A new profile deliberately inherits nothing from your existing ones: no model,\n"
+        "  no provider credentials, no instructions, no memories. Copying them without asking\n"
+        "  would be the wrong default. Configure this profile's provider yourself:\n"
+        f"\n    hermes -p {profile}\n\n"
+        "  and set a model there, or reuse only the provider settings you choose to.\n"
+    )
+    return False
+
+
 def select_adapters(
     requested: str | None,
     environment: Environment,
@@ -1075,6 +1134,12 @@ def run_setup(
     out.write(f"\n{names} {verb} connected to AgentNexus.\n")
     out.write(f"  Agent handle: {identity.handle}\n")
     out.write(f"  Profile: {paths.profile}\n")
+    # Before explaining how to start talking to it, say whether it can answer at all. A real run
+    # reached this line for a profile Hermes described as `Model: —`, printed instructions, and
+    # the applicant's first message then failed with `No LLM provider configured`.
+    report_model_readiness(
+        collect_model_readiness(adapters), profile=paths.profile, environment=environment
+    )
     _report_how_to_start(paths, adapters, context, environment)
 
     # The optional local step, offered only once the identity is already connected and saved. Its
@@ -1253,6 +1318,17 @@ def _apply_soul(
             _record_soul(paths, location, soul.soul_digest(proposed))
             return EXIT_OK
 
+        # The runtime's own verdict, before anything is shown. A real Hermes 0.20.6 run installed
+        # a valid soul, reported success, and then answered as the stock identity because its own
+        # scanner had blocked the file with `role_pretend`. Approving a preview of a document the
+        # runtime will silently discard wastes the one moment the applicant was paying attention.
+        vetted = soul_scan.vet(proposed, adapter=adapter, workspace=paths.root / "staging" / "scan")
+        for line in soul_scan.describe(vetted, display_name=location.runtime):
+            out.write(line + "\n")
+        if not vetted.accepted:
+            return EXIT_RUNTIME
+        proposed = vetted.text
+
         out.write(f"\n  Runtime: {location.runtime}, profile {location.profile}\n")
         out.write(f"  File:    {location.path}\n")
         if current is None:
@@ -1287,7 +1363,33 @@ def _apply_soul(
     out.write(
         "  Your AgentNexus identity and key are unchanged; a soul is local instruction text.\n"
     )
+    _explain_fresh_session(location, environment)
     return EXIT_OK
+
+
+def _explain_fresh_session(location: Any, environment: Environment) -> None:
+    """Say plainly that an existing conversation keeps the identity it started with.
+
+    Hermes persists the effective system prompt in each conversation, so replacing `SOUL.md` does
+    not — and must not — rewrite a chat that already exists: doing so would change that
+    conversation's identity halfway through and destroy its reproducibility.
+
+    In the real `gaga` run this was the difference between a correct install and an apparently
+    broken one. The profile path was right, the document was right, and continuing the existing
+    chat still answered as stock Hermes. Without this paragraph an applicant concludes the setup
+    failed.
+    """
+    out = environment.stdout
+    out.write(
+        "\n  One more thing, and it is the step people miss:\n"
+        "    Conversations you have already started keep the identity they were created with.\n"
+        "    This document applies to new ones.\n"
+        f"    Restart or refresh your {location.runtime} desktop app, then start a genuinely\n"
+        "    new session under this profile and ask it who it is.\n"
+        "    If that new session does not sound like the document above, the profile is not\n"
+        "    being loaded — run `agentnexus-connector profile doctor` rather than editing the\n"
+        "    file again.\n"
+    )
 
 
 def run_soul_init(*, paths: Paths, adapter: Any, environment: Environment) -> int:
