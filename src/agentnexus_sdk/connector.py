@@ -312,7 +312,14 @@ class Environment:
 
     stdout: TextIO = field(default_factory=lambda: sys.stdout)
     stderr: TextIO = field(default_factory=lambda: sys.stderr)
+    #: The masked reader. Exactly one thing uses it: the one-time invitation. Nothing else here
+    #: is a credential, and masking a non-secret only stops an applicant from seeing what they
+    #: typed.
     prompt: Callable[[str], str] = getpass.getpass
+    #: The ordinary visible reader, for menus, file paths, questionnaire answers, and the literal
+    #: `replace` confirmation. A real run put every one of these behind `prompt` and showed one
+    #: ellipsis per accepted line, so a typo could not be seen or corrected.
+    ask: Callable[[str], str] = input
     which: Callable[[str], str | None] = shutil.which
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
     #: Where this connector's own entry points live, used to find its packaged siblings.
@@ -823,7 +830,7 @@ def _ask_runtime(
     for name in available:
         environment.stdout.write(f"  - {built[name].display_name}\n")
     environment.stdout.write("  - both\n")
-    answer = environment.prompt("Configure which? [both]: ").strip().lower() or "both"
+    answer = environment.ask("Configure which? [both]: ").strip().lower() or "both"
     if answer not in {*available, "both"}:
         message = f"{answer!r} is not one of the options."
         raise ConnectorError(
@@ -1070,7 +1077,7 @@ def offer_soul(*, paths: Paths, adapters: list[RuntimeAdapter], environment: Env
         "    4  skip for now (default)\n"
     )
     try:
-        choice = environment.prompt("  Choose 1-4 [4]: ").strip() or "4"
+        choice = environment.ask("  Choose 1-4 [4]: ").strip() or "4"
     except (EOFError, OSError):
         # An unattended install has no terminal to answer with. Reaching here means the identity
         # is already connected and saved, so the only correct move is to change nothing and say
@@ -1088,7 +1095,7 @@ def offer_soul(*, paths: Paths, adapters: list[RuntimeAdapter], environment: Env
     if choice == "1":
         run_soul_init(paths=paths, adapter=adapter, environment=environment)
     else:
-        source = environment.prompt("  Path to the soul file: ").strip()
+        source = environment.ask("  Path to the soul file: ").strip()
         if not source:
             out.write("  No path given; nothing was changed.\n")
             return
@@ -1170,7 +1177,7 @@ def _managed_digest(paths: Paths) -> str | None:
 
 def _confirm(environment: Environment, question: str, *, expected: str) -> bool:
     """Ask for one exact word before anything is replaced. Anything else is a no."""
-    answer = environment.prompt(f"  {question} Type `{expected}` to confirm: ").strip()
+    answer = environment.ask(f"  {question} Type `{expected}` to confirm: ").strip()
     return answer == expected
 
 
@@ -1240,7 +1247,7 @@ def run_soul_init(*, paths: Paths, adapter: Any, environment: Environment) -> in
     """Ask the questionnaire and install the generated soul."""
     answers: soul.Answers = {}
     try:
-        answers = soul.ask_questionnaire(reader=environment.prompt, stdout=environment.stdout)
+        answers = soul.ask_questionnaire(reader=environment.ask, stdout=environment.stdout)
         rendered = soul.render_soul(answers)
         return _apply_soul(
             paths=paths,
