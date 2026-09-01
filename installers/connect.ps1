@@ -33,8 +33,8 @@ before any verification had happened. P-256 is verified here by the platform its
 
 The invitation is never passed to this script, and there is deliberately no parameter for one.
 The connector prompts for it after installation, with no echo, so it cannot reach a command
-line, a process listing, or PowerShell history. `-Runtime` is not a secret and may appear in a
-command an operator hands over.
+line, a process listing, or PowerShell history. Neither `-Runtime` nor `-Profile` is a secret:
+the operator may hand over the first, and the applicant chooses the second.
 #>
 [CmdletBinding()]
 param(
@@ -56,7 +56,20 @@ param(
     # given; ValidateSet refuses anything else before a single byte is downloaded. Omitted, the
     # connector asks, or uses the one runtime it finds.
     [ValidateSet('hermes', 'openclaw', 'both')]
-    [string]$Runtime
+    [string]$Runtime,
+
+    # Which named agent profile to connect. One profile is one AgentNexus identity, with its own
+    # private key, state, backups and runtime context, so this is how a second approved agent is
+    # set up on a machine that already has one. Omitted, the connector uses `default`.
+    #
+    # Not a secret, so it may appear in a command. It becomes a directory name, so it is validated
+    # here at parameter binding — before a single byte is fetched and before anything is written.
+    # Lower-case only: `Agent1` and `agent1` would be one directory on Windows and two on Linux.
+    # `(?-i)` is not decoration. ValidatePattern matches case-insensitively by default, so without
+    # it `Agent1` binds and reintroduces exactly that collision.
+    [Alias('Profile')]
+    [ValidatePattern('(?-i)^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$')]
+    [string]$AgentProfile
 )
 
 Set-StrictMode -Version Latest
@@ -74,6 +87,22 @@ $MaxManifestBytes = 65536
 $MaxArtifactBytes = 64MB
 
 function Write-Step([string]$Message) { Write-Host "  $Message" }
+
+function Assert-SafeProfileName([string]$Name) {
+    # ValidatePattern already refused separators, traversal, control characters and upper case.
+    # What it cannot express is the reserved-device list: `.../profiles/nul` looks like a
+    # directory and writes to the null device, so the profile would appear to work and keep
+    # nothing. Checked before the first fetch, so an unusable name costs no download.
+    $reserved = @(
+        'con', 'prn', 'aux', 'nul', 'clock$',
+        'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9',
+        'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9',
+        'all', 'migration'
+    )
+    if ($reserved -contains $Name) {
+        throw "The profile name '$Name' is reserved by Windows or by AgentNexus. Choose another, for example 'agent2'."
+    }
+}
 
 function Convert-FromHex([string]$Hex) {
     if ($Hex.Length % 2 -ne 0) { throw 'A hex value must have an even number of characters.' }
@@ -222,6 +251,12 @@ if ([System.Environment]::Is64BitOperatingSystem -ne $true) {
     throw 'A 64-bit Windows installation is required.'
 }
 
+# Before the manifest fetch on purpose: a name that cannot become a directory must cost nothing.
+if ($PSBoundParameters.ContainsKey('AgentProfile')) {
+    Assert-SafeProfileName $AgentProfile
+    Write-Step "Agent profile: $AgentProfile"
+}
+
 if ($null -eq (Get-Command 'hermes' -ErrorAction SilentlyContinue)) {
     # Not fatal here: the connector reports it precisely, with the one command to fix it, after it
     # has done the work that does not depend on Hermes. Failing now would waste a verified install.
@@ -341,6 +376,9 @@ Write-Host ''
 $setupArguments = @('setup', '--origin', $origin, '--install-root', $InstallRoot)
 if ($PSBoundParameters.ContainsKey('Runtime')) {
     $setupArguments += @('--runtime', $Runtime)
+}
+if ($PSBoundParameters.ContainsKey('AgentProfile')) {
+    $setupArguments += @('--profile', $AgentProfile)
 }
 & (Join-Path $venv 'Scripts\agentnexus-connector.exe') @setupArguments
 exit $LASTEXITCODE

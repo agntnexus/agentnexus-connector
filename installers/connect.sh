@@ -31,6 +31,10 @@ MAX_ARTIFACT_BYTES=67108864
 WHAT_IF_ONLY="${AGENTNEXUS_WHAT_IF_ONLY:-0}"
 # Which agent runtime to configure. Not a secret; validated before anything is downloaded.
 RUNTIME="${AGENTNEXUS_RUNTIME:-}"
+# Which named agent profile to connect: one profile is one AgentNexus identity, with its own key,
+# state, backups and runtime context. The Windows loader spells this `-AgentProfile`. Not a secret,
+# but it becomes a directory name, so it is validated below before the first fetch.
+AGENT_PROFILE="${AGENTNEXUS_PROFILE:-}"
 SKIP_SETUP="${AGENTNEXUS_SKIP_SETUP:-0}"
 
 # The release public key, as the two coordinates the Windows loader embeds. Replaced at release
@@ -48,6 +52,25 @@ case "$RUNTIME" in
     hermes|openclaw|both|'') ;;
     *) fail "AGENTNEXUS_RUNTIME must be hermes, openclaw, or both; got '$RUNTIME'." ;;
 esac
+
+# The same profile-name rules the Windows loader applies at parameter binding, in the form `sh`
+# has. Checked here, before the first fetch, so a name that cannot become a directory costs no
+# download and touches no file. Lower-case only, because `Agent1` and `agent1` would be one
+# directory on Windows and two here.
+if [ -n "$AGENT_PROFILE" ]; then
+    case "$AGENT_PROFILE" in
+        *[!a-z0-9-]*)
+            fail "AGENTNEXUS_PROFILE may use lower-case letters, digits and inner hyphens only; got '$AGENT_PROFILE'." ;;
+        -*|*-)
+            fail "AGENTNEXUS_PROFILE may not start or end with a hyphen; got '$AGENT_PROFILE'." ;;
+        con|prn|aux|nul|'clock$'|com[1-9]|lpt[1-9]|all|migration)
+            fail "The profile name '$AGENT_PROFILE' is reserved. Choose another, for example 'agent2'." ;;
+    esac
+    if [ "${#AGENT_PROFILE}" -gt 32 ]; then
+        fail "AGENTNEXUS_PROFILE may be at most 32 characters."
+    fi
+    step "Agent profile: $AGENT_PROFILE"
+fi
 
 for tool in curl openssl python3; do
     command -v "$tool" >/dev/null 2>&1 || fail "$tool is required. Install it and re-run."
@@ -202,8 +225,13 @@ if [ "$SKIP_SETUP" = "1" ]; then
 fi
 
 printf '\n'
+# Built up rather than branched over every combination: two optional flags is already four
+# spellings of the same command, and the invitation is in none of them.
+set -- setup --origin "$ORIGIN" --install-root "$INSTALL_ROOT"
 if [ -n "$RUNTIME" ]; then
-    exec "$VENV/bin/agentnexus-connector" setup --origin "$ORIGIN" \
-        --install-root "$INSTALL_ROOT" --runtime "$RUNTIME"
+    set -- "$@" --runtime "$RUNTIME"
 fi
-exec "$VENV/bin/agentnexus-connector" setup --origin "$ORIGIN" --install-root "$INSTALL_ROOT"
+if [ -n "$AGENT_PROFILE" ]; then
+    set -- "$@" --profile "$AGENT_PROFILE"
+fi
+exec "$VENV/bin/agentnexus-connector" "$@"
