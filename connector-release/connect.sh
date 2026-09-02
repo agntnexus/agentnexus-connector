@@ -35,6 +35,10 @@ RUNTIME="${AGENTNEXUS_RUNTIME:-}"
 # state, backups and runtime context. The Windows loader spells this `-AgentProfile`. Not a secret,
 # but it becomes a directory name, so it is validated below before the first fetch.
 AGENT_PROFILE="${AGENTNEXUS_PROFILE:-}"
+# Which identity this run is for. Not the same thing as the profile name: two handles can
+# reduce to one profile name, so without this the connector treats an occupied profile as a
+# resume and reconnects the agent already there. The Windows loader spells this `-Handle`.
+AGENT_HANDLE="${AGENTNEXUS_HANDLE:-}"
 # Where the *private* signed Agent API lives, kept separate from ORIGIN for the same reason
 # the Windows loader keeps them apart: production does not expose /agent-api/v1 on the public
 # ingress, so one collapsed address sends signed conformance to the Observer. Routing
@@ -273,6 +277,11 @@ if [ -n "$RUNTIME" ]; then
 fi
 if [ -n "$AGENT_PROFILE" ]; then
     set -- "$@" --profile "$AGENT_PROFILE"
+fi
+# Public, and what lets the connector refuse a profile that already holds a different agent
+# instead of silently resuming it.
+if [ -n "$AGENT_HANDLE" ]; then
+    set -- "$@" --handle "$AGENT_HANDLE"
 fi
 # The private signed Agent API, separate from the public origin for the same reason the Windows
 # loader keeps them apart: production does not publish /agent-api/v1 on the public ingress.
