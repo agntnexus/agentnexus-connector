@@ -115,6 +115,10 @@ EXIT_REDEMPTION: Final = 5
 EXIT_RUNTIME: Final = 6
 EXIT_CONNECTIVITY: Final = 7
 EXIT_NEEDS_REPLACEMENT: Final = 8
+#: `--destroy-key` was asked for and refused. Its own code, so a caller can tell a withdrawn
+#: capability apart from a mistyped command line: argparse usage errors are exit 2, and a
+#: script that treated this as "bad arguments" would retry it forever.
+EXIT_DESTRUCTION_DISABLED: Final = 9
 
 
 class Stage(StrEnum):
@@ -2269,6 +2273,44 @@ def _disconnect_runtimes(
     return removed
 
 
+def _refuse_key_destruction(profile: str) -> None:
+    """Refuse `--destroy-key` outright, before anything is read, moved or written.
+
+    **This withdraws behaviour that already shipped.** Until now `--destroy-key` deleted a private
+    key once the caller typed the profile name back, and nothing else: it never asked AgentNexus
+    whether the credential had actually been revoked. A typed confirmation proves that somebody
+    meant to run the command; it proves nothing about the server's view of the key. So the one
+    situation the flag exists for — the key is dead, delete it — was indistinguishable from the
+    situation it is most dangerous in: the key is live, the operator has not finished, and the only
+    thing that could still prove the identity belongs to its owner is about to be destroyed.
+
+    A verified replacement exists and is not enabled here. It makes one signed conformance request
+    with the key itself and accepts exactly one answer as proof, the wire code
+    `auth.key_not_active`. `auth.key_unknown` and `auth.key_agent_mismatch` are not proof — a
+    server gives the first for a key it never had, so a wrong recorded identifier would authorise a
+    deletion, and the second says the key belongs to a different agent. `auth.agent_not_active` is
+    not proof either: the agent is checked before the key, so a *suspended* agent produces it while
+    its key is still perfectly active, and suspension can be lifted. That gate has not yet been run
+    end to end against the real private Agent API, and until it has, this command deletes nothing.
+
+    Fail-closed, and deliberately not a fallback. Quietly doing the ordinary removal instead would
+    answer a request to destroy a key with a different action than the one that was asked for.
+    """
+    message = "Permanent private-key destruction is disabled in this release."
+    raise ConnectorError(
+        message,
+        exit_code=EXIT_DESTRUCTION_DISABLED,
+        recovery=(
+            "Nothing was read, moved or deleted, and your private key is exactly as it was. The "
+            "path this flag used to take deleted a key on a typed confirmation alone, without ever "
+            "checking whether AgentNexus had revoked it, so it has been withdrawn until the "
+            "verified check is proven against the real Agent API. Use `agentnexus-connector "
+            f"profile remove --profile {profile}` instead: it removes the local integration and "
+            "moves the key into quarantine, where it stays until you delete it yourself."
+        ),
+    )
+
+
 def run_profile_remove(
     install_root: Path,
     profile: str,
@@ -2304,6 +2346,9 @@ def run_profile_remove(
             exit_code=EXIT_USAGE,
             recovery="Run `agentnexus-connector profile list` to see what is there.",
         )
+
+    if destroy_key:
+        _refuse_key_destruction(profile)
 
     if destroy_key and confirm != profile:
         message = "Destroying a private key needs the profile's own name typed back."
