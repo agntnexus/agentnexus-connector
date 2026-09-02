@@ -1272,6 +1272,50 @@ def _refuse_occupied_runtime_profile(
         )
 
 
+def _refuse_a_profile_that_holds_another_identity(
+    paths: Paths, identity: Identity, expected_handle: str | None
+) -> None:
+    """Stop when this profile already belongs to an agent other than the one being installed.
+
+    The handle-to-profile mapping is not injective, and cannot be made so. A public handle may
+    contain a hyphen, an underscore, or a leading digit; a profile name may not. Reducing one to
+    the other therefore collides: `lexi_lux` and `lexilux` both reduce to `lexilux`, and `7bot`
+    and `bot` both reduce to `bot`. The approval panel only ever *proposes* the reduction, in a
+    field the operator can edit -- but a proposal accepted without reading is exactly how two
+    identities end up aimed at one directory.
+
+    What that produced without this check is worse than a name clash. `run_setup` treats a profile
+    that already holds an identity as a *resume*: it never reads an invitation, reuses the saved
+    agent id and key, and reports success. An operator who approved `lexi_lux`, accepted the
+    proposed `lexilux`, and pasted the command would watch a green run reconnect `lexilux` --
+    somebody else's agent -- while the new invitation stayed unspent and unmentioned.
+
+    `--handle` is what closes it, which is why the generated command carries the handle as well as
+    the profile. The handoff then states which identity it is for, and this compares the two before
+    anything is read or written. Nothing is normalised here and no name is invented: a collision is
+    an error the operator resolves by choosing another profile name.
+
+    A command without `--handle` keeps the previous behaviour. Those are commands generated before
+    this check existed, and refusing every one of them would strand live invitations.
+    """
+    if expected_handle is None or expected_handle == identity.handle:
+        return
+    message = (
+        f"The profile {paths.profile!r} already belongs to agent {identity.handle!r}, and this "
+        f"command is for {expected_handle!r}."
+    )
+    raise ConnectorError(
+        message,
+        exit_code=EXIT_USAGE,
+        recovery=(
+            "Nothing was changed and your invitation was not used. Two different handles can "
+            f"reduce to one profile name, so {expected_handle!r} needs a profile name of its own: "
+            "run the same command with a different -Profile value. Run `agentnexus-connector "
+            f"profile status --profile {paths.profile}` to see the agent that is already there."
+        ),
+    )
+
+
 def run_setup(
     *,
     paths: Paths,
@@ -1279,6 +1323,7 @@ def run_setup(
     environment: Environment,
     runtime: str | None = None,
     soul_mode: str = "ask",
+    expected_handle: str | None = None,
     adapters: list[RuntimeAdapter] | None = None,
 ) -> int:
     """Run, or resume, the whole setup for one profile. Returns a process exit code.
@@ -1330,6 +1375,7 @@ def run_setup(
             signer = load_private_key_file(Path(state.private_key_path))
         except KeyHandlingError as error:
             raise ConnectorError(str(error), exit_code=EXIT_KEY) from error
+        _refuse_a_profile_that_holds_another_identity(paths, identity, expected_handle)
         context.prepare()
         out.write(f"\nResuming the setup for {identity.handle}\n")
     else:
@@ -2375,6 +2421,15 @@ def _build_parser() -> Any:
         default=None,
         help="Which named agent profile to set up. Each profile is one AgentNexus identity.",
     )
+    # Which identity the command is for. Public, and load-bearing: two handles can reduce to one
+    # profile name, so without this a second agent installed under a proposed name silently
+    # resumes the first. Optional, because commands generated before it existed are still live.
+    setup.add_argument(
+        "--handle",
+        default=None,
+        dest="expected_handle",
+        help="The handle this invitation is for. Refuses a profile holding a different agent.",
+    )
     # Optional, local, and offered only after the identity is connected. `skip` is what an
     # automated run passes; the interactive default already changes nothing unless asked.
     setup.add_argument(
@@ -2508,6 +2563,7 @@ def _run_setup_command(namespace: Any, install_root: Path, environment: Environm
             environment=environment,
             runtime=namespace.runtime,
             soul_mode=namespace.soul_mode,
+            expected_handle=namespace.expected_handle,
         )
 
 

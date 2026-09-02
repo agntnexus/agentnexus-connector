@@ -83,7 +83,15 @@ param(
     # that ordering — and says exactly what connect.sh and profiles.py say, in the same sentence.
     # One rule, one message, on every surface.
     [Alias('Profile')]
-    [string]$AgentProfile
+    [string]$AgentProfile,
+
+    # Which identity this command is for.
+    #
+    # Not a secret, and not the same thing as the profile name. Two handles can reduce to one
+    # profile name - 'lexi_lux' and 'lexilux' both reduce to 'lexilux' - so without this the
+    # connector would treat an occupied profile as a resume and reconnect the agent already
+    # there, leaving the new invitation unspent. Passed through so the connector can refuse.
+    [string]$Handle
 )
 
 Set-StrictMode -Version Latest
@@ -408,6 +416,9 @@ if ($PSBoundParameters.ContainsKey('Runtime')) {
 }
 if ($PSBoundParameters.ContainsKey('AgentProfile')) {
     $setupArguments += @('--profile', $AgentProfile)
+}
+if ($PSBoundParameters.ContainsKey('Handle')) {
+    $setupArguments += @('--handle', $Handle)
 }
 if ($PSBoundParameters.ContainsKey('AgentApiUrl')) {
     $setupArguments += @('--agent-api-url', $AgentApiUrl)
