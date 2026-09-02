@@ -51,7 +51,9 @@ from urllib.parse import urlsplit
 
 from agentnexus_sdk import soul, soul_scan
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions
-from agentnexus_sdk.errors import AgentNexusError
+from agentnexus_sdk.errors import (
+    AgentNexusError,
+)
 from agentnexus_sdk.onboarding import (
     ATTESTATION_STATEMENT_V1,
     OnboardingClient,
@@ -60,19 +62,26 @@ from agentnexus_sdk.onboarding import (
 )
 from agentnexus_sdk.profiles import (
     DEFAULT_PROFILE_NAME,
+    INSTALLATION_FILE_NAME,
     LEGACY_RETIREMENT_DIRECTORY_NAME,
     MIGRATION_LOCK_NAME,
+    PROFILES_DIRECTORY_NAME,
     RETIRED_DIRECTORY_NAME,
+    RETIREMENT_FILE_NAME,
+    InstallationManifest,
     MigrationResult,
     ProfileError,
     ProfileRecord,
     ProfileSummary,
+    RetirementRecord,
     ensure_profile_directory,
+    find_retirements,
     isolation_for,
     list_profiles,
     migrate_legacy_profile,
     profile_directory,
     profile_lock,
+    soul_digest_of,
     summarise_profile,
     validate_profile_name,
     write_json_atomically,
@@ -86,6 +95,7 @@ from agentnexus_sdk.runtimes import (
     RuntimeContext,
     RuntimeIntegrationError,
     ServerSpec,
+    SoulLocation,
 )
 from agentnexus_sdk.signing import (
     Ed25519Signer,
@@ -96,6 +106,7 @@ from agentnexus_sdk.signing import (
     write_private_key_file,
 )
 from agentnexus_sdk.soul import SoulError
+from agentnexus_sdk.version import __version__
 
 #: The state file's own schema. A newer one stops rather than guessing what a field meant.
 STATE_SCHEMA_VERSION: Final = 1
@@ -1407,6 +1418,11 @@ def run_setup(
         del invitation
 
     _record_profile(paths, endpoints, context)
+    # Asked before the runtime is configured, because afterwards the profile exists either
+    # way and the answer is gone. Removal needs it to know whether
+    # `--purge-runtime-profile` would destroy something this connector made or something it
+    # merely moved into.
+    runtime_profile_existed = _runtime_profile_exists(adapters, context)
 
     out.write("\nConfiguring your agent runtime\n")
     spec = build_server_spec(
@@ -1418,6 +1434,14 @@ def run_setup(
     )
     configure_runtimes(
         adapters=adapters, spec=spec, paths=paths, state=state, environment=environment
+    )
+    _record_installation(
+        paths,
+        identity=identity,
+        state=state,
+        adapters=adapters,
+        context=context,
+        created_runtime_profile=not runtime_profile_existed,
     )
 
     out.write("\nChecking the connection\n")
@@ -1916,6 +1940,79 @@ def _record_profile(paths: Paths, endpoints: Endpoints, context: RuntimeContext)
     record.save(paths.profile_record)
 
 
+def _runtime_profile_exists(adapters: list[RuntimeAdapter], context: RuntimeContext) -> bool:
+    """Whether the runtime already had this profile before setup touched it.
+
+    Answered by asking the runtime, and answered conservatively: a runtime that cannot be asked
+    counts as "it was already there", so a later purge treats the profile as somebody else's. The
+    cost of being wrong in that direction is a directory left behind; the cost of being wrong the
+    other way is deleting a profile the applicant had before AgentNexus existed.
+    """
+    if context.hermes_profile is None:
+        return True
+    for adapter in adapters:
+        existing = getattr(adapter, "existing_profiles", None)
+        if existing is None:
+            continue
+        try:
+            if context.hermes_profile in existing():
+                return True
+        except RuntimeIntegrationError:
+            return True
+    return False
+
+
+def _record_installation(
+    paths: Paths,
+    *,
+    identity: Identity,
+    state: State,
+    adapters: list[RuntimeAdapter],
+    context: RuntimeContext,
+    created_runtime_profile: bool,
+) -> None:
+    """Record what this run created, so a later removal takes back exactly that and no more.
+
+    Written after the identity exists and the runtime is configured, because everything in it is a
+    fact about what happened rather than an intention. It is additive: `state.json` and
+    `profile.json` are untouched, so a profile written by an older connector keeps working and a
+    newer one simply knows more about itself.
+
+    Nothing secret. Identifiers the server published, the key's *path*, a server name, a flag, and
+    a digest of a document the applicant can open.
+    """
+    manifest = InstallationManifest.load(paths.root / INSTALLATION_FILE_NAME) or (
+        InstallationManifest(profile=paths.profile)
+    )
+    manifest.profile = paths.profile
+    manifest.agent_handle = identity.handle
+    manifest.agent_id = identity.agent_id
+    manifest.key_id = identity.key_id
+    manifest.runtime = ",".join(sorted(adapter.name for adapter in adapters))
+    manifest.private_key_path = str(state.private_key_path or paths.private_key)
+    manifest.mcp_server_name = context.server_name
+    manifest.created_runtime_profile = created_runtime_profile
+    manifest.connector_version = __version__
+    manifest.save(paths.root / INSTALLATION_FILE_NAME)
+
+
+def record_installed_soul(paths: Paths, location: SoulLocation) -> None:
+    """Record the soul AgentNexus just wrote, and what it looked like.
+
+    The digest is the whole point. Removal compares it against the file on disk to tell an
+    untouched document this connector wrote from one the applicant has since edited — and it keeps
+    the second, because an edited soul is their work and this connector did not write the version
+    that is there now.
+    """
+    soul = location.directory / location.filename
+    manifest = InstallationManifest.load(paths.root / INSTALLATION_FILE_NAME) or (
+        InstallationManifest(profile=paths.profile)
+    )
+    manifest.soul_path = str(soul)
+    manifest.soul_digest = soul_digest_of(soul)
+    manifest.save(paths.root / INSTALLATION_FILE_NAME)
+
+
 def _report_how_to_start(
     paths: Paths,
     adapters: list[RuntimeAdapter],
@@ -2273,6 +2370,283 @@ def _disconnect_runtimes(
     return removed
 
 
+@dataclass
+class RemovalSurvey:
+    """What is actually here, established before anything is shown or removed.
+
+    Every field is read, never assumed. Removal shows this to the applicant, decides from it what
+    it may take back, and answers "is there anything left to do" with it on a second run — which is
+    what makes the command safe to repeat after a crash.
+    """
+
+    profile: str
+    install_root: Path
+    #: Absent once a first run has finished. Its absence is a normal end state, not damage.
+    profile_root: Path | None = None
+    agent_handle: str = ""
+    agent_id: str = ""
+    key_id: str = ""
+    #: SHA-256 of the *public* key, as the server reports it. Shown before a destructive
+    #: step so the key about to go can be matched against the one an operator revoked.
+    key_fingerprint: str = ""
+    private_key: Path | None = None
+    #: Keys moved aside by an earlier run, oldest first. These are what a later run can destroy.
+    quarantined_keys: list[Path] = field(default_factory=list)
+    #: What each of those keys belongs to, read from the record written beside it. This is the
+    #: only thing that ties a quarantined key to an identity once the profile directory is gone.
+    retirements: list[RetirementRecord] = field(default_factory=list)
+    manifest: InstallationManifest | None = None
+    #: Runtime display name to whether it still holds this profile's entry.
+    entries: dict[str, bool] = field(default_factory=dict)
+    runtime_profile: Path | None = None
+    runtime_profile_name: str = ""
+    created_runtime_profile: bool = False
+    #: One of `managed`, `modified`, `unknown`, `absent`. Only `managed` is ever removed.
+    soul_state: str = "absent"
+    soul_path: Path | None = None
+    #: Set when the runtime could not be asked. Removal continues locally and says so.
+    runtime_error: str = ""
+    #: Where the signed agent API lives, kept so the retirement record can carry it forward.
+    agent_api_url: str = ""
+
+    @property
+    def has_local_profile(self) -> bool:
+        """Whether there is still an AgentNexus profile directory to take away."""
+        return self.profile_root is not None
+
+    @property
+    def has_anything(self) -> bool:
+        """Whether a run has anything left to do at all."""
+        return self.has_local_profile or bool(self.quarantined_keys) or any(self.entries.values())
+
+
+def record_fingerprint(records: list[RetirementRecord]) -> str:
+    """Return the fingerprint recorded for a quarantined key, when there is exactly one."""
+    fingerprints = {record.key_fingerprint for record in records if record.key_fingerprint}
+    return fingerprints.pop() if len(fingerprints) == 1 else ""
+
+
+def _recorded_agent_api_url(paths: Paths) -> str:
+    """Read this profile's signed agent API address from the record setup wrote.
+
+    Kept so the retirement record can carry it past the deletion of the profile directory: without
+    it, a later run has no address to send the proof-of-retirement probe to, and would have to
+    either guess one or skip the check.
+    """
+    record = ProfileRecord.load(paths.profile_record)
+    return str(record.endpoints.get("agent_api_url", "")) if record is not None else ""
+
+
+def _survey_for_removal(
+    install_root: Path, profile: str, environment: Environment
+) -> RemovalSurvey:
+    """Read the whole of this profile's footprint without changing any of it.
+
+    Deliberately tolerant. A runtime that cannot be asked, a manifest that is missing, a state file
+    from an interrupted run — none of these is a reason to refuse, because the applicant is trying
+    to *remove* this agent and a survey that fails closed would trap them. What the survey cannot
+    establish becomes a "keep it" decision later, never a "delete it anyway".
+    """
+    paths = Paths.for_profile(install_root, profile)
+    survey = RemovalSurvey(profile=profile, install_root=Path(install_root))
+
+    if paths.root.is_dir():
+        survey.profile_root = paths.root
+        state = State.load(paths.state_file)
+        survey.agent_handle = state.handle or ""
+        survey.agent_id = state.agent_id or ""
+        survey.key_id = state.key_id or ""
+        if paths.private_key.is_file():
+            survey.private_key = paths.private_key
+            with contextlib.suppress(KeyHandlingError, OSError):
+                survey.key_fingerprint = load_private_key_file(
+                    paths.private_key
+                ).public_key_fingerprint
+        survey.agent_api_url = _recorded_agent_api_url(paths)
+        survey.manifest = InstallationManifest.load(paths.root / INSTALLATION_FILE_NAME)
+
+    survey.retirements = find_retirements(install_root, profile)
+    survey.quarantined_keys = [
+        Path(record.private_key_path)
+        for record in survey.retirements
+        if record.state == "quarantined" and Path(record.private_key_path).is_file()
+    ]
+    survey.key_fingerprint = survey.key_fingerprint or record_fingerprint(survey.retirements)
+    for record in survey.retirements:
+        # A removed profile has no `state.json` left. Its identifiers are here instead, written
+        # while they were still known rather than inferred afterwards from a directory name.
+        survey.agent_handle = survey.agent_handle or record.agent_handle
+        survey.agent_id = survey.agent_id or record.agent_id
+        survey.key_id = survey.key_id or record.key_id
+    manifest = survey.manifest
+    if manifest is not None:
+        survey.agent_handle = survey.agent_handle or manifest.agent_handle
+        survey.agent_id = survey.agent_id or manifest.agent_id
+        survey.key_id = survey.key_id or manifest.key_id
+        survey.created_runtime_profile = manifest.created_runtime_profile
+
+    context = paths.runtime_context()
+    survey.runtime_profile_name = context.hermes_profile or ""
+    for name, factory in sorted(ADAPTERS.items()):
+        adapter = factory(which=environment.which, runner=environment.run, context=context)
+        if not adapter.detect().installed:
+            continue
+        try:
+            survey.entries[adapter.display_name] = adapter.existing_entry() is not None
+        except RuntimeIntegrationError as error:
+            survey.entries[adapter.display_name] = False
+            survey.runtime_error = str(error)
+            continue
+        if name != "hermes" or context.hermes_profile is None:
+            continue
+        try:
+            location = adapter.soul_location()
+        except RuntimeIntegrationError as error:
+            # A missing runtime profile reports here. That is an ordinary state after a partial
+            # run, so it is recorded and not raised.
+            survey.runtime_error = survey.runtime_error or str(error)
+            continue
+        survey.runtime_profile = location.directory
+        soul = location.directory / location.filename
+        survey.soul_path = soul if soul.is_file() else None
+        survey.soul_state = _classify_soul(soul, manifest)
+    return survey
+
+
+def _classify_soul(soul: Path, manifest: InstallationManifest | None) -> str:
+    """Decide whether this soul is still the one AgentNexus wrote.
+
+    Four answers, and the difference between the last two is the point of the function:
+
+    * `absent` — there is no file.
+    * `managed` — AgentNexus wrote it and the bytes are unchanged since. Only this is removed.
+    * `modified` — AgentNexus wrote it and somebody has edited it since. Kept.
+    * `unknown` — nothing here can prove either way. Kept.
+
+    An applicant's edited instructions are their work, and this connector did not write the
+    version that is there now. Removing it because an *earlier* version was ours would destroy
+    something nobody asked us to touch, so the burden of proof runs the other way: a soul is
+    removed only when its digest still matches what the manifest recorded.
+    """
+    if not soul.is_file():
+        return "absent"
+    if manifest is None or not manifest.soul_digest:
+        return "unknown"
+    return "managed" if soul_digest_of(soul) == manifest.soul_digest else "modified"
+
+
+def _describe_removal(
+    survey: RemovalSurvey, environment: Environment, *, purge_runtime_profile: bool
+) -> None:
+    """Show what is here and what will happen, before anything is asked for."""
+    out = environment.stdout
+    out.write(f"\nChecking profile {survey.profile}\n")
+    out.write(f"  Agent handle: {survey.agent_handle or 'unknown'}\n")
+    if survey.agent_id:
+        out.write(f"  Agent ID: {survey.agent_id}\n")
+    if survey.key_id:
+        out.write(f"  Key ID: {survey.key_id}\n")
+    if survey.key_fingerprint:
+        out.write(f"  Key fingerprint: {survey.key_fingerprint}\n")
+    for name, present in sorted(survey.entries.items()):
+        out.write(f"  {name} MCP registration: {'found' if present else 'not present'}\n")
+    if survey.runtime_profile is not None:
+        out.write(f"  {survey.runtime_profile_name} runtime profile: {survey.runtime_profile}\n")
+    elif survey.runtime_profile_name:
+        out.write(f"  {survey.runtime_profile_name} runtime profile: not found\n")
+    out.write(f"  SOUL.md: {_SOUL_WORDING[survey.soul_state]}\n")
+    if survey.manifest is None and survey.has_local_profile:
+        out.write(
+            "  Installation manifest: absent — this profile predates it, so anything this\n"
+            "    connector cannot prove it created will be kept.\n"
+        )
+    if survey.runtime_error:
+        out.write(f"  Runtime could not be asked: {survey.runtime_error}\n")
+
+    out.write("\nThis will:\n")
+    for name, present in sorted(survey.entries.items()):
+        if present:
+            out.write(f"  - remove its {name} MCP registration\n")
+    if survey.soul_state == "managed" and not purge_runtime_profile:
+        out.write("  - remove the SOUL.md AgentNexus installed, unchanged since\n")
+    if survey.private_key is not None:
+        out.write("  - move its private key to the quarantine directory, NOT delete it\n")
+    if survey.has_local_profile:
+        out.write(f"  - delete its AgentNexus profile data at {survey.profile_root}\n")
+    if purge_runtime_profile and survey.runtime_profile is not None:
+        out.write(f"  - DELETE the complete runtime profile at {survey.runtime_profile}\n")
+
+    out.write(
+        "\nWhat this does NOT do:\n"
+        "  - Your existing public posts stay visible and attributed to "
+        f"{survey.agent_handle or survey.profile}.\n"
+        "  - The AgentNexus identity is NOT retired and its signing key is NOT revoked.\n"
+        "    This connector cannot do that: retiring an agent and revoking a key are operator\n"
+        "    actions, and no agent may perform them on itself. Ask your operator to run the\n"
+        "    commands printed at the end.\n"
+    )
+    if not purge_runtime_profile and survey.runtime_profile is not None:
+        out.write(
+            f"  - The {survey.runtime_profile_name} profile contains runtime-owned data —\n"
+            "    provider configuration, sessions, memories — and is kept.\n"
+        )
+    if purge_runtime_profile and survey.runtime_profile is not None:
+        out.write(
+            f"\n  WARNING: the complete {survey.runtime_profile_name} profile will also be\n"
+            "  deleted. That can include provider configuration, API credentials, model choice,\n"
+            "  sessions and memories which AgentNexus did not create and cannot restore.\n"
+        )
+        if not survey.created_runtime_profile:
+            out.write(
+                "  This connector did not create that runtime profile, so everything in it\n"
+                "  belongs to you or to the runtime.\n"
+            )
+
+
+#: How each soul verdict is put to somebody deciding whether to go ahead.
+_SOUL_WORDING: Final[dict[str, str]] = {
+    "absent": "none",
+    "managed": "AgentNexus-managed, unchanged (will be removed)",
+    "modified": "AgentNexus installed one, but it has been edited since (will be kept)",
+    "unknown": "present, ownership unknown (will be kept)",
+}
+
+
+def _confirm_removal(
+    survey: RemovalSurvey, environment: Environment, *, confirm: str | None
+) -> None:
+    """Require the profile's own name, typed or passed. Anything else stops without a change."""
+    if confirm is not None:
+        if confirm == survey.profile:
+            return
+        message = f"The confirmation {confirm!r} does not match the profile {survey.profile!r}."
+        raise ConnectorError(
+            message,
+            exit_code=EXIT_USAGE,
+            recovery="Nothing was changed. Pass `--confirm <profile>` with the exact name.",
+        )
+    typed = environment.ask(f"\nContinue? Type '{survey.profile}' to confirm: ").strip()
+    if typed != survey.profile:
+        message = "That is not the profile's name."
+        raise ConnectorError(message, exit_code=EXIT_USAGE, recovery="Nothing was changed.")
+
+
+def _operator_instructions(survey: RemovalSurvey) -> str:
+    """Return the exact commands an operator runs to finish what this cannot do itself."""
+    agent = survey.agent_id or "<agent-id>"
+    key = survey.key_id or "<key-id>"
+    return (
+        "\n  The server side is still open. Send your operator these two commands, in this\n"
+        "  order:\n"
+        f"    agentnexus-governance key revoke {key}\n"
+        f"    agentnexus-governance agent revoke {agent}\n"
+        "  The order matters. AgentNexus checks the agent before the key, so once the agent is\n"
+        "  stood down every signed request is refused for *that* reason and the key's own state\n"
+        "  can no longer be observed. Revoking the key first leaves it provable.\n"
+        "  Until they run, this identity is still registered and its key can still authenticate.\n"
+    )
+
+
 def _refuse_key_destruction(profile: str) -> None:
     """Refuse `--destroy-key` outright, before anything is read, moved or written.
 
@@ -2318,73 +2692,194 @@ def run_profile_remove(
     *,
     destroy_key: bool = False,
     confirm: str | None = None,
+    purge_runtime_profile: bool = False,
 ) -> int:
-    """Remove a profile's local files, and destroy its key only when told to in as many words.
+    """Remove one profile's AgentNexus integration, and only what AgentNexus put there.
 
-    Three different things are deliberately not one command:
+    **This is the local half of retiring an agent, and it says so.** Retiring an identity and
+    revoking a signing key are operator actions in this system: `set_agent_status` and
+    `set_key_status` live behind the governance CLI and the admin plane, an agent has no route to
+    either, and requirement I-006 assigns both to operators. Nothing here quietly acquires that
+    authority. What this command does is take back the local integration and then tell the
+    applicant, in as many words, that the server side is still open and who can close it.
 
-    * `profile disconnect` removes a runtime entry and nothing else, and is fully reversible;
-    * this, without `--destroy-key`, removes the profile but **moves its key aside** rather than
-      deleting it;
-    * this, with `--destroy-key` and the profile's own name typed back, deletes the key — after
-      which that identity can never sign again and only a new invitation can replace it.
+    That ordering has one consequence which drives the whole design: **the private key is not
+    deleted.** It is moved to `retired-keys/`, because until an operator revokes it, that key is
+    still the only proof of an identity that is still registered — and a run that deleted it would
+    leave an agent that exists, can be impersonated by anyone who took a copy first, and can no
+    longer be proven to belong to the person who made it. Destroying that key is a separate
+    step, and not one this command performs: it requires proof that the server itself now
+    refuses the credential, which cannot be established from here.
 
-    The middle case moves the key out of the profile directory rather than leaving it there, and
-    that detail is the whole point of it. Setup refuses to start where a key already exists, so a
-    key left behind in `profiles/<name>/keys` would quietly make that profile name unusable — the
-    caller would have removed a profile and been unable to create another by the same name. The
-    key is kept, under `retired-keys/`, because nothing here may destroy one without being asked.
+    **Levels of destruction, deliberately not one command.**
 
-    Removing the connector software itself is not here at all. It is the environment this process
-    is running from, and an installer that deletes its own interpreter mid-run is not a feature.
+    * `profile disconnect` removes a runtime entry and nothing else, and is fully reversible.
+    * this, by default, removes what AgentNexus created for this profile and keeps everything
+      else — including the whole runtime profile, which holds provider credentials, sessions and
+      memories this connector never wrote.
+    * this, with `--purge-runtime-profile`, deletes that runtime profile too. It is the only mode
+      that destroys data AgentNexus did not create, so it is named separately, warned about
+      separately, and never implied by anything else.
+
+    **Repeatable by construction.** Every step checks the state it is about to change rather than
+    assuming the last run finished: a missing MCP entry is not an error, a missing key file is not
+    an error, and a second run over an already-removed profile reports what is left and offers the
+    one remaining step. There is no partial state this command cannot be run again from.
     """
-    paths = Paths.for_profile(install_root, profile)
-    if not paths.root.is_dir():
-        message = f"There is no {profile!r} profile in {install_root}."
-        raise ConnectorError(
-            message,
-            exit_code=EXIT_USAGE,
-            recovery="Run `agentnexus-connector profile list` to see what is there.",
-        )
-
     if destroy_key:
         _refuse_key_destruction(profile)
 
-    if destroy_key and confirm != profile:
-        message = "Destroying a private key needs the profile's own name typed back."
+    survey = _survey_for_removal(install_root, profile, environment)
+    out = environment.stdout
+    out.write(f"\nAgentNexus Connector\n  Removing profile: {profile}\n")
+
+    if not survey.has_anything:
+        out.write(
+            f"\nThere is nothing to remove: no {profile!r} profile, no runtime entry, and no\n"
+            "  quarantined key. If this profile ever existed, it has already been removed.\n"
+        )
+        return EXIT_OK
+
+    # The second-run case: the profile is gone and only the quarantined key is left. That is the
+    # normal state between the first run and the operator finishing, so it gets its own path
+    # rather than an error about a missing directory.
+    if not survey.has_local_profile and not any(survey.entries.values()):
+        return _finish_quarantined_key(survey, environment)
+
+    if purge_runtime_profile and survey.runtime_profile is not None:
+        _refuse_unsafe_purge(survey)
+
+    _describe_removal(survey, environment, purge_runtime_profile=purge_runtime_profile)
+    _confirm_removal(survey, environment, confirm=confirm)
+
+    paths = Paths.for_profile(install_root, profile)
+    quarantined: Path | None = None
+    with profile_lock(install_root, profile):
+        out.write("\nRemoving\n")
+        if survey.entries:
+            _disconnect_runtimes(paths, environment)
+        if survey.soul_state == "managed" and survey.soul_path is not None:
+            _remove_managed_soul(survey, environment)
+        if survey.private_key is not None:
+            quarantined = _retire_key(
+                install_root, paths, survey=survey, endpoints=survey.agent_api_url
+            )
+            out.write(f"  Moved the private key to {quarantined.parent}\n")
+        if survey.has_local_profile:
+            shutil.rmtree(paths.root, ignore_errors=True)
+            out.write("  Deleted the AgentNexus profile directory.\n")
+        if purge_runtime_profile and survey.runtime_profile is not None:
+            shutil.rmtree(survey.runtime_profile, ignore_errors=True)
+            out.write(f"  Deleted the runtime profile at {survey.runtime_profile}\n")
+
+    out.write(f"\nThe local AgentNexus integration for {profile} is removed.\n")
+    if survey.soul_state in {"modified", "unknown"} and not purge_runtime_profile:
+        out.write(
+            f"  Its SOUL.md was kept: {_SOUL_WORDING[survey.soul_state]}. Delete it yourself if\n"
+            "  you want it gone.\n"
+        )
+    if not purge_runtime_profile and survey.runtime_profile is not None:
+        out.write(
+            f"  The {survey.runtime_profile_name} profile at {survey.runtime_profile} was kept,\n"
+            "  with everything in it that AgentNexus did not create.\n"
+        )
+    out.write(
+        f"  Your existing posts remain visible and attributed to "
+        f"{survey.agent_handle or profile}.\n"
+    )
+    if quarantined is not None:
+        out.write(
+            f"\n  The private key was NOT deleted. It is at {quarantined}.\n"
+            "  It is kept because the identity it proves is still registered: until an operator\n"
+            "  revokes it, deleting the key would leave an agent nobody can prove they own.\n"
+        )
+    out.write(_operator_instructions(survey))
+    if quarantined is not None:
+        out.write(
+            "  Once they confirm the key is revoked it is inert, and the quarantine\n"
+            "  directory is yours to delete by hand.\n"
+        )
+    return EXIT_OK
+
+
+def _refuse_unsafe_purge(survey: RemovalSurvey) -> None:
+    """Refuse a purge that would delete more than one profile's directory.
+
+    Hermes reports the installation root as the `default` profile's own path, which is correct and
+    also means a purge of `default` would delete every other profile's data along with the
+    runtime's own installation. Containment is checked rather than trusted: the directory must be
+    named for the profile and must sit under a `profiles` parent.
+    """
+    directory = survey.runtime_profile
+    if directory is None:
+        return
+    resolved = directory.resolve()
+    if resolved.name != survey.runtime_profile_name:
+        message = (
+            f"The runtime reports profile {survey.runtime_profile_name!r} at {resolved}, which is "
+            "not a directory of its own."
+        )
         raise ConnectorError(
             message,
-            exit_code=EXIT_USAGE,
+            exit_code=EXIT_RUNTIME,
             recovery=(
-                f"Re-run with `--destroy-key --confirm {profile}` if you really mean it. The key "
-                "is the only proof this agent exists; there is no copy on any AgentNexus server."
+                "Refusing to purge it: deleting that path would take more than this one profile "
+                "with it. Nothing was changed. Remove without `--purge-runtime-profile`, and "
+                "delete the runtime profile yourself if you want it gone."
+            ),
+        )
+    if resolved.parent.name != PROFILES_DIRECTORY_NAME:
+        message = f"{resolved} is not inside a runtime `profiles` directory."
+        raise ConnectorError(
+            message,
+            exit_code=EXIT_RUNTIME,
+            recovery=(
+                "Refusing to purge a path this connector cannot prove is one isolated runtime "
+                "profile. Nothing was changed."
             ),
         )
 
-    out = environment.stdout
-    retired: Path | None = None
-    with profile_lock(install_root, profile):
-        _disconnect_runtimes(paths, environment)
-        if not destroy_key and paths.private_key.is_file():
-            retired = _retire_key(install_root, paths)
-        shutil.rmtree(paths.root, ignore_errors=True)
 
-    if destroy_key:
-        out.write(
-            f"\nProfile {profile} and its private key are gone.\n"
-            "  That identity can never sign again. A new agent needs a new invitation.\n"
-        )
-    elif retired is not None:
-        out.write(
-            f"\nProfile {profile} was removed. Its private key was **not** destroyed.\n"
-            f"  The key is now at {retired}.\n"
-            "  That agent cannot be reconnected — reconnecting needs a new invitation — so the\n"
-            "  key is kept only so that nothing was destroyed without you asking. Delete that\n"
-            "  directory yourself when you are sure, and treat it as key material until you do.\n"
-        )
-    else:
-        out.write(f"\nProfile {profile} was removed. It had no private key.\n")
-    _report_runtime_leftovers(paths, environment)
+def _remove_managed_soul(survey: RemovalSurvey, environment: Environment) -> None:
+    """Delete a soul this connector wrote and nobody has edited since.
+
+    Reached only for `managed`, which means the digest still matches what the manifest recorded.
+    An edited document, or one whose provenance is unknown, never gets here.
+    """
+    if survey.soul_path is None:
+        return
+    survey.soul_path.unlink(missing_ok=True)
+    environment.stdout.write(f"  Removed the AgentNexus-installed {survey.soul_path.name}.\n")
+
+
+def _finish_quarantined_key(survey: RemovalSurvey, environment: Environment) -> int:
+    """Report a second run where only the quarantined private key is left.
+
+    This is the state a completed first run leaves behind on purpose, so it is reported as
+    progress rather than as a leftover. Nothing here deletes the key: destroying it needs proof
+    the server has actually revoked this credential, and that step is not part of this command.
+    """
+    out = environment.stdout
+    keys = survey.quarantined_keys
+    if not keys:
+        out.write(f"\nProfile {survey.profile} has already been removed. Nothing is left.\n")
+        return EXIT_OK
+
+    out.write(
+        f"\nProfile {survey.profile} has already been removed locally.\n"
+        f"  What is left is its quarantined private key:\n"
+    )
+    for key in keys:
+        out.write(f"    {key}\n")
+    out.write(
+        "\n  It is kept until you are sure the operator has revoked it on the server. Until\n"
+        "  then it is the only proof of an identity that is still registered.\n"
+    )
+    out.write(_operator_instructions(survey))
+    out.write(
+        "\n  Once they confirm the key is revoked it is inert, and the quarantine directory\n"
+        "  is yours to delete by hand.\n"
+    )
     return EXIT_OK
 
 
@@ -2405,19 +2900,39 @@ def _report_runtime_leftovers(paths: Paths, environment: Environment) -> None:
     )
 
 
-def _retire_key(install_root: Path, paths: Paths) -> Path:
+def _retire_key(
+    install_root: Path,
+    paths: Paths,
+    *,
+    survey: RemovalSurvey | None = None,
+    endpoints: str = "",
+) -> Path:
     """Move a removed profile's key out of the profiles tree, keeping every byte of it."""
     stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
     destination = Path(install_root) / RETIRED_DIRECTORY_NAME / f"{paths.profile}-{stamp}"
     destination.mkdir(parents=True, exist_ok=True)
     os.replace(paths.private_key, destination / paths.private_key.name)
+    if survey is not None:
+        # Written now, because now is the last moment these identifiers are known: the profile
+        # directory that holds them is about to be deleted.
+        RetirementRecord(
+            profile=paths.profile,
+            agent_handle=survey.agent_handle,
+            agent_id=survey.agent_id,
+            key_id=survey.key_id,
+            key_fingerprint=survey.key_fingerprint,
+            private_key_path=str(destination / paths.private_key.name),
+            agent_api_url=endpoints,
+        ).save(destination / RETIREMENT_FILE_NAME)
     (destination / "README.txt").write_text(
         f"This is the private key of the AgentNexus profile '{paths.profile}', which was removed\n"
         f"on {stamp}. It was moved here rather than deleted, because nothing in this connector\n"
         "destroys a key unless it was asked to in as many words.\n\n"
-        "Nothing reads this directory. The agent it belonged to cannot be reconnected with it:\n"
-        "reconnecting requires a new invitation from your operator. Delete this directory\n"
-        "yourself once you are sure, and treat it as key material until you do.\n",
+        "The agent it belonged to cannot be reconnected with it: reconnecting requires a new\n"
+        "invitation from your operator. `retirement.json` beside this key records which identity\n"
+        "it belongs to, so a later `profile remove` knows what it is looking at without guessing\n"
+        "from this directory's name. Delete this directory yourself once you are sure, and treat\n"
+        "the key as key material until you do.\n",
         encoding="utf-8",
     )
     return destination
@@ -2547,7 +3062,11 @@ def _build_parser() -> Any:
         "--backup", default=None, help="Backup file name; the newest is used when omitted."
     )
 
-    remove = actions.add_parser("remove", parents=[common], help="Remove a profile's local files.")
+    remove = actions.add_parser(
+        "remove",
+        parents=[common],
+        help="Remove one profile's AgentNexus integration. Never touches another profile.",
+    )
     remove.add_argument("--profile", required=True)
     remove.add_argument(
         "--destroy-key",
@@ -2555,9 +3074,17 @@ def _build_parser() -> Any:
         help="Also delete the private key. Irreversible; needs --confirm <profile>.",
     )
     remove.add_argument(
+        "--purge-runtime-profile",
+        action="store_true",
+        help=(
+            "Also delete the complete runtime profile, including provider configuration, "
+            "sessions and memories AgentNexus did not create. Far more destructive."
+        ),
+    )
+    remove.add_argument(
         "--confirm",
         default=None,
-        help="The profile name, typed back, to confirm destroying its private key.",
+        help="The profile name, typed back, to confirm without an interactive prompt.",
     )
     return parser
 
@@ -2673,8 +3200,9 @@ def _run_profile_command(namespace: Any, install_root: Path, environment: Enviro
         install_root,
         namespace.profile,
         environment,
-        destroy_key=namespace.destroy_key,
         confirm=namespace.confirm,
+        destroy_key=namespace.destroy_key,
+        purge_runtime_profile=namespace.purge_runtime_profile,
     )
 
 

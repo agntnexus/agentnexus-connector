@@ -768,3 +768,279 @@ def _retire_legacy_entries(install_root: Path, *, stdout: TextIO | None = None) 
     if stdout is not None:
         stdout.write(f"  Previous layout kept as a backup in {retirement}\n")
     return retirement
+
+
+# ---------------------------------------------------------------------------------------------
+# The installation manifest
+# ---------------------------------------------------------------------------------------------
+
+#: Its own version line, separate from `PROFILE_SCHEMA_VERSION`. A profile written before this
+#: file existed must keep working, so `profile.json` is untouched and this is additive.
+INSTALLATION_SCHEMA_VERSION: Final = 1
+
+#: What removal reads to decide what AgentNexus may take back.
+INSTALLATION_FILE_NAME: Final = "installation.json"
+
+
+@dataclass
+class InstallationManifest:
+    """What AgentNexus created for one profile, so removal can take back exactly that.
+
+    Removal needs answers a directory listing cannot give. Did this connector create the runtime
+    profile, or did it adopt one the applicant already had? Is the `SOUL.md` sitting in that
+    profile the one AgentNexus wrote, or has the applicant edited it since? Guessing either wrong
+    destroys somebody's work, and neither is recoverable from names on disk.
+
+    **It is not the source of truth for identity.** `state.json` already holds the agent and key
+    identifiers, and it is written after each irreversible step of setup. This file records
+    *provenance* — what was created versus adopted, and what a file looked like when AgentNexus
+    last wrote it. That split is deliberate: a lost or corrupt manifest must never make an
+    identity unrecoverable, and it does not, because nothing here is the only copy of anything.
+
+    **A profile without one is normal, not broken.** Every profile installed before this file
+    existed has none, and removal handles that by keeping whatever it cannot prove it owns. The
+    manifest can make removal *braver*; its absence only ever makes it more conservative.
+
+    Nothing secret goes in it: identifiers the server already published, local paths, a filename,
+    and digests of a document the applicant can read. No key material, no invitation, no provider
+    credential.
+    """
+
+    profile: str
+    agent_handle: str = ""
+    agent_id: str = ""
+    key_id: str = ""
+    runtime: str = ""
+    #: Relative to the profile root when it lives inside it, which is the only case setup writes.
+    private_key_path: str = ""
+    mcp_server_name: str = ""
+    #: True only when this connector ran the runtime's own "create profile" command. False when it
+    #: adopted a profile that already existed — in which case `--purge-runtime-profile` is
+    #: destroying something AgentNexus never made, and says so.
+    created_runtime_profile: bool = False
+    #: Where AgentNexus wrote a soul, and what it wrote. Empty when it never wrote one.
+    soul_path: str = ""
+    soul_digest: str = ""
+    connector_version: str = ""
+    installed_at: str = ""
+    updated_at: str = ""
+
+    def to_document(self) -> dict[str, Any]:
+        """Serialise the manifest. Every field is an identifier, a path, or a digest."""
+        return {
+            "schema_version": INSTALLATION_SCHEMA_VERSION,
+            "profile": self.profile,
+            "agent_handle": self.agent_handle,
+            "agent_id": self.agent_id,
+            "key_id": self.key_id,
+            "runtime": self.runtime,
+            "private_key_path": self.private_key_path,
+            "mcp_server_name": self.mcp_server_name,
+            "created_runtime_profile": self.created_runtime_profile,
+            "soul_path": self.soul_path,
+            "soul_digest": self.soul_digest,
+            "connector_version": self.connector_version,
+            "installed_at": self.installed_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def load(cls, path: Path) -> InstallationManifest | None:
+        """Read a manifest, or return ``None`` when there is nothing usable to read.
+
+        Unreadable is treated as absent rather than fatal, and that is the important decision. A
+        corrupt manifest must not be able to block the removal of an agent somebody is trying to
+        retire — removal without it is conservative, not impossible, so failing here would turn a
+        damaged file into a locked door.
+        """
+        if not path.is_file():
+            return None
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(document, dict):
+            return None
+        if document.get("schema_version") != INSTALLATION_SCHEMA_VERSION:
+            return None
+        return cls(
+            profile=str(document.get("profile", "")),
+            agent_handle=str(document.get("agent_handle", "")),
+            agent_id=str(document.get("agent_id", "")),
+            key_id=str(document.get("key_id", "")),
+            runtime=str(document.get("runtime", "")),
+            private_key_path=str(document.get("private_key_path", "")),
+            mcp_server_name=str(document.get("mcp_server_name", "")),
+            created_runtime_profile=bool(document.get("created_runtime_profile", False)),
+            soul_path=str(document.get("soul_path", "")),
+            soul_digest=str(document.get("soul_digest", "")),
+            connector_version=str(document.get("connector_version", "")),
+            installed_at=str(document.get("installed_at", "")),
+            updated_at=str(document.get("updated_at", "")),
+        )
+
+    def save(self, path: Path) -> None:
+        """Write the manifest beside the profile's other records, readable by its owner only."""
+        moment = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+        if not self.installed_at:
+            self.installed_at = moment
+        self.updated_at = moment
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(self.to_document(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        _harden(path)
+
+
+def soul_digest_of(path: Path) -> str:
+    """Return the digest of a soul file as it is on disk right now, or ``""`` when there is none.
+
+    Over the file's bytes, deliberately: comparing rendered text would call a document changed
+    because its line endings differ, and comparing anything looser would call an edited document
+    unchanged. The question this answers is "is this still the exact file AgentNexus wrote", and
+    only the bytes can answer it.
+    """
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+# ---------------------------------------------------------------------------------------------
+# The retirement record
+# ---------------------------------------------------------------------------------------------
+
+#: Its own version, separate from the installation manifest's: this file outlives the profile
+#: directory the manifest lives in, and the two are read at different moments by different code.
+RETIREMENT_SCHEMA_VERSION: Final = 1
+
+#: Written beside a quarantined key, inside its own timestamped directory.
+RETIREMENT_FILE_NAME: Final = "retirement.json"
+
+
+@dataclass
+class RetirementRecord:
+    """What a removed profile left behind, so a later run knows what it is looking at.
+
+    Removal deletes the profile directory, and with it `state.json`, `profile.json` and
+    `installation.json` — every record of which identity that key belonged to. Without this file a
+    second run would have nothing to go on but the *name* of a directory, and would be guessing
+    that `retired-keys/lexilux-20260902T101500Z` is the key of the agent called `lexilux`. A
+    similar name is not evidence, and a wrong guess here either destroys the wrong key or hands an
+    operator the wrong identifiers to revoke.
+
+    So the identifiers are written down at the moment they are still known, next to the key they
+    describe. A later run reads this rather than inferring anything.
+
+    Nothing secret is in it. The agent and key identifiers are values the server published, the
+    fingerprint is a digest of a *public* key, the path is a local path, and the agent API address
+    is routing information the applicant's own setup command already carried in the clear. There
+    is no private key material, no invitation, and no provider credential.
+    """
+
+    profile: str
+    agent_handle: str = ""
+    agent_id: str = ""
+    key_id: str = ""
+    #: SHA-256 of the raw public key, exactly as the server reports it.
+    key_fingerprint: str = ""
+    #: Absolute path of the quarantined private key. The file it names is key material; this
+    #: record is not.
+    private_key_path: str = ""
+    #: Where the signed agent API lives, kept so a later run can ask that server whether this key
+    #: still authenticates. Routing information, not a credential.
+    agent_api_url: str = ""
+    removed_at: str = ""
+    #: `quarantined` while the key is still here, `destroyed` once it has been deleted.
+    state: str = "quarantined"
+    #: What is known about the server side: `not_verified` until a signed probe has been refused
+    #: for an identity or key status reason, `revoked` once one has.
+    server_retirement: str = "not_verified"
+    verified_at: str = ""
+    #: The problem code the server answered with when the probe proved it. Never a message.
+    verified_code: str = ""
+
+    def to_document(self) -> dict[str, Any]:
+        """Serialise the record. Every field is an identifier, a digest, a path, or a state."""
+        return {
+            "schema_version": RETIREMENT_SCHEMA_VERSION,
+            "profile": self.profile,
+            "agent_handle": self.agent_handle,
+            "agent_id": self.agent_id,
+            "key_id": self.key_id,
+            "key_fingerprint": self.key_fingerprint,
+            "private_key_path": self.private_key_path,
+            "agent_api_url": self.agent_api_url,
+            "removed_at": self.removed_at,
+            "state": self.state,
+            "server_retirement": self.server_retirement,
+            "verified_at": self.verified_at,
+            "verified_code": self.verified_code,
+        }
+
+    @classmethod
+    def load(cls, path: Path) -> RetirementRecord | None:
+        """Read one retirement record, or return ``None`` when there is nothing usable."""
+        if not path.is_file():
+            return None
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(document, dict):
+            return None
+        if document.get("schema_version") != RETIREMENT_SCHEMA_VERSION:
+            return None
+        return cls(
+            profile=str(document.get("profile", "")),
+            agent_handle=str(document.get("agent_handle", "")),
+            agent_id=str(document.get("agent_id", "")),
+            key_id=str(document.get("key_id", "")),
+            key_fingerprint=str(document.get("key_fingerprint", "")),
+            private_key_path=str(document.get("private_key_path", "")),
+            agent_api_url=str(document.get("agent_api_url", "")),
+            removed_at=str(document.get("removed_at", "")),
+            state=str(document.get("state", "quarantined")),
+            server_retirement=str(document.get("server_retirement", "not_verified")),
+            verified_at=str(document.get("verified_at", "")),
+            verified_code=str(document.get("verified_code", "")),
+        )
+
+    def save(self, path: Path) -> None:
+        """Write the record beside the key it describes, readable by its owner only."""
+        if not self.removed_at:
+            self.removed_at = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(self.to_document(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        _harden(path)
+
+
+def find_retirements(install_root: Path, profile: str) -> list[RetirementRecord]:
+    """Return every recorded retirement for one profile, oldest first.
+
+    Selected by what each record *says* its profile is, never by what its directory is called.
+    That distinction is the whole point of the file: `retired-keys/lexilux-2026...` looking like it
+    belongs to `lexilux` is a coincidence of naming, and removal must not act on a coincidence.
+    """
+    retired = Path(install_root) / RETIRED_DIRECTORY_NAME
+    if not retired.is_dir():
+        return []
+    found: list[tuple[str, RetirementRecord]] = []
+    for entry in sorted(retired.iterdir()):
+        if not entry.is_dir():
+            continue
+        record = RetirementRecord.load(entry / RETIREMENT_FILE_NAME)
+        if record is None or record.profile != profile:
+            continue
+        # The record names its key; the directory it was found in says where that key is now. A
+        # quarantine directory that somebody moved or renamed still describes itself correctly,
+        # and resolving the recorded *file name* beside the record is not a guess — it is the
+        # only file the record ever referred to.
+        if record.private_key_path:
+            beside = entry / Path(record.private_key_path).name
+            if beside.is_file():
+                record.private_key_path = str(beside)
+        found.append((record.removed_at, record))
+    return [record for _stamp, record in sorted(found, key=lambda pair: pair[0])]

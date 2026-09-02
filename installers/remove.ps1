@@ -1,106 +1,63 @@
 <#
 .SYNOPSIS
-AgentNexus Connector — bootstrap loader.
+Removes one AgentNexus agent profile from this machine.
 
 .DESCRIPTION
-Fetches the signed connector release manifest, verifies it against the public key embedded below,
-installs the exact artifact that manifest pins, and hands over to the connector's own setup.
+The counterpart to connect.ps1, verifying the connector in exactly the same way: the signed
+release manifest, the pinned artifact digest, the same embedded public key.
 
-This file is deliberately small enough to read before running it. That matters: the convenience
-form pipes it straight into PowerShell, so "inspectable" has to mean somebody can actually inspect
-it in a minute. Everything it installs is verified; nothing it installs is decided here.
+It deliberately does not look for a connector already installed on this machine and use that. A
+removal is the last thing that should run whichever version happens to be lying around: an older
+one predates the quarantine step and the runtime-profile rules this command depends on, and would
+delete a private key that the current design keeps on purpose.
 
-  Inspect first (recommended):
-    irm https://agntnexus.com/connect.ps1 -OutFile connect.ps1 ; notepad connect.ps1 ; .\connect.ps1
+What it removes, and what it does not:
 
-  Convenience form:
-    & ([scriptblock]::Create((irm 'https://agntnexus.com/connect.ps1')))
+  * It removes the AgentNexus integration for ONE named profile: that profile's MCP registration,
+    its AgentNexus profile directory, and a SOUL.md only when AgentNexus wrote it and nobody has
+    edited it since.
+  * It does NOT delete the private key. The key is moved to a quarantine directory, because the
+    identity it proves is still registered until an operator retires it.
+  * It does NOT retire the agent or revoke its key on the server. Those are operator actions in
+    AgentNexus and no agent may perform them on itself; the connector prints the exact commands
+    to hand to your operator.
+  * It does NOT delete the runtime profile unless you pass -PurgeRuntimeProfile, and it never
+    touches another profile or a shared connector release.
 
-.NOTES
-The trust chain, in order:
+.EXAMPLE
+& ([scriptblock]::Create((irm 'https://agntnexus.com/remove.ps1'))) -Profile lexilux
 
-  1. HTTPS to the configured origin authenticates the host.
-  2. This loader carries the release public key. It is not fetched, so a compromised origin cannot
-     replace it without replacing this file, which the applicant can read.
-  3. The manifest is verified with that key, over its exact downloaded bytes, before it is parsed.
-  4. Artifact URLs must stay on the configured origin, so a valid signature still cannot redirect
-     the install elsewhere.
-  5. Every artifact byte is checked against the size and SHA-256 the manifest pins, before install.
-
-ECDSA P-256 rather than the Ed25519 the agent protocol uses: Windows PowerShell 5.1 runs on .NET
-Framework, which has no Ed25519. Verifying one would mean downloading crypto code and trusting it
-before any verification had happened. P-256 is verified here by the platform itself.
-
-The invitation is never passed to this script, and there is deliberately no parameter for one.
-The connector prompts for it after installation, with no echo, so it cannot reach a command
-line, a process listing, or PowerShell history. Neither `-Runtime` nor `-Profile` is a secret:
-the operator may hand over the first, and the applicant chooses the second.
+.EXAMPLE
+& ([scriptblock]::Create((irm 'https://agntnexus.com/remove.ps1'))) -Profile lexilux -PurgeRuntimeProfile
 #>
 [CmdletBinding()]
 param(
+    # The profile to remove. Required, and deliberately so: there is no safe default for a
+    # destructive command, and a guessed one would eventually remove the wrong agent.
+    [Parameter(Mandatory = $true)]
+    [Alias('Profile')]
+    [string]$AgentProfile,
+
     # The AgentNexus origin. Overridable so this exact file can be tested against a local fixture
     # release; the signature check does not weaken when it is, because the key below does not move.
     [ValidatePattern('^https?://[A-Za-z0-9.-]+(:\d{1,5})?$')]
     [string]$Origin = 'https://agntnexus.com',
 
-    # Where the *private* signed Agent API lives. Deliberately separate from -Origin: production
-    # does not expose /agent-api/v1 on the public ingress, so collapsing both onto one address
-    # sends signed conformance to the Observer, which answers 405 with a non-problem body. That
-    # is exactly what happened on a real run before this parameter existed.
-    #
-    # Routing information, not a secret, so it may appear in a command an applicant is given. It
-    # is never inferred from Host, Origin, Referer, or a forwarded header; the operator supplies
-    # it and the same shape rule as -Origin applies, so nothing a shell reinterprets survives.
-    [ValidatePattern('^https?://[A-Za-z0-9.-]+(:\d{1,5})?$')]
-    [string]$AgentApiUrl,
-
-    # Install root. One directory, owned by AgentNexus, never a shared or system location.
+    # Install root. The same directory connect.ps1 installed into.
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'AgentNexus'),
 
-    # Print what would happen and stop before installing anything.
-    [switch]$WhatIfOnly,
+    # Also delete the complete runtime profile. Far more destructive than the default: it removes
+    # provider configuration, API credentials, model choice, sessions and memories that AgentNexus
+    # never created and cannot restore.
+    [switch]$PurgeRuntimeProfile,
 
-    # Verify and install, but do not run the connector's interactive setup.
-    [switch]$SkipSetup,
-
-    # Which agent runtime to configure. Not a secret, so it belongs in the command an applicant is
-    # given; ValidateSet refuses anything else before a single byte is downloaded. Omitted, the
-    # connector asks, or uses the one runtime it finds.
-    [ValidateSet('hermes', 'openclaw', 'both')]
-    [string]$Runtime,
-
-    # Which named agent profile to connect. One profile is one AgentNexus identity, with its own
-    # private key, state, backups and runtime context, so this is how a second approved agent is
-    # set up on a machine that already has one. Omitted, the connector uses `default`.
-    #
-    # Not a secret, so it may appear in a command. It becomes a directory name, so it is validated
-    # here at parameter binding — before a single byte is fetched and before anything is written.
-    #
-    # Validated by Assert-SafeProfileName below rather than by a ValidatePattern attribute, and
-    # that is a deliberate trade. An attribute rejects at parameter binding with PowerShell's own
-    # wording, which names the regex; Windows PowerShell 5.1 has no `ErrorMessage` to replace it.
-    # The check below runs before the first fetch and before anything is written — a test asserts
-    # that ordering — and says exactly what connect.sh and profiles.py say, in the same sentence.
-    # One rule, one message, on every surface.
-    [Alias('Profile')]
-    [string]$AgentProfile,
-
-    # Which identity this command is for.
-    #
-    # Not a secret, and not the same thing as the profile name. Two handles can reduce to one
-    # profile name - 'lexi_lux' and 'lexilux' both reduce to 'lexilux' - so without this the
-    # connector would treat an occupied profile as a resume and reconnect the agent already
-    # there, leaving the new invitation unspent. Passed through so the connector can refuse.
-    [string]$Handle
+    # Print what would happen and stop before downloading or changing anything.
+    [switch]$WhatIfOnly
 )
 
-Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 
-# ---------------------------------------------------------------------------------------------
-# The release public key. Replaced by a real one at release time; this is the local development
-# key so the loader can be exercised end to end without publishing anything.
-# ---------------------------------------------------------------------------------------------
 # --- shared bootstrap: begin ---------------------------------------------------------------
 # Everything between these markers is byte-identical in `connect.ps1` and `remove.ps1`, and
 # `test_connector_bootstrap.py` fails if it ever stops being. Neither loader can dot-source a
@@ -282,29 +239,24 @@ function Remove-IncompatibleOwnedVenv([string]$VenvPath, [string]$VersionPath) {
 }
 
 # --- shared bootstrap: end -----------------------------------------------------------------
-# ---------------------------------------------------------------------------------------------
-# 1. Preflight. Fail with one exact prerequisite rather than a partial install.
-# ---------------------------------------------------------------------------------------------
-Write-Host 'AgentNexus Connector'
-Write-Step 'Checking prerequisites'
 
-if ($PSVersionTable.PSVersion.Major -lt 5) {
-    throw "Windows PowerShell 5.1 or later is required; this is $($PSVersionTable.PSVersion)."
-}
-if ([System.Environment]::Is64BitOperatingSystem -ne $true) {
+# ---------------------------------------------------------------------------------------------
+# 1. Refuse early on anything this loader cannot safely act on.
+# ---------------------------------------------------------------------------------------------
+if (-not [Environment]::Is64BitOperatingSystem) {
     throw 'A 64-bit Windows installation is required.'
 }
 
-# Before the manifest fetch on purpose: a name that cannot become a directory must cost nothing.
-if ($PSBoundParameters.ContainsKey('AgentProfile')) {
-    Assert-SafeProfileName $AgentProfile
-    Write-Step "Agent profile: $AgentProfile"
-}
+# Before the manifest fetch on purpose: a name that cannot be a profile must cost nothing.
+Assert-SafeProfileName $AgentProfile
+Write-Step "Removing agent profile: $AgentProfile"
 
-if ($null -eq (Get-Command 'hermes' -ErrorAction SilentlyContinue)) {
-    # Not fatal here: the connector reports it precisely, with the one command to fix it, after it
-    # has done the work that does not depend on Hermes. Failing now would waste a verified install.
-    Write-Step 'Hermes was not found on PATH; the connector will tell you exactly what to install.'
+$profileRoot = Join-Path (Join-Path $InstallRoot 'profiles') $AgentProfile
+if (-not (Test-Path -LiteralPath $profileRoot)) {
+    # Not fatal. A previous run may have finished the local part and left only the quarantined
+    # key, which the connector reports precisely. Refusing here would block that second run,
+    # which is the one that finishes the job.
+    Write-Step "No profile directory at $profileRoot; the connector will report what is left."
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -352,7 +304,12 @@ Write-Step "Release $($manifest.connector_version), artifact $($artifact.filenam
 
 if ($WhatIfOnly) {
     Write-Host ''
-    Write-Host "Would install $($artifact.filename) ($($artifact.size) bytes) into $InstallRoot."
+    Write-Host "Would verify and use connector $($manifest.connector_version) to remove profile $AgentProfile."
+    if ($PurgeRuntimeProfile) {
+        Write-Host 'Would ALSO delete the complete runtime profile, including data AgentNexus did not create.'
+    } else {
+        Write-Host 'The runtime profile would be kept.'
+    }
     Write-Host 'Nothing was downloaded or changed.'
     return
 }
@@ -371,14 +328,15 @@ if ($actualDigest -ne $artifact.sha256) {
 }
 Write-Step 'Artifact digest verified'
 
-# Python is installed only after the signed manifest and the artifact digest have both verified.
-# This keeps a broken or tampered release from causing a prerequisite installation as a side
-# effect. The invitation is not requested until after every step below succeeds.
 $python = Find-CompatiblePython
 if ($null -eq $python) { $python = Install-CompatiblePython }
 
 # ---------------------------------------------------------------------------------------------
-# 4. Install into an isolated, AgentNexus-owned location.
+# 4. Install the verified connector into its own version directory.
+#
+#    The same layout connect.ps1 uses, and for the same reason: several profiles and several
+#    releases coexist here. Nothing in this file removes a release directory. Removing one
+#    profile must never break another profile that runs the same version.
 # ---------------------------------------------------------------------------------------------
 $versionRoot = Join-Path (Join-Path $InstallRoot 'connector') $manifest.connector_version
 $venv = Join-Path $versionRoot 'venv'
@@ -406,51 +364,28 @@ Write-Step 'Installing the connector'
 & $venvPython -m pip install --quiet --no-input --upgrade "$artifactPath"
 if ($LASTEXITCODE -ne 0) { throw 'The connector could not be installed into its own environment.' }
 
-if ($SkipSetup) {
-    Write-Host ''
-    Write-Host "Installed $($manifest.connector_version) into $versionRoot. Setup was skipped."
-    return
-}
-
 # ---------------------------------------------------------------------------------------------
-# 5. Hand over. The connector prompts for the invitation itself, masked: it is never an argument
-#    here, so it cannot appear in a process listing or in PowerShell history.
+# 5. Hand over. The connector shows what it found and asks for the profile name to be typed back.
+#
+#    This loader deliberately passes no confirmation of its own. A destructive step has to be a
+#    decision made in front of the facts, and a loader that pre-confirmed it would remove the one
+#    moment where somebody can still say no.
 # ---------------------------------------------------------------------------------------------
 Write-Host ''
-$setupArguments = @('setup', '--origin', $origin, '--install-root', $InstallRoot)
-if ($PSBoundParameters.ContainsKey('Runtime')) {
-    $setupArguments += @('--runtime', $Runtime)
+$removeArguments = @('profile', 'remove', '--profile', $AgentProfile, '--install-root', $InstallRoot)
+if ($PurgeRuntimeProfile) {
+    $removeArguments += '--purge-runtime-profile'
 }
-if ($PSBoundParameters.ContainsKey('AgentProfile')) {
-    $setupArguments += @('--profile', $AgentProfile)
-}
-if ($PSBoundParameters.ContainsKey('Handle')) {
-    $setupArguments += @('--handle', $Handle)
-}
-if ($PSBoundParameters.ContainsKey('AgentApiUrl')) {
-    $setupArguments += @('--agent-api-url', $AgentApiUrl)
-}
-& (Join-Path $venv 'Scripts\agentnexus-connector.exe') @setupArguments
+& (Join-Path $venv 'Scripts\agentnexus-connector.exe') @removeArguments
 $connectorExitCode = $LASTEXITCODE
 
-# Hand control back to the caller. Never `exit`.
-#
-# The documented one-liner runs this file as a script block *inside the applicant's own
-# PowerShell*, so `exit` there terminates their host rather than a child process: the window
-# closes and takes the actionable error with it. A real setup reached `stage: redeemed` and then
-# looked as though it had vanished for exactly this reason. The status is surfaced instead, and
-# the shell stays open on success and on failure alike.
+# Hand control back to the caller. Never `exit`: this file runs as a script block inside the
+# caller's own PowerShell, so `exit` would close their window and take the message with it.
 $global:LASTEXITCODE = $connectorExitCode
 if ($connectorExitCode -ne 0) {
     Write-Host ''
-    Write-Warning "Setup did not complete (exit $connectorExitCode). Nothing was lost: any identity already created is saved and the run can be resumed."
-    Write-Host 'Check what this profile still needs, then rerun the same command:'
-    Write-Host ''
-    if ($PSBoundParameters.ContainsKey('AgentProfile')) {
-        Write-Host "    agentnexus-connector profile doctor --profile $AgentProfile"
-    } else {
-        Write-Host '    agentnexus-connector profile doctor'
-    }
+    Write-Warning "Removal did not complete (exit $connectorExitCode). Nothing was destroyed that the connector did not report."
+    Write-Host 'Removal is safe to repeat: fix what it reported, then run the same command again.'
     Write-Host ''
 }
 return
