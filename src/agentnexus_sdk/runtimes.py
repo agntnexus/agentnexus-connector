@@ -247,6 +247,27 @@ sys.stdout.write("AGENTNEXUS_SCAN " + json.dumps(scan_for_threats(content, scope
 
 
 @dataclass(frozen=True)
+class ProviderSetup:
+    """One interactive invocation that hands the terminal to a runtime's own provider wizard.
+
+    The connector never asks for an API key, never reads one, and never copies one between
+    profiles. It runs the runtime's wizard with this profile's isolated environment and gets out
+    of the way; whatever credential is typed is typed into that wizard and stored by it.
+
+    `env` is the profile's process environment, exactly as every other invocation of that runtime
+    gets it, so the wizard writes into the isolated profile rather than the applicant's default
+    one.
+    """
+
+    #: The argument list, never a shell string.
+    command: list[str]
+    #: The profile's isolated process environment, or None to inherit unchanged.
+    env: dict[str, str] | None
+    #: What to show the applicant before running it, so nothing starts unannounced.
+    display: str
+
+
+@dataclass(frozen=True)
 class ModelStatus:
     """Whether a runtime profile has a usable model provider, as the runtime itself reports it.
 
@@ -357,6 +378,15 @@ class RuntimeAdapter(Protocol):
 
     def model_status(self) -> ModelStatus:
         """Report whether this runtime profile has a usable model provider."""
+        ...
+
+    def provider_setup_invocation(self) -> ProviderSetup | None:
+        """Return the command that opens this runtime's own provider wizard, or None.
+
+        None means this connector knows of no such wizard for this runtime, which is a different
+        statement from "there is none": it is the honest answer where one cannot be named, and the
+        caller then says so rather than running something it guessed at.
+        """
         ...
 
     def scan_context(self, path: Path) -> list[str]:
@@ -891,6 +921,22 @@ class HermesAdapter:
             detail="Hermes did not report a model for this profile.",
         )
 
+    def provider_setup_invocation(self) -> ProviderSetup | None:
+        """Return `hermes -p <profile>`, which is where Hermes offers its own provider wizard.
+
+        Not a flag and not a scripted answer: starting Hermes for a profile with no model is what
+        makes it ask. The connector's part is to offer to start it and then to look again.
+        """
+        executable = self._which("hermes")
+        if executable is None:
+            return None
+        command = self._command(executable)
+        return ProviderSetup(
+            command=command,
+            env=self._environment(),
+            display=" ".join(["hermes", *self._context.hermes_arguments]),
+        )
+
     def scan_context(self, path: Path) -> list[str]:
         """Ask Hermes' own scanner whether it would load this context file.
 
@@ -1277,6 +1323,14 @@ class OpenClawAdapter:
             known=False,
             detail="OpenClaw exposes no model-configuration query this connector can call.",
         )
+
+    def provider_setup_invocation(self) -> ProviderSetup | None:
+        """Return None: this connector knows of no OpenClaw provider wizard to offer.
+
+        Consistent with `model_status`, which reports unknown for the same reason. Offering to run
+        something here would mean guessing at another project's command line.
+        """
+        return None
 
     def scan_context(self, path: Path) -> list[str]:
         """Refuse, because OpenClaw publishes no context-file check this connector can call.

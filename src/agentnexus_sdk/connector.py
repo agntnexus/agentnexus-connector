@@ -840,6 +840,97 @@ def report_model_readiness(
     return False
 
 
+def offer_provider_setup(
+    adapters: list[Any], *, profile: str, environment: Environment, allowed: bool
+) -> bool:
+    """Offer to hand the terminal to the runtime's own provider wizard, then look again.
+
+    Reached only when the profile is connected and the runtime has just said it has no model. The
+    text before this already explains that; printing `hermes -p <profile>` and stopping leaves the
+    applicant one manual step away from an agent that can answer, and that step is the one people
+    do not take.
+
+    Nothing is copied. No key is read, asked for, or moved between profiles: this starts the
+    runtime's own wizard with this profile's isolated environment and gets out of the way. The
+    provider and the API key are typed into that wizard and stored by it.
+
+    It refuses to start anything unless a person is actually there to answer:
+
+    * `allowed` is False for `--soul skip` and any other caller that has declared the run
+      unattended;
+    * `CI` in the environment means a pipeline, which has no one to type a key;
+    * a reader that raises `EOFError` or `OSError` has no terminal behind it;
+    * and a plain "n" is a plain no.
+
+    Returns whether the profile reports a model afterwards.
+    """
+    out = environment.stdout
+    if not allowed:
+        return False
+    offered: tuple[Any, Any] | None = None
+    for candidate in adapters:
+        wizard = _provider_setup_for(candidate)
+        if wizard is not None:
+            offered = (candidate, wizard)
+            break
+    if offered is None:
+        return False
+    if os.environ.get("CI"):
+        out.write("  Not offering to start it here: CI is set, so nobody is at this terminal.\n")
+        return False
+
+    adapter, setup = offered
+    out.write(
+        f"\n  No inference provider is configured for the {profile!r} profile.\n"
+        f"  {adapter.display_name} asks for one itself the first time it starts.\n"
+    )
+    try:
+        answer = environment.ask(f"  Set one up in {adapter.display_name} now? [Y/n]: ").strip()
+    except (EOFError, OSError):
+        out.write("  No terminal to ask on, so nothing was started.\n")
+        return False
+    if answer.lower().startswith("n"):
+        out.write(f"  Left for later. Run `{setup.display}` when you want to set it up.\n")
+        return False
+
+    out.write(f"\n  Starting `{setup.display}`. Leave it when you are done, and this continues.\n")
+    try:
+        environment.run(setup.command, env=setup.env, check=False)
+    except OSError as error:
+        environment.stderr.write(f"  Could not start {setup.display}: {error}\n")
+        return False
+
+    # Ask the runtime again rather than believing the wizard. It may have been closed without a
+    # provider being chosen, and saying "ready" then would be worse than having said nothing.
+    after = collect_model_readiness([adapter])
+    ready = all(status.configured for _name, status in after)
+    if ready:
+        for name, status in after:
+            out.write(f"\n  Ready to chat. {name} model: {status.detail}\n")
+    else:
+        out.write(
+            "\n  Identity is set up; the model is still open.\n"
+            f"  Run `{setup.display}` again and choose a provider whenever you like.\n"
+        )
+    return ready
+
+
+def _provider_setup_for(adapter: Any) -> Any:
+    """Return this adapter's provider wizard, or None if it does not publish one.
+
+    Read defensively, the way `collect_model_readiness` treats a refusal: a runtime adapter that
+    predates this, or a test double standing in for one, simply gets no offer rather than an
+    `AttributeError` in the middle of a finished setup.
+    """
+    invocation = getattr(adapter, "provider_setup_invocation", None)
+    if invocation is None:
+        return None
+    try:
+        return invocation()
+    except RuntimeIntegrationError:
+        return None
+
+
 def select_adapters(
     requested: str | None,
     environment: Environment,
@@ -1463,9 +1554,19 @@ def run_setup(
     # Before explaining how to start talking to it, say whether it can answer at all. A real run
     # reached this line for a profile Hermes described as `Model: —`, printed instructions, and
     # the applicant's first message then failed with `No LLM provider configured`.
-    report_model_readiness(
+    ready = report_model_readiness(
         collect_model_readiness(adapters), profile=paths.profile, environment=environment
     )
+    if not ready:
+        # The offer, not a second lecture. `--soul skip` is this command's marker for an
+        # unattended run, so it withholds the offer for the same reason it withholds the
+        # questionnaire.
+        offer_provider_setup(
+            adapters,
+            profile=paths.profile,
+            environment=environment,
+            allowed=soul_mode != "skip",
+        )
     _report_how_to_start(paths, adapters, context, environment)
 
     # The optional local step, offered only once the identity is already connected and saved. Its
