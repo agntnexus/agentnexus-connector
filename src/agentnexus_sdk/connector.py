@@ -1647,56 +1647,64 @@ def _apply_soul(
 
     Import, questionnaire, edit and restore all end here, so none of them can accidentally skip
     the diff, the confirmation, or the backup by taking a shortcut of its own.
+
+    **Assumes the caller holds this profile's lock**, the way `_disconnect_runtimes` does. The
+    lock belongs to the command, not to this helper: `setup` holds it across a whole run, and a
+    helper that took it again would deadlock against its own caller.
     """
     out = environment.stdout
     location = adapter.soul_location()
-    with profile_lock(paths.install_root or paths.root.parent.parent, paths.profile):
-        current = soul.read_existing_soul(location.path)
-        proposed = soul.validate_soul_text(proposed)
+    # No lock is taken here. Every caller already holds this profile's lock, and the operating
+    # system lock is not reentrant: taking it a second time in the same process blocks on the
+    # handle the same process is holding, which surfaces as "Another AgentNexus setup is already
+    # running" during a setup that is the only thing running. That is what a waiting personality
+    # draft hit, on the one path an applicant reaches by pressing 1.
+    current = soul.read_existing_soul(location.path)
+    proposed = soul.validate_soul_text(proposed)
 
-        if current is not None and soul.soul_digest(current) == soul.soul_digest(proposed):
-            out.write(f"  {location.path} already contains exactly this. Nothing was changed.\n")
-            _record_soul(paths, location, soul.soul_digest(proposed))
-            return EXIT_OK
+    if current is not None and soul.soul_digest(current) == soul.soul_digest(proposed):
+        out.write(f"  {location.path} already contains exactly this. Nothing was changed.\n")
+        _record_soul(paths, location, soul.soul_digest(proposed))
+        return EXIT_OK
 
-        # The runtime's own verdict, before anything is shown. A real Hermes 0.20.6 run installed
-        # a valid soul, reported success, and then answered as the stock identity because its own
-        # scanner had blocked the file with `role_pretend`. Approving a preview of a document the
-        # runtime will silently discard wastes the one moment the applicant was paying attention.
-        vetted = soul_scan.vet(proposed, adapter=adapter, workspace=paths.root / "staging" / "scan")
-        for line in soul_scan.describe(vetted, display_name=location.runtime):
-            out.write(line + "\n")
-        if not vetted.accepted:
-            return EXIT_RUNTIME
-        proposed = vetted.text
+    # The runtime's own verdict, before anything is shown. A real Hermes 0.20.6 run installed
+    # a valid soul, reported success, and then answered as the stock identity because its own
+    # scanner had blocked the file with `role_pretend`. Approving a preview of a document the
+    # runtime will silently discard wastes the one moment the applicant was paying attention.
+    vetted = soul_scan.vet(proposed, adapter=adapter, workspace=paths.root / "staging" / "scan")
+    for line in soul_scan.describe(vetted, display_name=location.runtime):
+        out.write(line + "\n")
+    if not vetted.accepted:
+        return EXIT_RUNTIME
+    proposed = vetted.text
 
-        out.write(f"\n  Runtime: {location.runtime}, profile {location.profile}\n")
-        out.write(f"  File:    {location.path}\n")
-        if current is None:
-            out.write("  There is no soul there yet; this would create one.\n")
-        elif soul.soul_digest(current) == _managed_digest(paths):
-            out.write("  The current soul is the one AgentNexus wrote, unchanged since.\n")
-        else:
-            out.write(
-                "  The current soul was NOT written by AgentNexus — it is yours, or the one\n"
-                "  your runtime shipped. Replacing it is a change to your own work.\n"
-            )
-        out.write(f"\n  Proposed change ({origin}):\n")
-        soul.write_preview(soul.diff_souls(current, proposed, path=location.path), out)
-
-        if not assume_yes and not _confirm(
-            environment, f"Replace the soul of profile {paths.profile!r}?", expected="replace"
-        ):
-            out.write("  Nothing was changed.\n")
-            return EXIT_USAGE
-
-        outcome = soul.install_soul(
-            proposed,
-            path=location.path,
-            profile=paths.profile,
-            backups=soul.backup_directory(paths.root),
-            expected_current=current,
+    out.write(f"\n  Runtime: {location.runtime}, profile {location.profile}\n")
+    out.write(f"  File:    {location.path}\n")
+    if current is None:
+        out.write("  There is no soul there yet; this would create one.\n")
+    elif soul.soul_digest(current) == _managed_digest(paths):
+        out.write("  The current soul is the one AgentNexus wrote, unchanged since.\n")
+    else:
+        out.write(
+            "  The current soul was NOT written by AgentNexus — it is yours, or the one\n"
+            "  your runtime shipped. Replacing it is a change to your own work.\n"
         )
+    out.write(f"\n  Proposed change ({origin}):\n")
+    soul.write_preview(soul.diff_souls(current, proposed, path=location.path), out)
+
+    if not assume_yes and not _confirm(
+        environment, f"Replace the soul of profile {paths.profile!r}?", expected="replace"
+    ):
+        out.write("  Nothing was changed.\n")
+        return EXIT_USAGE
+
+    outcome = soul.install_soul(
+        proposed,
+        path=location.path,
+        profile=paths.profile,
+        backups=soul.backup_directory(paths.root),
+        expected_current=current,
+    )
     _record_soul(paths, location, outcome.digest)
     out.write(f"\n  {location.path}: {outcome.detail}\n")
     if outcome.backup is not None:
@@ -3111,6 +3119,24 @@ def main(argv: Sequence[str] | None = None, environment: Environment | None = No
         return error.exit_code
 
 
+def _remembered_endpoint(paths: Paths, key: str) -> str | None:
+    """Return the address this profile recorded for `key`, or None if it has none.
+
+    A profile that finished setup once wrote its four addresses into `profile.json`. Re-running
+    `setup --profile <name>` to resume — to pick up a waiting personality draft, to reconnect a
+    runtime — was nevertheless refusing without `--agent-api-url`, telling the applicant to
+    "re-run the command your operator gave you" for a value already sitting on their own disk. So
+    the recorded address is the default now.
+
+    Only a default. An explicit flag is read first and always wins, because a deployment that
+    moved has to be able to say so, and the recorded value is history rather than truth.
+    """
+    record = ProfileRecord.load(paths.profile_record)
+    if record is None:
+        return None
+    return record.endpoints.get(key) or None
+
+
 def _run_setup_command(namespace: Any, install_root: Path, environment: Environment) -> int:
     prepare_installation(install_root, environment)
     profile = resolve_setup_profile(install_root, namespace.profile, environment)
@@ -3121,10 +3147,12 @@ def _run_setup_command(namespace: Any, install_root: Path, environment: Environm
     )
     endpoints = endpoints_for(
         origin=str(namespace.origin),
-        agent_api_url=namespace.agent_api_url,
-        onboarding_base_url=namespace.onboarding_base_url,
-        public_api_url=namespace.public_api_url,
-        observer_url=namespace.observer_url,
+        agent_api_url=namespace.agent_api_url or _remembered_endpoint(paths, "agent_api_url"),
+        onboarding_base_url=(
+            namespace.onboarding_base_url or _remembered_endpoint(paths, "onboarding_base_url")
+        ),
+        public_api_url=namespace.public_api_url or _remembered_endpoint(paths, "public_api_url"),
+        observer_url=namespace.observer_url or _remembered_endpoint(paths, "observer_url"),
     )
     # One profile at a time. Two runs of the same profile could otherwise interleave a key
     # creation with a redemption and produce an identity whose key is not the one on disk.
@@ -3158,6 +3186,27 @@ def _run_soul_command(namespace: Any, install_root: Path, environment: Environme
         )
 
     action = namespace.soul_action
+    # The lock lives here, at the command, rather than inside `_apply_soul`. Anything that writes
+    # this profile's soul or its record takes it for the length of the command; reading does not,
+    # so `show`, `status` and `backups` still answer while a setup is running instead of failing
+    # with a message about a setup the reader did not start.
+    if action in SOUL_ACTIONS_THAT_WRITE:
+        with profile_lock(install_root, paths.profile):
+            return _run_soul_action(
+                action, paths=paths, namespace=namespace, environment=environment
+            )
+    return _run_soul_action(action, paths=paths, namespace=namespace, environment=environment)
+
+
+#: Soul actions that change this profile's soul or its record, and therefore need the lock.
+SOUL_ACTIONS_THAT_WRITE = frozenset({"init", "edit", "import", "restore", "forget"})
+
+
+def _run_soul_action(action: str, *, paths: Paths, namespace: Any, environment: Environment) -> int:
+    """Perform one already-dispatched soul action.
+
+    Assumes the caller holds this profile's lock for any action that writes.
+    """
     if action == "backups":
         return run_soul_backups(paths=paths, environment=environment)
     if action == "forget":
