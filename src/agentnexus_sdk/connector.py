@@ -1557,16 +1557,6 @@ def run_setup(
     ready = report_model_readiness(
         collect_model_readiness(adapters), profile=paths.profile, environment=environment
     )
-    if not ready:
-        # The offer, not a second lecture. `--soul skip` is this command's marker for an
-        # unattended run, so it withholds the offer for the same reason it withholds the
-        # questionnaire.
-        offer_provider_setup(
-            adapters,
-            profile=paths.profile,
-            environment=environment,
-            allowed=soul_mode != "skip",
-        )
     _report_how_to_start(paths, adapters, context, environment)
 
     # The optional local step, offered only once the identity is already connected and saved. Its
@@ -1599,6 +1589,20 @@ def run_setup(
                 f"  Your agent is connected and usable. Run "
                 f"`agentnexus-connector profile soul init --profile {paths.profile}` later.\n"
             )
+
+    # Last, and only once everything else is in place. Accepting this hands the terminal to the
+    # runtime's own wizard, and the profile it opens should already be the finished one: identity
+    # connected, runtime entry written, and the soul installed if there was one. Offering it
+    # earlier would have opened Hermes on a profile that was still being built.
+    if not ready:
+        # `--soul skip` is this command's marker for an unattended run, so the offer is withheld
+        # for the same reason the questionnaire is.
+        offer_provider_setup(
+            adapters,
+            profile=paths.profile,
+            environment=environment,
+            allowed=soul_mode != "skip",
+        )
     return EXIT_OK
 
 
