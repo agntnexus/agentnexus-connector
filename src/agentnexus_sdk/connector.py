@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any, Final, TextIO
 from urllib.parse import urlsplit
 
-from agentnexus_sdk import soul, soul_scan, updater
+from agentnexus_sdk import migration, soul, soul_scan, updater
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions
 from agentnexus_sdk.errors import (
     AgentNexusError,
@@ -130,6 +130,12 @@ EXIT_NEEDS_REPLACEMENT: Final = 8
 #: capability apart from a mistyped command line: argparse usage errors are exit 2, and a
 #: script that treated this as "bad arguments" would retry it forever.
 EXIT_DESTRUCTION_DISABLED: Final = 9
+
+#: The shortest password accepted for an export.
+#:
+#: Not a strength policy, and not presented as one. It is a floor under the one case that is
+#: certainly wrong: a file carrying a signing key across a USB stick, protected by four characters.
+MINIMUM_EXPORT_PASSWORD: Final = 12
 
 
 class Stage(StrEnum):
@@ -3340,6 +3346,55 @@ def _build_parser() -> Any:
         help="The profile name, typed back, to confirm without an interactive prompt.",
     )
 
+    # Moving an agent to another computer. Two commands, and the password is in neither of them:
+    # it is asked for without echo, because a command line ends up in shell history, in a process
+    # list every other user on the machine can read, and in whatever logs the terminal keeps.
+    export = actions.add_parser(
+        "export",
+        parents=[common],
+        help="Write one profile to an encrypted file for moving to another computer.",
+    )
+    export.add_argument(
+        "--profile", required=True, help="Which profile to export. Exactly one, always explicit."
+    )
+    export.add_argument(
+        "--to", dest="destination", required=True, type=Path, help="Where to write the file."
+    )
+    export.add_argument(
+        "--no-soul",
+        action="store_true",
+        help="Leave the runtime's instruction document out of the archive.",
+    )
+
+    import_command = actions.add_parser(
+        "import",
+        parents=[common],
+        help="Create a new local profile from an encrypted export file.",
+    )
+    import_command.add_argument(
+        "--from", dest="source", required=True, type=Path, help="The export file to read."
+    )
+    import_command.add_argument(
+        "--profile",
+        default=None,
+        help="The local name for the imported profile. Defaults to the exported name.",
+    )
+    import_command.add_argument(
+        "--agent-api-url",
+        default=None,
+        help="Override the Agent API address recorded in the archive.",
+    )
+    import_command.add_argument(
+        "--confirm",
+        default=None,
+        help="The profile name, typed back, to confirm without an interactive prompt.",
+    )
+    import_command.add_argument(
+        "--inspect",
+        action="store_true",
+        help="Decrypt and describe the file without creating anything.",
+    )
+
     # `update` is two deliberate steps, never one. `check` answers and changes nothing; `apply`
     # changes only the profiles named on the command line. There is no `--all`, no `--yes` and no
     # schedule: choosing which agents move to a new version is the owner's decision, and a flag
@@ -3638,6 +3693,167 @@ def _run_update_command(namespace: Any, install_root: Path, environment: Environ
         return EXIT_RUNTIME
 
 
+def _ask_new_password(environment: Environment) -> str:
+    """Read a password twice, without echo, and never from anywhere else.
+
+    Not an argument, not an environment variable, not a file beside the archive. Every one of
+    those outlives the command in a place somebody else can read, and a password that protects a
+    signing key has to be worth more than the convenience.
+
+    Asked twice because there is no recovery: the archive is authenticated encryption over a
+    scrypt-derived key, so a typo in a password nobody can remember makes the file permanently
+    unreadable, and the first time anyone would find out is on the destination computer.
+    """
+    first = environment.prompt("  Password to encrypt the export with: ")
+    if len(first) < MINIMUM_EXPORT_PASSWORD:
+        message = f"The password is shorter than {MINIMUM_EXPORT_PASSWORD} characters."
+        raise ConnectorError(
+            message,
+            exit_code=EXIT_USAGE,
+            recovery=(
+                "This file will hold a private signing key and may cross a USB stick or a share. "
+                "Nothing was written."
+            ),
+        )
+    if environment.prompt("  Type it again: ") != first:
+        message = "The two passwords do not match."
+        raise ConnectorError(
+            message, exit_code=EXIT_USAGE, recovery="Nothing was written. Run the command again."
+        )
+    return first
+
+
+def _run_profile_export(namespace: Any, install_root: Path, environment: Environment) -> int:
+    """Write one profile to an encrypted file. Changes nothing on this computer."""
+    out = environment.stdout
+    out.write(f"\nExporting the {namespace.profile!r} profile.\n")
+    out.write(
+        "  The profile lock stops another connector command from writing while this reads. It\n"
+        "  cannot stop a running agent or a scheduled job — no operating system offers that —\n"
+        "  so stop those first if you want a consistent copy.\n\n"
+    )
+    password = _ask_new_password(environment)
+    try:
+        result = migration.export_profile(
+            install_root=install_root,
+            profile=namespace.profile,
+            destination=namespace.destination,
+            password=password,
+            environment=environment,
+            include_soul=not namespace.no_soul,
+        )
+    except migration.MigrationError as error:
+        raise ConnectorError(str(error), exit_code=EXIT_USAGE, recovery=error.recovery) from error
+
+    out.write(f"\n  Wrote {result.path} ({result.size} bytes)\n")
+    out.write(f"  Agent id:    {result.plan.identity['agent_id']}\n")
+    out.write(f"  Handle:      {result.plan.identity['handle'] or '(none recorded)'}\n")
+    out.write(f"  Key fingerprint: {result.plan.identity['public_key_fingerprint']}\n")
+    out.write("\n  In the archive:\n")
+    for name in result.plan.included_names:
+        out.write(f"    {name}\n")
+    out.write("\n  Deliberately not in it:\n")
+    for category in migration.EXCLUDED_CATEGORIES:
+        out.write(f"    {category}\n")
+    if result.plan.notes:
+        out.write("\n  Notes:\n")
+        for note in result.plan.notes:
+            out.write(f"    {note}\n")
+    out.write(f"\n  {migration.SECOND_COPY_WARNING}\n")
+    out.write("\n  This profile was not changed, disconnected or removed.\n")
+    return EXIT_OK
+
+
+def _describe_archive(contents: Any, out: TextIO) -> None:
+    """Show what an archive holds before anything is created from it."""
+    identity = contents.identity
+    source = contents.source
+    out.write("\n  This archive carries:\n")
+    out.write(f"    Profile:     {source.get('profile', '(unnamed)')}\n")
+    out.write(f"    Agent id:    {identity.get('agent_id', '')}\n")
+    out.write(f"    Handle:      {identity.get('handle') or '(none recorded)'}\n")
+    out.write(f"    Key fingerprint: {identity.get('public_key_fingerprint', '')}\n")
+    out.write(
+        f"    Written by connector {source.get('connector_version', '?')} "
+        f"on {source.get('system', '?')}\n"
+    )
+    out.write("\n  Contents:\n")
+    for entry in contents.manifest.get("included", []):
+        out.write(f"    {entry.get('name')} ({entry.get('size')} bytes)\n")
+    out.write("\n  Not in it:\n")
+    for category in contents.manifest.get("excluded", []):
+        out.write(f"    {category}\n")
+    notes = contents.manifest.get("notes") or []
+    if notes:
+        out.write("\n  Notes from the export:\n")
+        for note in notes:
+            out.write(f"    {note}\n")
+
+
+def _run_profile_import(namespace: Any, install_root: Path, environment: Environment) -> int:
+    """Create a new local profile from an encrypted export file.
+
+    Reads, decrypts and validates first, shows what it found, and only then asks whether to create
+    anything. Nothing is written before the confirmation, and an existing profile is never
+    replaced.
+    """
+    out = environment.stdout
+    source = Path(namespace.source)
+    try:
+        blob = source.read_bytes()
+    except OSError as error:
+        message = f"{source} could not be read: {error}"
+        raise ConnectorError(message, exit_code=EXIT_USAGE, recovery="Check the path.") from error
+
+    password = environment.prompt(f"  Password for {source.name}: ")
+    try:
+        contents = migration.read_archive(blob, password)
+    except migration.MigrationError as error:
+        raise ConnectorError(str(error), exit_code=EXIT_USAGE, recovery=error.recovery) from error
+
+    _describe_archive(contents, out)
+    if namespace.inspect:
+        out.write("\n  --inspect: nothing was created.\n")
+        return EXIT_OK
+
+    profile = namespace.profile or str(contents.source.get("profile") or "")
+    if not profile:
+        message = "The archive records no profile name and none was given."
+        raise ConnectorError(
+            message, exit_code=EXIT_USAGE, recovery="Pass --profile with a name for it here."
+        )
+    out.write(f"\n  It will be created here as the {profile!r} profile.\n")
+    out.write(f"  {migration.SECOND_COPY_WARNING}\n\n")
+    if not _confirm_import(namespace, profile, environment):
+        out.write("  Nothing was created.\n")
+        return EXIT_USAGE
+
+    try:
+        result = migration.import_profile(
+            install_root=install_root,
+            profile=profile,
+            contents=contents,
+            environment=environment,
+            agent_api_url=namespace.agent_api_url,
+        )
+    except migration.MigrationError as error:
+        raise ConnectorError(str(error), exit_code=EXIT_RUNTIME, recovery=error.recovery) from error
+
+    out.write(f"\n  Created {result.root}\n")
+    out.write(f"  Registered with: {', '.join(result.registered) or 'no runtime'}\n")
+    for note in result.notes:
+        out.write(f"  {note}\n")
+    return EXIT_OK
+
+
+def _confirm_import(namespace: Any, profile: str, environment: Environment) -> bool:
+    """Require the profile name typed back before a key is written anywhere."""
+    if namespace.confirm is not None:
+        return bool(namespace.confirm == profile)
+    answer = environment.ask(f"  Type {profile!r} to create it, or anything else to stop: ")
+    return answer.strip() == profile
+
+
 def _run_profile_command(namespace: Any, install_root: Path, environment: Environment) -> int:
     if namespace.action == "list":
         prepare_installation(install_root, environment)
@@ -3651,6 +3867,12 @@ def _run_profile_command(namespace: Any, install_root: Path, environment: Enviro
     if namespace.action == "soul":
         prepare_installation(install_root, environment)
         return _run_soul_command(namespace, install_root, environment)
+    if namespace.action == "export":
+        prepare_installation(install_root, environment)
+        return _run_profile_export(namespace, install_root, environment)
+    if namespace.action == "import":
+        prepare_installation(install_root, environment)
+        return _run_profile_import(namespace, install_root, environment)
     if namespace.action == "disconnect":
         return run_profile_disconnect(
             install_root, namespace.profile, environment, runtime=namespace.runtime
