@@ -39,7 +39,6 @@ a private key is exactly what this is designed not to produce.
 
 from __future__ import annotations
 
-import contextlib
 import datetime as dt
 import hashlib
 import io
@@ -124,6 +123,9 @@ EXCLUDED_CATEGORIES: Final = (
     "runtime memory and conversation history — no adapter contract exists for reading it",
     "backups, staging files and lock files",
 )
+
+#: How many leftover paths an error message lists before it summarises the rest.
+MAX_REPORTED_LEFTOVERS: Final = 10
 
 #: Written into a profile directory that a failed import could not fully clean up.
 #:
@@ -922,21 +924,50 @@ class UnwindReport:
     failed: list[str] = field(default_factory=list)
     #: Things this import created outside its own directory and deliberately did not delete.
     left_in_place: list[str] = field(default_factory=list)
-    #: The profile directory, when it was kept because recovery depends on what is in it.
+    #: The profile directory, when it is still there afterwards.
     preserved: Path | None = None
+    #: Why it is still there: kept on purpose, or a removal that did not work.
+    preserved_reason: str = ""
+    #: Files still under the profile directory after a removal that was attempted and failed.
+    #: Only what a re-read found — a file that really was deleted is not reported as remaining.
+    leftover_files: list[Path] = field(default_factory=list)
+    #: Whether the residue marker reached the disk. A directory that cannot be removed may equally
+    #: be one that cannot be written to, and the operator still has to be told what is there.
+    marker_written: bool = False
+
+    @property
+    def rollback_complete(self) -> bool:
+        """Report whether every runtime change was undone and confirmed."""
+        return not self.failed
 
     @property
     def complete(self) -> bool:
-        """Report whether every change this import made was undone and verified."""
-        return not self.failed
+        """Report whether the runtime *and* the filesystem were both put back.
+
+        Both halves, because the second one used to be assumed. `shutil.rmtree(...,
+        ignore_errors=True)` discards the reason it failed, and a file held open by a runtime or an
+        antivirus scanner is an ordinary Windows outcome — so "removed" was being reported for a
+        directory that was still there.
+        """
+        return self.rollback_complete and self.preserved is None
 
     def as_residue(self) -> list[str]:
         """Render what is still on this machine, for an error message. Paths and names only."""
         lines = list(self.failed)
         lines.extend(self.left_in_place)
         if self.preserved is not None:
-            lines.append(f"kept for recovery, not deleted: {self.preserved}")
-            lines.append(f"runtime configuration backups: {self.preserved / 'backups'}")
+            lines.append(f"{self.preserved_reason}: {self.preserved}")
+            if not self.leftover_files:
+                lines.append(f"runtime configuration backups: {self.preserved / 'backups'}")
+        for leftover in self.leftover_files[:MAX_REPORTED_LEFTOVERS]:
+            lines.append(f"still on disk: {leftover}")
+        remaining = len(self.leftover_files) - MAX_REPORTED_LEFTOVERS
+        if remaining > 0:
+            lines.append(f"and {remaining} more under {self.preserved}")
+        if self.preserved is not None and not self.marker_written:
+            lines.append(
+                f"{RESIDUE_MARKER} could NOT be written there, so this message is the only record"
+            )
         return lines
 
 
@@ -1188,10 +1219,7 @@ def _refuse_residue(root: Path, marker: Path) -> None:
     message = f"{root} holds the leftovers of an import that could not be fully undone."
     raise MigrationError(
         message,
-        recovery=(
-            "Nothing was changed. Resolve what that run left behind, then delete "
-            f"{marker.name} in that directory, or import under a different name."
-        ),
+        recovery="Nothing was changed. " + recovery_steps(root, profile=root.name),
         residue=outstanding or [f"see {marker}"],
     )
 
@@ -1365,8 +1393,6 @@ def _unwind(
     MCP server whose key file has been deleted is a worse state than one this command admits it
     could not clean up.
     """
-    import shutil
-
     from agentnexus_sdk.runtimes import RuntimeIntegrationError
 
     report = UnwindReport()
@@ -1390,13 +1416,48 @@ def _unwind(
                 "attempt and was not deleted"
             )
 
-    if report.complete:
-        shutil.rmtree(paths.root, ignore_errors=True)
-        return report
+    if report.rollback_complete:
+        # Every runtime change is undone, so the directory is no longer holding anything the
+        # operator needs and may go. Whether it actually went is then established by looking.
+        _remove_directory(paths.root, report)
+        if report.complete:
+            return report
+    else:
+        report.preserved = paths.root
+        report.preserved_reason = "kept for recovery, not deleted"
 
-    report.preserved = paths.root
-    _write_residue_marker(paths.root, report)
+    report.marker_written = _write_residue_marker(paths.root, report)
     return report
+
+
+def _remove_directory(root: Path, report: UnwindReport) -> None:
+    """Remove the directory this import created, then check that it is gone.
+
+    `shutil.rmtree(..., ignore_errors=True)` was being used and its result discarded, which is how
+    a directory that is still there came to be reported as removed. A file held open by a runtime
+    or a scanner is an everyday Windows outcome, not an exotic one.
+
+    The errors are still ignored *during* the walk — stopping at the first one would leave more
+    behind than continuing does — but what remains afterwards is read off the filesystem, so the
+    report describes the disk rather than the intention. Files that really were deleted are not
+    listed as remaining.
+
+    Scoped to this directory and nothing else. There is no retry that relaxes permissions and no
+    handler that takes ownership of what it cannot delete: a cleanup with more authority than the
+    thing it is cleaning up after is a worse failure mode than a leftover directory.
+    """
+    import shutil
+
+    shutil.rmtree(root, ignore_errors=True)
+    if not root.exists():
+        return
+
+    report.preserved = root
+    report.preserved_reason = "could not be removed"
+    try:
+        report.leftover_files = sorted(path for path in root.rglob("*") if path.is_file())
+    except OSError:  # pragma: no cover - a directory that cannot even be walked is still residue
+        report.leftover_files = []
 
 
 def _rollback_and_verify(
@@ -1434,8 +1495,13 @@ def _rollback_and_verify(
     report.restored.append(adapter.display_name)
 
 
-def _write_residue_marker(root: Path, report: UnwindReport) -> None:
-    """Record what was left behind, so the next run refuses instead of writing over it.
+def _write_residue_marker(root: Path, report: UnwindReport) -> bool:
+    """Record what was left behind, and report whether that record reached the disk.
+
+    Whether it did is not a detail. A directory that could not be removed may equally be one that
+    cannot be written to, and the marker was the only place the leftovers were being written down.
+    So this returns the answer and the caller says so in the error, because the operator has to be
+    told what is there whether or not a file could be left naming it.
 
     Paths and runtime names only. The backups this points at can hold runtime configuration, so it
     names their directory rather than quoting anything out of it, and no key material, archive
@@ -1446,34 +1512,65 @@ def _write_residue_marker(root: Path, report: UnwindReport) -> None:
         "outstanding": report.as_residue(),
         "backups": str(root / "backups"),
     }
-    with contextlib.suppress(OSError):
+    try:
         (root / RESIDUE_MARKER).write_text(
             json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
+    except OSError:
+        return False
+    return True
+
+
+def recovery_steps(root: Path, *, profile: str) -> str:
+    """Describe how to get back to a state where this profile can be imported again.
+
+    One description, used by both the failure and the later refusal, because they disagreed. The
+    error used to say "delete `import-incomplete.json` and import again" while
+    `require_free_destination` refuses on the profile directory existing at all — so following the
+    advice produced a second refusal with a different message and no progress.
+
+    What actually frees the name is the directory being gone, deliberately, after whatever is in
+    it has been dealt with. That is an operator's decision about a directory holding a private key
+    and configuration backups, so this says what to check and leaves the removal to them. It does
+    not print a recursive delete command for a real profile path.
+    """
+    return (
+        "To import this profile again under the same name:\n"
+        "  1. remove any runtime entry listed above, with that runtime's own command;\n"
+        f"  2. take what you need out of {root / 'backups'} — those are the runtime "
+        "configuration files as they were before this import;\n"
+        f"  3. then remove {root} yourself. Deleting {RESIDUE_MARKER} alone does not free the "
+        "name: an import refuses while that directory exists at all.\n"
+        f"Or import under a different local name with --profile <name>, which is immediate but "
+        "leaves everything above exactly where it is."
+    )
 
 
 def _failed_import(error: MigrationError, *, report: UnwindReport, paths: Any) -> MigrationError:
     """Build the error the caller sees, keeping the two failures apart.
 
-    The original failure and the state of the rollback are different facts, and the old message
+    The original failure and the state of the unwind are different facts, and the first version
     merged them: it said "nothing of this import was left behind" whatever the unwind had managed.
     """
     if report.complete:
         return MigrationError(
             str(error),
             recovery=(
-                "Everything this import created was removed and verified, so nothing was left "
-                "behind. Fix the cause and run it again."
+                "Everything this import created was removed, and both the runtime entries and the "
+                "profile directory were checked afterwards. Fix the cause and run it again."
             ),
         )
+    if report.rollback_complete:
+        headline = f"{error} The runtime changes were undone, but the cleanup did not complete."
+    else:
+        headline = f"{error} The rollback did not complete."
     return MigrationError(
-        f"{error} The rollback did not complete.",
+        headline,
         recovery=(
-            f"Some of what this import created is still on this computer and is listed below. "
-            f"{paths.root} was deliberately not deleted: the runtime configuration backups in it "
-            "are the way back, and the key file is what any still-registered entry points at. "
-            "Resolve those, then delete "
-            f"{RESIDUE_MARKER} in that directory before importing this profile again."
+            "What is still on this computer is listed below. "
+            f"{paths.root} is still there: the runtime configuration backups in it are the way "
+            "back, and the key file is what any still-registered entry points at, so nothing was "
+            "forced.\n" + recovery_steps(paths.root, profile=str(paths.profile))
         ),
         residue=report.as_residue(),
     )
