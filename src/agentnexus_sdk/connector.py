@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any, Final, TextIO
 from urllib.parse import urlsplit
 
-from agentnexus_sdk import soul, soul_scan
+from agentnexus_sdk import soul, soul_scan, updater
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions
 from agentnexus_sdk.errors import (
     AgentNexusError,
@@ -3339,6 +3339,48 @@ def _build_parser() -> Any:
         default=None,
         help="The profile name, typed back, to confirm without an interactive prompt.",
     )
+
+    # `update` is two deliberate steps, never one. `check` answers and changes nothing; `apply`
+    # changes only the profiles named on the command line. There is no `--all`, no `--yes` and no
+    # schedule: choosing which agents move to a new version is the owner's decision, and a flag
+    # that made it for them is the thing this command must not have.
+    update = commands.add_parser(
+        "update",
+        parents=[common],
+        help="Check for a newer connector release, and move chosen profiles onto it.",
+    )
+    update_actions = update.add_subparsers(dest="update_action", required=True)
+
+    update_check = update_actions.add_parser(
+        "check",
+        parents=[common],
+        help="Report the available version and where this machine stands. Changes nothing.",
+    )
+    update_check.add_argument("--origin", default="https://agntnexus.com")
+    update_check.add_argument(
+        "--profile",
+        action="append",
+        default=None,
+        help="Report this profile. Repeatable. Every profile on the machine when omitted.",
+    )
+
+    update_apply = update_actions.add_parser(
+        "apply",
+        parents=[common],
+        help="Install the available release and register the named profiles against it.",
+    )
+    update_apply.add_argument("--origin", default="https://agntnexus.com")
+    update_apply.add_argument(
+        "--profile",
+        action="append",
+        required=True,
+        help="Which profile to move. Repeatable. Required: nothing is updated implicitly.",
+    )
+    update_apply.add_argument(
+        "--install-only",
+        action="store_true",
+        help="Install the release beside the others and change no profile at all.",
+    )
     return parser
 
 
@@ -3351,6 +3393,8 @@ def main(argv: Sequence[str] | None = None, environment: Environment | None = No
     try:
         if namespace.command == "profile":
             return _run_profile_command(namespace, install_root, environment)
+        if namespace.command == "update":
+            return _run_update_command(namespace, install_root, environment)
         return _run_setup_command(namespace, install_root, environment)
     except ProfileError as error:
         environment.stderr.write(f"\nStopped: {error}\n")
@@ -3471,6 +3515,127 @@ def _run_soul_action(action: str, *, paths: Paths, namespace: Any, environment: 
             paths=paths, adapter=adapter, environment=environment, backup=namespace.backup
         )
     return run_soul_status(paths=paths, adapter=adapter, environment=environment)
+
+
+def _update_profile_names(namespace: Any, install_root: Path) -> list[str]:
+    """Return the profiles this update command was asked about, in a stable order."""
+    if namespace.profile:
+        return sorted(dict.fromkeys(namespace.profile))
+    return sorted(summary.name for summary in list_profiles(install_root))
+
+
+def _describe_versions(check: updater.UpdateCheck, out: TextIO) -> None:
+    """Print the three version questions separately, because they have three different answers.
+
+    Installed, registered and running are not the same thing, and reporting one as if it answered
+    the others is how a connector comes to claim a fix is live while the old server is still being
+    served. Running is not knowable from here and is printed as unknown.
+    """
+    out.write(f"  Available at {check.origin}: {check.available}\n")
+    out.write(f"  Installed here: {', '.join(check.installed) or 'none found'}\n")
+    out.write(f"  {updater.running_version_note()}\n")
+    if not check.profiles:
+        out.write("  No profiles on this machine.\n")
+        return
+    out.write("\n  Registered version, per profile:\n")
+    for profile in check.profiles:
+        registered = profile.registered or "unknown"
+        out.write(f"    {profile.profile}: {registered}")
+        out.write(f" ({profile.detail})\n" if profile.detail else "\n")
+
+
+def _run_update_check(namespace: Any, install_root: Path, environment: Environment) -> int:
+    """Report what is available and where this machine stands. Installs nothing."""
+    out = environment.stdout
+    check = updater.check_for_update(
+        install_root=install_root,
+        origin=str(namespace.origin),
+        profiles=_update_profile_names(namespace, install_root),
+        fetch=updater.https_fetcher(),
+        environment=environment,
+    )
+    out.write("\nConnector update check\n")
+    _describe_versions(check, out)
+    behind = [
+        profile.profile
+        for profile in check.profiles
+        if profile.registered is not None and profile.registered != check.available
+    ]
+    out.write("\n")
+    if behind:
+        chosen = " ".join(f"--profile {name}" for name in behind)
+        out.write(f"  Behind: {', '.join(behind)}\n")
+        out.write(f"  To move them: agentnexus-connector update apply {chosen}\n")
+    else:
+        out.write("  No profile is behind the available release.\n")
+    out.write("  Nothing was installed or changed by this command.\n")
+    return EXIT_OK
+
+
+def _run_update_apply(namespace: Any, install_root: Path, environment: Environment) -> int:
+    """Install the available release, then register the explicitly named profiles against it.
+
+    Two separable outcomes, reported separately: the package can install successfully while a
+    profile fails to move, and that is a failure of the update rather than a success with a note.
+    """
+    out = environment.stdout
+    profiles = _update_profile_names(namespace, install_root)
+    manifest = updater.fetch_manifest(str(namespace.origin), fetch=updater.https_fetcher())
+    result = updater.install_release(
+        install_root=install_root,
+        manifest=manifest,
+        fetch=updater.https_fetcher(),
+        runner=environment.run,
+        system=environment.system,
+    )
+    out.write(f"\nConnector {result.version}: {'; '.join(result.notes)}\n")
+    out.write(f"  Installed at {result.root}\n")
+    out.write("  Older versions were left in place.\n")
+
+    if namespace.install_only:
+        out.write("\n  --install-only: no profile was changed.\n")
+        out.write("  Installed and staged. No agent will use it until a profile is updated.\n")
+        return EXIT_OK
+
+    outcomes = updater.update_profiles(
+        install_root=install_root,
+        version=result.version,
+        profiles=profiles,
+        environment=environment,
+    )
+    out.write("\n  Per profile:\n")
+    for outcome in outcomes:
+        out.write(f"    {outcome.profile}: {outcome.status} — {outcome.detail}\n")
+    if any(outcome.status == updater.STATUS_UPDATED for outcome in outcomes):
+        out.write(
+            "\n  Installed and registered. A running agent keeps its old MCP server until it is\n"
+            "  restarted, so restart each updated agent deliberately.\n"
+        )
+        out.write(
+            "  Scheduled commands that name a version path still name the old one. This command\n"
+            "  does not rewrite them; adjust any cron entry or scheduled task yourself.\n"
+        )
+    failed = [outcome.profile for outcome in outcomes if outcome.status == updater.STATUS_FAILED]
+    if failed:
+        environment.stderr.write(
+            f"\n  Failed, and left on their previous version: {', '.join(failed)}\n"
+        )
+        return EXIT_RUNTIME
+    return EXIT_OK
+
+
+def _run_update_command(namespace: Any, install_root: Path, environment: Environment) -> int:
+    """Dispatch one update action. Neither installs a service nor schedules anything."""
+    prepare_installation(install_root, environment)
+    try:
+        if namespace.update_action == "check":
+            return _run_update_check(namespace, install_root, environment)
+        return _run_update_apply(namespace, install_root, environment)
+    except updater.UpdateError as error:
+        environment.stderr.write(f"\nUpdate stopped: {error}\n")
+        if error.recovery:
+            environment.stderr.write(f"What to do: {error.recovery}\n")
+        return EXIT_RUNTIME
 
 
 def _run_profile_command(namespace: Any, install_root: Path, environment: Environment) -> int:
