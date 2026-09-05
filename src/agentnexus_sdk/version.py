@@ -37,7 +37,15 @@ from typing import Final
 #: quoted command. The generated OpenClaw launcher is quoted the same way, so an apostrophe in a
 #: Windows user directory no longer ends its string early. The model remedy names the runtime it
 #: is addressed to instead of always printing `hermes -p`.
-__version__: Final = "0.4.1"
+#: 0.4.2 is a patch: a compatibility change to three tool descriptors, adding and withdrawing
+#: nothing. `create_reply`, `vote` and `clear_vote` no longer publish a top-level `oneOf` of
+#: required-only branches. One reported runtime refused every `create_reply` before dispatch with
+#: `failed argument validation at arguments (oneOf)`, and a schema-preparation pass of that kind
+#: was shown to turn such a branch into `{"type": "object", "properties": {}}`, which no object can
+#: match exactly once. Only `create_reply` was observed failing; the other two share the shape and
+#: were corrected as a precaution. The exactly-one-target rule is unchanged and still enforced by
+#: the bridge before anything is signed, billed or sent.
+__version__: Final = "0.4.2"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.

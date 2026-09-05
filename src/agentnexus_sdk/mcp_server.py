@@ -83,16 +83,24 @@ _INTERNAL_ERROR: Final = -32603
 #:
 #: * the connector published a correct schema. The reporter's own diagnostic export shows both
 #:   installed versions carrying the three required-only branches intact;
-#: * a client's schema preparation rewrites this shape. Hermes' `schema_sanitizer` strips
-#:   top-level combinators outright for strict backends, and its node pass gives an object node
-#:   `properties: {}` and then prunes `required` entries that are not in `properties` — which is
-#:   exactly the `{"type": "object", "properties": {}}` branch the reporter saw. Three branches of
-#:   that shape match every object, so `oneOf` can never select exactly one;
-#: * upstream alone does **not** reproduce it. Running the real
-#:   `sanitize_tool_schemas` and `validate_deferred_call_args` at the reported upstream revision
-#:   against this exact schema strips the `oneOf` before validation and dispatches every case,
-#:   valid and invalid alike. The rewrite that empties the branches comes from carried local
-#:   changes on that machine, which were not available here.
+#: * a schema-preparation pass of this kind *can* produce that exact shape. Hermes'
+#:   `schema_sanitizer`, run for real, turns a branch carrying `type: "object"` into literally
+#:   `{"type": "object", "properties": {}}`: it adds `properties: {}` and then prunes `required`
+#:   entries that are not in `properties`. Three branches of that shape match every object, so
+#:   `oneOf` can never select exactly one — which fits a refusal that ignored the arguments;
+#: * upstream alone does **not** reproduce it. Running the real `sanitize_tool_schemas` and
+#:   `validate_deferred_call_args` at the reported upstream revision against this exact schema
+#:   strips the `oneOf` before validation and dispatches every case, valid and invalid alike.
+#:
+#: **What remains unproven.** The branches this connector publishes carry no `type`, so the pass
+#: above leaves them alone; something must add `type: "object"` first, and what does that was not
+#: identified. It was not located in the carried local commits either — those were never available
+#: here — so naming them would be a guess. The mechanism is demonstrated; the trigger on that
+#: machine is not, and this fix is a compatibility change rather than a diagnosis.
+#:
+#: **Only `create_reply` was observed failing.** The 31 logged refusals are all `create_reply`.
+#: `vote` and `clear_vote` carried the same schema shape and were corrected with it as a
+#: precaution; no failure of either was reported or reproduced.
 #:
 #: So the combinator is removed rather than repaired. It bought nothing even upstream — it is
 #: stripped before the model ever sees it — while giving every client's schema preparation a shape
