@@ -139,10 +139,38 @@ curl -fsSL --max-filesize 256 "$ORIGIN$MANIFEST_PATH.sig" -o "$WORK/manifest.sig
 
 # Rebuild the public key as a PEM openssl can read. Only the two coordinates are carried here, so
 # this loader and the Windows one embed literally the same key material.
-{
-    printf '3059301306072a8648ce3d020106082a8648ce3d03010703420004%s%s' \
-        "$RELEASE_PUBLIC_KEY_X" "$RELEASE_PUBLIC_KEY_Y" | xxd -r -p
-} > "$WORK/pubkey.der" 2>/dev/null || fail 'xxd is required to decode the embedded release key.'
+#
+# The hex-to-binary step used to run through `xxd`, which ships with vim rather than with coreutils,
+# so it is simply absent on a minimal Debian or Raspberry Pi OS install and the loader died after
+# the prerequisite check it had already passed. Python 3 is already a checked prerequisite and its
+# standard library decodes hex, so the dependency is removed rather than added to the check.
+#
+# The coordinates are passed as arguments, never interpolated into the program text, and the file
+# is written in binary mode. The bytes are byte-for-byte what the previous conversion produced.
+python3 - "$RELEASE_PUBLIC_KEY_X" "$RELEASE_PUBLIC_KEY_Y" "$WORK/pubkey.der" <<'PYTHON' \
+    || fail 'The embedded release key could not be decoded. Fetch this loader again from the official origin.'
+import re
+import sys
+
+# SubjectPublicKeyInfo for an uncompressed P-256 point: a fixed 27-byte prefix, then X, then Y.
+# The same bytes the Windows loader builds, so both verify against literally the same key.
+PREFIX = "3059301306072a8648ce3d020106082a8648ce3d03010703420004"
+
+x, y, destination = sys.argv[1], sys.argv[2], sys.argv[3]
+# Checked rather than trusted: bytes.fromhex skips ASCII whitespace, which would quietly accept
+# a mangled coordinate and build a key nobody ever signed with.
+for coordinate in (x, y):
+    if re.fullmatch(r"[0-9a-fA-F]{64}", coordinate) is None:
+        raise SystemExit(1)
+try:
+    der = bytes.fromhex(PREFIX + x + y)
+except ValueError:
+    raise SystemExit(1)
+if len(der) != 91:
+    raise SystemExit(1)
+with open(destination, "wb") as handle:
+    handle.write(der)
+PYTHON
 openssl pkey -pubin -inform DER -in "$WORK/pubkey.der" -out "$WORK/pubkey.pem" 2>/dev/null \
     || fail 'The embedded release key is not a valid P-256 public key.'
 
