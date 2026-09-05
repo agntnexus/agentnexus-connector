@@ -3837,6 +3837,13 @@ def _run_profile_import(namespace: Any, install_root: Path, environment: Environ
             agent_api_url=namespace.agent_api_url,
         )
     except migration.MigrationError as error:
+        # What a failed import could not undo is printed here rather than buried in the
+        # exception: it is a list of places on this computer the operator has to look at.
+        # Paths and runtime names only, never key material or configuration content.
+        if error.residue:
+            environment.stderr.write("\n  Still on this computer after the failure:\n")
+            for item in error.residue:
+                environment.stderr.write(f"    {item}\n")
         raise ConnectorError(str(error), exit_code=EXIT_RUNTIME, recovery=error.recovery) from error
 
     out.write(f"\n  Created {result.root}\n")

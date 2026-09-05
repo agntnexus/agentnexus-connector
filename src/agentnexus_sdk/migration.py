@@ -39,6 +39,7 @@ a private key is exactly what this is designed not to produce.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import io
@@ -46,6 +47,7 @@ import json
 import os
 import secrets
 import zipfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -123,6 +125,13 @@ EXCLUDED_CATEGORIES: Final = (
     "backups, staging files and lock files",
 )
 
+#: Written into a profile directory that a failed import could not fully clean up.
+#:
+#: Its presence is what stops the next run from walking over a half-undone state. It records paths
+#: and runtime names only: the backups it points at may hold runtime configuration, so it names
+#: them rather than quoting them.
+RESIDUE_MARKER: Final = "import-incomplete.json"
+
 #: The warning that has to be true on both ends of the transfer.
 SECOND_COPY_WARNING: Final = (
     "Exporting copies the private key. After an import there are two files able to sign as this "
@@ -136,10 +145,22 @@ SECOND_COPY_WARNING: Final = (
 class MigrationError(Exception):
     """An export or import refused, with something the operator can act on."""
 
-    def __init__(self, message: str, *, recovery: str | None = None) -> None:
-        """Carry the recovery step beside the failure, the way the connector's errors do."""
+    def __init__(
+        self, message: str, *, recovery: str | None = None, residue: Sequence[str] = ()
+    ) -> None:
+        """Carry the recovery step beside the failure, the way the connector's errors do.
+
+        `residue` is what a failed operation could **not** undo, named so the operator can find it:
+        a runtime entry that is still registered, a directory kept because the backups in it are
+        the only way back. It is empty for the ordinary refusals, which change nothing.
+
+        Every string in it is a path or a runtime name. No key material, no configuration content
+        and no password ever goes in here, because this is printed and may be pasted into a bug
+        report.
+        """
         super().__init__(message)
         self.recovery = recovery
+        self.residue = list(residue)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -590,10 +611,19 @@ def export_profile(
 
 
 def _write_private_file(destination: Path, payload: bytes) -> None:
-    """Write the sealed archive, created exclusively and not readable by others where that holds.
+    """Write the sealed archive completely, or leave nothing behind that looks like one.
 
     Exclusive creation matters for the same reason it does for a key file: this one carries a key
-    too, and silently replacing somebody's export is destroying a credential.
+    too, and silently replacing somebody's export is destroying a credential. It is also what makes
+    the cleanup below safe — `O_EXCL` succeeding proves this call created that file, so removing it
+    on failure cannot remove somebody else's.
+
+    **`os.write` is not required to write everything it is given.** It returns how many bytes it
+    took, and a single call was being trusted to take all of them. A short write would have left a
+    truncated file with no error anywhere: the export would look successful, and would fail to
+    authenticate on the destination computer, long after the source had been cleaned up. So this
+    loops until the payload is gone, and treats a write that takes nothing as a failure rather than
+    spinning on it.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
     # `os.O_BINARY` matters and is not optional. On Windows `os.open` defaults to *text* mode, so
@@ -607,10 +637,33 @@ def _write_private_file(destination: Path, payload: bytes) -> None:
     except OSError as error:
         message = f"{destination} could not be created: {error}"
         raise MigrationError(message, recovery="Nothing was written.") from error
+
+    written = 0
     try:
-        os.write(descriptor, payload)
-    finally:
+        while written < len(payload):
+            taken = os.write(descriptor, payload[written:])
+            if taken <= 0:
+                message = (
+                    f"Writing {destination} stopped after {written} of {len(payload)} bytes with "
+                    "no progress."
+                )
+                raise MigrationError(message, recovery="Nothing usable was left behind.")
+            written += taken
+    except (OSError, MigrationError) as error:
         os.close(descriptor)
+        # Only this attempt's file, and only because `O_EXCL` proved this call created it.
+        destination.unlink(missing_ok=True)
+        if isinstance(error, MigrationError):
+            raise
+        message = f"{destination} could not be written after {written} bytes: {error}"
+        raise MigrationError(
+            message,
+            recovery=(
+                "The partly written file was removed, so nothing that looks like a valid export "
+                "was left behind. Free space or choose another location, then export again."
+            ),
+        ) from error
+    os.close(descriptor)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -853,6 +906,41 @@ def _require_identity(manifest: dict[str, Any], members: dict[str, bytes]) -> No
 
 
 @dataclass
+class UnwindReport:
+    """What a failed import managed to undo, and what it did not.
+
+    The distinction this exists to keep is between "rolled back" and "asked the adapter to roll
+    back". `adapter.rollback()` returning is not evidence: `OpenClawAdapter.rollback` calls
+    `_remove_entry`, which *returns* the reason a removal was refused rather than raising, so a
+    swallowed refusal used to look exactly like success. Every entry is therefore read back.
+    """
+
+    #: Runtimes whose entry was confirmed gone afterwards.
+    restored: list[str] = field(default_factory=list)
+    #: Runtimes whose entry is still registered, or whose state could not be established. Each
+    #: string names the runtime and why, with no configuration content in it.
+    failed: list[str] = field(default_factory=list)
+    #: Things this import created outside its own directory and deliberately did not delete.
+    left_in_place: list[str] = field(default_factory=list)
+    #: The profile directory, when it was kept because recovery depends on what is in it.
+    preserved: Path | None = None
+
+    @property
+    def complete(self) -> bool:
+        """Report whether every change this import made was undone and verified."""
+        return not self.failed
+
+    def as_residue(self) -> list[str]:
+        """Render what is still on this machine, for an error message. Paths and names only."""
+        lines = list(self.failed)
+        lines.extend(self.left_in_place)
+        if self.preserved is not None:
+            lines.append(f"kept for recovery, not deleted: {self.preserved}")
+            lines.append(f"runtime configuration backups: {self.preserved / 'backups'}")
+        return lines
+
+
+@dataclass
 class ImportResult:
     """What was created, and what the operator still has to do."""
 
@@ -886,7 +974,6 @@ def import_profile(
     **Nothing is started.** The agent is registered with its runtime and left stopped, because the
     operator has to stop the source before this one should run.
     """
-    from agentnexus_sdk.connector import Paths
     from agentnexus_sdk.profiles import ProfileError, profile_lock, validate_profile_name
 
     try:
@@ -903,15 +990,12 @@ def import_profile(
 
     try:
         with profile_lock(install_root, profile):
-            if Paths.for_profile(install_root, profile).root.exists():
-                message = f"A {profile!r} profile already exists in {install_root}."
-                raise MigrationError(
-                    message,
-                    recovery=(
-                        "Refusing to overwrite it. Import under a different name with --profile, "
-                        "or remove that profile deliberately first."
-                    ),
-                )
+            require_free_destination(
+                install_root=install_root,
+                profile=profile,
+                environment=environment,
+                runtimes=[str(name) for name in (contents.source.get("runtimes") or [])],
+            )
             return _import_locked(
                 install_root=install_root,
                 profile=profile,
@@ -921,6 +1005,195 @@ def import_profile(
             )
     except ProfileError as error:
         raise MigrationError(str(error), recovery=error.recovery) from error
+
+
+def _another_name(profile: str) -> str:
+    """Suggest a local name that is unlikely to be the one that just collided."""
+    return f"{profile}2" if not profile[-1:].isdigit() else f"{profile}-new"
+
+
+def require_free_destination(
+    *,
+    install_root: Path,
+    profile: str,
+    environment: Any,
+    runtimes: Sequence[str],
+) -> None:
+    """Refuse before anything is written if this name is taken anywhere that matters.
+
+    **A missing AgentNexus profile directory proves nothing on its own.** The connector's directory
+    is not where a runtime keeps its own profile: Hermes owns `<HERMES_HOME>/profiles/<name>` with
+    its own `config.yaml`, `.env` and `SOUL.md`, and OpenClaw owns whatever `OPENCLAW_CONFIG_PATH`
+    and `OPENCLAW_STATE_DIR` point at. An import that only looked at its own directory would
+    register into somebody's existing runtime profile and, when the soul was installed, overwrite a
+    document they wrote.
+
+    So this asks each runtime the archive came from, before the import creates anything:
+
+    * is there already an MCP entry under this profile's server name;
+    * does the runtime already have a profile of this name;
+    * is there already an instruction document where this one would be written.
+
+    A runtime that cannot be asked is treated as occupied. That is deliberately conservative and
+    the cost of being wrong is small — the operator picks another local name — while the cost the
+    other way is writing a key into somebody else's agent.
+
+    There is **no force option** and none is being added. Overwriting an existing agent's runtime
+    configuration is not a thing to make one flag away.
+    """
+    from agentnexus_sdk.connector import Paths
+    from agentnexus_sdk.runtimes import ADAPTERS
+
+    # `Paths.for_profile` runs `profile_directory`, which already refuses a reparse point on the
+    # install root, the profiles root and this profile's own directory, and refuses a name that
+    # collides with an existing one only by case. What it cannot know about is the *runtime's*
+    # side, which is what the rest of this function asks about.
+    paths = Paths.for_profile(install_root, profile)
+    suggestion = _another_name(profile)
+
+    if paths.root.exists():
+        residue = paths.root / RESIDUE_MARKER
+        if residue.is_file():
+            _refuse_residue(paths.root, residue)
+        message = f"A {profile!r} profile already exists in {install_root}."
+        raise MigrationError(
+            message,
+            recovery=(
+                f"Refusing to overwrite it. Import under a different name with "
+                f"--profile {suggestion}, or remove that profile deliberately first."
+            ),
+        )
+
+    context = paths.runtime_context()
+    for name in sorted(set(runtimes) & set(ADAPTERS)):
+        adapter = ADAPTERS[name](which=environment.which, runner=environment.run, context=context)
+        if not adapter.detect().installed:
+            continue
+        _require_free_runtime_target(adapter, name=name, profile=profile, suggestion=suggestion)
+
+    # OpenClaw's real target paths, as its adapter drives them: `OPENCLAW_CONFIG_PATH` and
+    # `OPENCLAW_STATE_DIR`. `RuntimeContext.prepare()` creates both during `configure`, so an
+    # import that did not look would create a registration inside a directory somebody else owns.
+    for candidate in (context.openclaw_config, context.openclaw_state):
+        if candidate is None:
+            continue
+        _require_real_target(candidate, suggestion=suggestion)
+        if candidate.exists():
+            message = f"{candidate} already exists."
+            raise MigrationError(
+                message,
+                recovery=(
+                    "That is where this profile's OpenClaw configuration and state would live, "
+                    "and an import must not write into somebody's existing one. Use "
+                    f"--profile {suggestion}."
+                ),
+            )
+
+
+def _require_real_target(path: Path, *, suggestion: str) -> None:
+    """Refuse a destination reached through a link, so "it does not exist" means what it says.
+
+    A junction costs nothing to create on Windows and `is_symlink()` reports it as an ordinary
+    directory. Without this, an absent path could be absent only because the link it sits under
+    points somewhere else entirely — and the import would then write a key through it.
+    """
+    from agentnexus_sdk.soul import SoulError, require_real_location
+
+    try:
+        require_real_location(path)
+    except SoulError as error:
+        raise MigrationError(
+            str(error),
+            recovery=(
+                "Nothing was written. An import will not follow a link to decide a destination "
+                f"is free. Remove the link, or use --profile {suggestion}."
+            ),
+        ) from error
+
+
+def _require_free_runtime_target(adapter: Any, *, name: str, profile: str, suggestion: str) -> None:
+    """Ask one runtime whether this profile's name is already its own. Refuse if it is."""
+    from agentnexus_sdk.runtimes import RuntimeIntegrationError
+
+    try:
+        entry = adapter.existing_entry()
+    except RuntimeIntegrationError as error:
+        message = f"{adapter.display_name} could not be asked whether {profile!r} is free: {error}"
+        raise MigrationError(
+            message,
+            recovery=(
+                "Nothing was written. A runtime this connector cannot read is treated as "
+                f"occupied rather than assumed empty. Fix that, or use --profile {suggestion}."
+            ),
+        ) from error
+    if entry is not None:
+        message = f"{adapter.display_name} already has an MCP entry for the {profile!r} profile."
+        raise MigrationError(
+            message,
+            recovery=(
+                "Refusing to replace it: it belongs to an agent that is already set up here. "
+                f"Use --profile {suggestion}."
+            ),
+        )
+
+    existing_profiles = getattr(adapter, "existing_profiles", None)
+    if existing_profiles is not None:
+        try:
+            names = existing_profiles()
+        except RuntimeIntegrationError as error:
+            message = f"{adapter.display_name} could not list its profiles: {error}"
+            raise MigrationError(
+                message,
+                recovery=(
+                    "Nothing was written. Without that list this cannot tell whether "
+                    f"{profile!r} is free, and will not guess. Use --profile {suggestion}."
+                ),
+            ) from error
+        target = getattr(adapter, "_context", None)
+        wanted = getattr(target, "hermes_profile", None) or profile
+        if wanted in names:
+            message = f"{adapter.display_name} already has a {wanted!r} profile of its own."
+            raise MigrationError(
+                message,
+                recovery=(
+                    "An import must not register into an existing runtime profile or overwrite "
+                    f"its instruction document. Use --profile {suggestion}."
+                ),
+            )
+
+    try:
+        location = adapter.soul_location()
+    except (RuntimeIntegrationError, NotImplementedError):
+        # No published location is not a collision: it means nothing would be written there.
+        return
+    _require_real_target(location.path, suggestion=suggestion)
+    if location.path.exists():
+        message = f"{location.path} already exists."
+        raise MigrationError(
+            message,
+            recovery=(
+                "That is the instruction document this import would write. Refusing to replace "
+                f"somebody's own. Use --profile {suggestion}."
+            ),
+        )
+
+
+def _refuse_residue(root: Path, marker: Path) -> None:
+    """Refuse to run over the leftovers of an import that could not fully undo itself."""
+    try:
+        record = json.loads(marker.read_text(encoding="utf-8"))
+        outstanding = [str(item) for item in record.get("outstanding", [])]
+    except (OSError, ValueError):  # pragma: no cover - a damaged marker is still a refusal
+        outstanding = []
+    message = f"{root} holds the leftovers of an import that could not be fully undone."
+    raise MigrationError(
+        message,
+        recovery=(
+            "Nothing was changed. Resolve what that run left behind, then delete "
+            f"{marker.name} in that directory, or import under a different name."
+        ),
+        residue=outstanding or [f"see {marker}"],
+    )
 
 
 def _import_locked(
@@ -950,28 +1223,20 @@ def _import_locked(
         install_root=Path(install_root),
     )
     result = ImportResult(profile=profile, root=paths.root)
+    #: Adapters this call configured, with the handle to undo each.
     configured: list[tuple[Any, Any]] = []
-
-    def unwind() -> None:
-        """Undo exactly what this import created, and nothing that was here before it."""
-        import shutil
-
-        for adapter, outcome in reversed(configured):
-            if outcome.changed:
-                try:
-                    adapter.rollback(outcome.backup)
-                except RuntimeIntegrationError:  # pragma: no cover - defensive
-                    result.notes.append(f"{adapter.display_name} could not be rolled back")
-        shutil.rmtree(paths.root, ignore_errors=True)
+    #: Adapters whose `configure` raised. Their state is *unknown*, not unchanged: Hermes creates
+    #: its profile and may replace an entry before it fails, and OpenClaw removes the old entry
+    #: before adding the new one with no rollback of its own. They are verified like the rest.
+    attempted: list[Any] = []
 
     try:
         # The key first. `write_private_key_file` creates it exclusively at mode 600 where the
         # platform enforces that, and refuses rather than overwriting anything.
         paths.key_directory.mkdir(parents=True, exist_ok=True)
         try:
-            write_private_key_file(
-                signer_from_bytes(contents.members[MEMBER_KEY]), paths.private_key
-            )
+            signer = signer_from_bytes(contents.members[MEMBER_KEY])
+            write_private_key_file(signer, paths.private_key)
         except KeyHandlingError as error:
             message = f"The private key could not be written: {error}"
             raise MigrationError(message, recovery="Nothing was left behind.") from error
@@ -1008,13 +1273,13 @@ def _import_locked(
                     f"{name} is not installed here, so nothing was registered for it"
                 )
                 continue
+            attempted.append(adapter)
             try:
                 outcome = adapter.configure(spec, backup_directory=paths.backups)
             except RuntimeIntegrationError as error:
                 message = f"{adapter.display_name} refused the registration: {error}"
-                raise MigrationError(
-                    message, recovery="Nothing of this import was left behind."
-                ) from error
+                raise MigrationError(message) from error
+            attempted.pop()
             configured.append((adapter, outcome))
             result.registered.append(adapter.display_name)
 
@@ -1068,17 +1333,150 @@ def _import_locked(
                 soul_error=SoulError,
                 runtime_error=RuntimeIntegrationError,
             )
-    except MigrationError:
-        unwind()
-        raise
+    except MigrationError as error:
+        report = _unwind(paths=paths, configured=configured, attempted=attempted)
+        raise _failed_import(error, report=report, paths=paths) from error
     except Exception as error:
-        unwind()
-        message = f"The import failed and was rolled back: {error}"
-        raise MigrationError(message, recovery="Nothing of this import was left behind.") from error
+        report = _unwind(paths=paths, configured=configured, attempted=attempted)
+        wrapped = MigrationError(f"The import failed: {error}")
+        raise _failed_import(wrapped, report=report, paths=paths) from error
 
     result.notes.append(SECOND_COPY_WARNING)
     result.notes.append("nothing was started; start the agent yourself once the source is stopped")
     return result
+
+
+def _unwind(
+    *, paths: Any, configured: Sequence[tuple[Any, Any]], attempted: Sequence[Any]
+) -> UnwindReport:
+    """Undo what this import created, verify it, and report what would not come back.
+
+    Two things changed here after review. The rollback is **read back** rather than assumed, and a
+    directory whose backups are the only route to recovery is **kept** rather than deleted.
+
+    Reading back matters because the adapters do not fail the same way. `HermesAdapter.rollback`
+    copies a backup over the configuration and raises nothing; `OpenClawAdapter.rollback` calls
+    `_remove_entry`, which *returns* the reason OpenClaw refused rather than raising — its own
+    configuration guard can reject the write. A caught exception was therefore never going to be a
+    reliable signal, and the entry itself is.
+
+    Keeping the directory matters because deleting it destroys the runtime configuration backups
+    taken on the way in *and* the key file that a still-registered entry points at. A registered
+    MCP server whose key file has been deleted is a worse state than one this command admits it
+    could not clean up.
+    """
+    import shutil
+
+    from agentnexus_sdk.runtimes import RuntimeIntegrationError
+
+    report = UnwindReport()
+    for adapter, outcome in reversed(list(configured)):
+        if not outcome.changed:
+            report.restored.append(adapter.display_name)
+            continue
+        _rollback_and_verify(
+            adapter, outcome.backup, report=report, runtime_error=RuntimeIntegrationError
+        )
+
+    # `configure` can fail after changing something. Hermes restores its own configuration backup
+    # and OpenClaw does not, so neither may be assumed clean: the entry is read back either way.
+    for adapter in reversed(list(attempted)):
+        _rollback_and_verify(adapter, None, report=report, runtime_error=RuntimeIntegrationError)
+        created = getattr(adapter, "_context", None)
+        runtime_profile = getattr(created, "hermes_profile", None)
+        if runtime_profile:
+            report.left_in_place.append(
+                f"{adapter.display_name} profile {runtime_profile!r} may have been created by this "
+                "attempt and was not deleted"
+            )
+
+    if report.complete:
+        shutil.rmtree(paths.root, ignore_errors=True)
+        return report
+
+    report.preserved = paths.root
+    _write_residue_marker(paths.root, report)
+    return report
+
+
+def _rollback_and_verify(
+    adapter: Any, backup: Any, *, report: UnwindReport, runtime_error: type[Exception]
+) -> None:
+    """Ask one adapter to undo its change, then confirm from the runtime that it did."""
+    failure: str | None = None
+    try:
+        adapter.rollback(backup)
+    except runtime_error as error:
+        failure = str(error)
+    except Exception as error:  # pragma: no cover - defensive; an adapter must not end the unwind
+        failure = str(error)
+
+    try:
+        entry = adapter.existing_entry()
+    except Exception as error:
+        # Any failure here means "cannot confirm", which is reported as a failure rather than
+        # assumed clean. An unwind that stopped on an adapter's exception would also leave the
+        # remaining adapters untouched.
+        report.failed.append(
+            f"{adapter.display_name}: could not confirm the entry was removed ({error})"
+        )
+        return
+    if entry is not None:
+        detail = f" ({failure})" if failure else ""
+        report.failed.append(
+            f"{adapter.display_name}: the MCP entry is still registered and must be removed by "
+            f"hand{detail}"
+        )
+        return
+    if failure is not None:
+        report.restored.append(f"{adapter.display_name} (after reporting: {failure})")
+        return
+    report.restored.append(adapter.display_name)
+
+
+def _write_residue_marker(root: Path, report: UnwindReport) -> None:
+    """Record what was left behind, so the next run refuses instead of writing over it.
+
+    Paths and runtime names only. The backups this points at can hold runtime configuration, so it
+    names their directory rather than quoting anything out of it, and no key material, archive
+    content or password is written here.
+    """
+    document = {
+        "written_at": dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "outstanding": report.as_residue(),
+        "backups": str(root / "backups"),
+    }
+    with contextlib.suppress(OSError):
+        (root / RESIDUE_MARKER).write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+
+def _failed_import(error: MigrationError, *, report: UnwindReport, paths: Any) -> MigrationError:
+    """Build the error the caller sees, keeping the two failures apart.
+
+    The original failure and the state of the rollback are different facts, and the old message
+    merged them: it said "nothing of this import was left behind" whatever the unwind had managed.
+    """
+    if report.complete:
+        return MigrationError(
+            str(error),
+            recovery=(
+                "Everything this import created was removed and verified, so nothing was left "
+                "behind. Fix the cause and run it again."
+            ),
+        )
+    return MigrationError(
+        f"{error} The rollback did not complete.",
+        recovery=(
+            f"Some of what this import created is still on this computer and is listed below. "
+            f"{paths.root} was deliberately not deleted: the runtime configuration backups in it "
+            "are the way back, and the key file is what any still-registered entry points at. "
+            "Resolve those, then delete "
+            f"{RESIDUE_MARKER} in that directory before importing this profile again."
+        ),
+        residue=report.as_residue(),
+    )
 
 
 def _imported_stage() -> Any:
