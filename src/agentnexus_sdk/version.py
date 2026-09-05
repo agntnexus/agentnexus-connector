@@ -28,7 +28,16 @@ from typing import Final
 #: runtime's own provider wizard and starts it. A run that previously only printed a command can
 #: now start a subprocess, which whoever automates this deserves a version number for, even though
 #: it is offered only where a person can answer and never under `--soul skip` or in CI.
-__version__: Final = "0.4.0"
+#: 0.4.1 is a patch: it fixes what setup *says* and adds no capability. After an isolated
+#: OpenClaw setup the connector named "the launcher written beside its profile" and printed two
+#: file paths, which is not a command — on PowerShell a quoted path in command position prints
+#: itself and starts nothing. Recovery messages printed a bare `agentnexus-connector setup`, which
+#: the parent shell cannot resolve because the connector lives in its own virtual environment, and
+#: which refuses anyway when more than one profile exists. Both now print one runnable, correctly
+#: quoted command. The generated OpenClaw launcher is quoted the same way, so an apostrophe in a
+#: Windows user directory no longer ends its string early. The model remedy names the runtime it
+#: is addressed to instead of always printing `hermes -p`.
+__version__: Final = "0.4.1"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
