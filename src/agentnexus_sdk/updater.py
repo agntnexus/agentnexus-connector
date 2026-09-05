@@ -21,7 +21,48 @@ and activation as two separate steps with two separate outcomes.
 document is parsed at all; a re-canonicalisation check so a differently-ordered document cannot
 inherit a signature; artifact URLs pinned to the configured origin; and size plus SHA-256 verified
 against the manifest before anything is installed. This module calls that code and adds no second
-opinion. **Nothing is ever installed from a package index**: pip is given a verified file on disk.
+opinion.
+
+**The connector wheel** is never resolved by name against a package index: pip is handed a verified
+file on disk. **Its dependencies are.** `httpx2`, `cryptography` and `pyyaml` are fetched by pip
+from whatever index that machine is configured to use, exactly as `connect.sh` and `connect.ps1`
+already fetch them. The signature chain covers the connector's own bytes and nothing beyond them,
+and saying otherwise would claim a guarantee this does not have.
+
+## What is never destroyed
+
+An update may add an installation. It may not take one away.
+
+The `.installed` marker records that a version was checked; its **absence proves nothing**, because
+every release the published loaders installed has no marker and those loaders are not being
+changed. So a directory holding a working connector is adopted or refused, never cleared — and a
+directory this module cannot account for at all is refused with the reason rather than removed.
+Only a directory carrying this module's own staging marker, with no working installation under it,
+may be deleted, and cleanup on failure touches only what the failed attempt itself created.
+
+`classify_version` is where that judgement lives, and it distinguishes *unmarked* — somebody's
+installation, usually the loader's — from *ours-partial* and from *unrecognised*.
+
+Adoption checks that the package in the directory imports, lists its MCP tools and reports the
+version its directory name claims. It does **not** establish that those bytes ever passed a
+signature check, because nothing on disk records that, so it is recorded as `adopted` and never
+reported as `verified`.
+
+## Locking
+
+Two locks, and the order between them is fixed: **installation first, then profile.**
+
+`installation_lock` covers the shared `connector/<version>/` tree, which no profile lock reaches —
+two updates for two different profiles are two legitimate concurrent runs, and without it both
+would arrive at the same directory with nothing between them. It is taken *before* the directory's
+state is read, because a decision made on an unlocked read is one another process may invalidate
+before it is acted on. `install_release` takes only this lock; `activate_version` takes only a
+profile lock; nothing takes them the other way round, so they cannot deadlock.
+
+**The shell loaders take no lock at all.** A `connect.sh` or `connect.ps1` run happening at the
+same moment as an update is outside what this serialises, and changing that means changing signed
+installers, which is a release rather than a correction. What limits the damage is that neither
+side deletes: the loaders reuse an existing virtual environment and this module never removes one.
 
 ## What is deliberately not decided here
 
@@ -38,6 +79,8 @@ opinion. **Nothing is ever installed from a package index**: pip is given a veri
 
 from __future__ import annotations
 
+import contextlib
+import datetime as dt
 import json
 import shutil
 import subprocess
@@ -60,9 +103,21 @@ from agentnexus_sdk.release import Artifact, ReleaseError, ReleaseManifest, veri
 RELEASE_PUBLIC_KEY_X: Final = "REPLACE_RELEASE_PUBLIC_KEY_X"
 RELEASE_PUBLIC_KEY_Y: Final = "REPLACE_RELEASE_PUBLIC_KEY_Y"
 
-#: Written into a version directory only after its package verified. A directory without it is a
-#: partial install: interrupted, or verified and rejected. Neither may ever be activated.
+#: Written into a version directory once its package has been proven to work there.
+#:
+#: Its **absence proves nothing.** Every release installed by `connect.ps1` or `connect.sh` — which
+#: is every installation that exists today — has no marker, because the loaders never wrote one and
+#: are not being changed for this. A directory without a marker is therefore an ordinary
+#: installation far more often than it is a leftover, and treating the two alike is how an update
+#: would delete the very connector it is running from. `classify_version` is what tells them apart.
 INSTALLED_MARKER: Final = ".installed"
+
+#: Written *before* anything is downloaded, and removed on the way out.
+#:
+#: This is the only evidence that a version directory belongs to an interrupted attempt of ours.
+#: Nothing else can distinguish "we were part way through creating this" from "somebody else's
+#: installation is here", so nothing else may authorise a delete.
+STAGING_MARKER: Final = ".installing"
 
 #: Where the release manifest and its detached signature live under an origin.
 MANIFEST_PATH: Final = "/connector/connector-release.json"
@@ -203,14 +258,107 @@ def mcp_executable(root: Path, *, system: str) -> Path:
     return venv_bin(root, system=system) / f"agentnexus-agent-mcp{suffix}"
 
 
-def is_installed(install_root: Path, version: str, *, system: str) -> bool:
-    """Report whether a version finished installing *and* verified."""
+#: What `classify_version` can conclude about a version directory.
+STATE_ABSENT: Final = "absent"
+STATE_COMPLETE: Final = "complete"
+STATE_UNMARKED: Final = "unmarked"
+STATE_OURS_PARTIAL: Final = "ours-partial"
+STATE_UNRECOGNISED: Final = "unrecognised"
+
+
+@dataclass(frozen=True)
+class VersionState:
+    """What is at `connector/<version>/`, and what may therefore be done to it."""
+
+    version: str
+    root: Path
+    state: str
+    detail: str
+    #: How this directory came to be trusted, when it is. `"verified"` means this updater
+    #: downloaded it against a signed manifest and checked its digest. `"adopted"` means it was
+    #: already here — almost certainly from a loader — and was proven to run, which is a weaker
+    #: claim and is never reported as the stronger one.
+    provenance: str | None = None
+
+    @property
+    def usable(self) -> bool:
+        """Report whether a profile may be pointed at this directory."""
+        return self.state in {STATE_COMPLETE, STATE_UNMARKED}
+
+    @property
+    def removable(self) -> bool:
+        """Report whether this updater may delete this directory.
+
+        True for exactly one case: a directory carrying our own staging marker and no working
+        installation. Everything else — including anything we merely failed to recognise — is
+        somebody's installation until proven otherwise.
+        """
+        return self.state == STATE_OURS_PARTIAL
+
+
+def classify_version(install_root: Path, version: str, *, system: str) -> VersionState:
+    """Decide what is at a version directory without assuming it is ours.
+
+    The order matters. A working MCP executable is checked before any marker, because that is what
+    an installation *is*; the marker only records who put it there and how well it was checked.
+    """
     root = version_root(install_root, version)
-    return (root / INSTALLED_MARKER).is_file() and mcp_executable(root, system=system).is_file()
+    if not root.exists():
+        return VersionState(version, root, STATE_ABSENT, "nothing is installed at this version")
+    if mcp_executable(root, system=system).is_file():
+        if (root / INSTALLED_MARKER).is_file():
+            return VersionState(
+                version,
+                root,
+                STATE_COMPLETE,
+                "installed and recorded by this connector",
+                provenance=_recorded_provenance(root),
+            )
+        return VersionState(
+            version,
+            root,
+            STATE_UNMARKED,
+            "an existing installation with no record of how it was installed, which is what the "
+            "published loaders leave behind",
+        )
+    if (root / STAGING_MARKER).is_file():
+        return VersionState(
+            version, root, STATE_OURS_PARTIAL, "an interrupted install started by this connector"
+        )
+    return VersionState(
+        version,
+        root,
+        STATE_UNRECOGNISED,
+        "a directory with no usable connector in it and no sign this connector created it",
+    )
+
+
+def _recorded_provenance(root: Path) -> str | None:
+    """Read back how a marked installation was established, tolerating an older plain marker."""
+    try:
+        document = json.loads((root / INSTALLED_MARKER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = document.get("provenance") if isinstance(document, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def is_installed(install_root: Path, version: str, *, system: str) -> bool:
+    """Report whether a profile may be pointed at this version.
+
+    True for an installation this connector made *and* for one that was already here. The second
+    is the whole point: every connector installed before this module existed has no marker, and
+    refusing to see those would make the first update on every machine impossible.
+    """
+    return classify_version(install_root, version, system=system).usable
 
 
 def installed_versions(install_root: Path, *, system: str) -> list[str]:
-    """Return every completely installed version, oldest first by version order."""
+    """Return every usable installed version, oldest first by version order.
+
+    Includes installations this connector did not make. A version the loader put there is
+    installed by any honest reading of the word.
+    """
     root = connector_root(install_root)
     if not root.is_dir():
         return []
@@ -430,114 +578,275 @@ def install_release(
     system: str,
     python_executable: str | None = None,
 ) -> InstallResult:
-    """Install one verified release beside the others, or report it is already there.
+    """Install one verified release beside the others, or account for what is already there.
 
-    The order is the loader's: verify the manifest (done by the caller), then check the artifact's
-    size and digest against it *before* anything reaches an interpreter, then install that file —
-    never a name resolved against a package index.
+    Serialised on the installation lock for its whole length, and the state of the directory is
+    read **after** the lock is taken, never before: a decision made on an unlocked read is a
+    decision another process is free to invalidate before it is acted on.
 
-    A version directory counts as installed only once its package has been verified and the marker
-    written. An interrupted run therefore leaves a directory that no later call will activate.
+    The rule this function exists to keep is that **an existing installation is never destroyed.**
+    A missing `.installed` marker is not evidence of anything — the published loaders never write
+    one — so a directory with a working connector in it is adopted or refused, never cleared. Only
+    a directory carrying this connector's own staging marker, with no working installation in it,
+    may be removed, and only files this attempt wrote are ever cleaned up on failure.
+
+    The order of checks is the loader's: the caller verifies the manifest signature, then this
+    checks the artifact's size and digest against that manifest before any of those bytes reach an
+    interpreter. The connector wheel is therefore never resolved by name against a package index.
+    Its **dependencies are**, exactly as the loaders resolve them: `pip` reads its configured index
+    to satisfy `httpx2`, `cryptography` and `pyyaml`. That is unchanged, deliberate, and not
+    something this signature chain covers.
     """
+    from agentnexus_sdk.profiles import ProfileError, installation_lock
+
     version = manifest.connector_version
     artifact = manifest.artifact_for("any")
-    root = version_root(install_root, version)
 
-    if is_installed(install_root, version, system=system):
+    try:
+        with installation_lock(install_root):
+            return _install_locked(
+                install_root=install_root,
+                version=version,
+                artifact=artifact,
+                fetch=fetch,
+                runner=runner,
+                system=system,
+                python_executable=python_executable,
+            )
+    except ProfileError as error:
+        raise UpdateError(str(error), recovery=error.recovery) from error
+
+
+def _install_locked(
+    *,
+    install_root: Path,
+    version: str,
+    artifact: Artifact,
+    fetch: Fetcher,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+    system: str,
+    python_executable: str | None,
+) -> InstallResult:
+    """Do the installation. The caller holds the installation lock for the whole call."""
+    root = version_root(install_root, version)
+    existing = classify_version(install_root, version, system=system)
+
+    if existing.state == STATE_COMPLETE:
         return InstallResult(
             version=version,
             root=root,
             newly_installed=False,
-            notes=["already installed and verified"],
+            notes=[f"already installed here ({existing.provenance or 'recorded'})"],
         )
 
-    # A leftover from an interrupted run is removed rather than trusted or merged into.
-    if root.exists():
-        shutil.rmtree(root, ignore_errors=True)
-    root.mkdir(parents=True, exist_ok=True)
+    if existing.state == STATE_UNMARKED:
+        # Almost always the loader's work, and possibly the very installation this process is
+        # running from. It is not deleted, not overwritten and not reinstalled over: it is checked,
+        # and either recorded as usable or refused with the reason.
+        return _adopt_existing(root, version=version, runner=runner, system=system)
 
-    try:
-        # Bounded at exactly the signed size. A correct artifact is that long; anything longer is
-        # refused before it is all in memory, and anything shorter fails the digest check below.
-        payload = fetch(artifact.url, artifact.size)
-    except UpdateError:
-        # Already a precise refusal — a size bound, a non-HTTPS address, an HTTP status. Wrapping
-        # it in "could not be downloaded" would hide a supply-chain answer behind a network one.
-        shutil.rmtree(root, ignore_errors=True)
-        raise
-    except Exception as error:
-        shutil.rmtree(root, ignore_errors=True)
-        message = f"The connector artifact could not be downloaded: {error}"
-        raise UpdateError(
-            message, recovery="Nothing was installed. Try again when online."
-        ) from error
-
-    if not artifact.matches(payload):
-        shutil.rmtree(root, ignore_errors=True)
-        message = (
-            f"The download does not match the manifest: {len(payload)} bytes against "
-            f"{artifact.size}, or a different SHA-256."
-        )
+    if existing.state == STATE_UNRECOGNISED:
+        message = f"{root} already exists and does not look like anything this can safely replace."
         raise UpdateError(
             message,
             recovery=(
-                "Nothing was installed. Refetch; if it fails again the published bytes and the "
-                "signed manifest disagree and the origin needs looking at."
+                "Nothing was downloaded or changed. Look at that directory: if it is a failed "
+                "install of your own, move it aside; if it is somebody's installation, leave it."
             ),
         )
 
-    wheel = root / artifact.filename
+    # From here the directory is either absent or provably a leftover of our own, so this attempt
+    # owns whatever it creates and may clean up after itself.
+    owns_directory = existing.state == STATE_ABSENT
+    if existing.state == STATE_OURS_PARTIAL:
+        shutil.rmtree(root, ignore_errors=True)
+        owns_directory = True
+
+    written: list[Path] = []
+
+    def undo() -> None:
+        """Remove only what this attempt created, and nothing that was here before it."""
+        if owns_directory:
+            shutil.rmtree(root, ignore_errors=True)
+            return
+        for created in reversed(written):  # pragma: no cover - unreachable while owns is always
+            with contextlib.suppress(OSError):
+                created.unlink()
+
     try:
-        wheel.write_bytes(payload)
+        root.mkdir(parents=True, exist_ok=True)
+        staging = root / STAGING_MARKER
+        staging.write_text(f"{version}\n", encoding="utf-8")
+        written.append(staging)
     except OSError as error:
-        shutil.rmtree(root, ignore_errors=True)
-        message = f"The connector artifact could not be written to {root}: {error}"
+        message = f"The install directory {root} could not be created: {error}"
         raise UpdateError(
-            message, recovery="Free space or fix permissions, then try again."
+            message, recovery="Nothing was installed. Free space or fix permissions."
         ) from error
 
-    interpreter = python_executable or sys.executable
-    venv = root / "venv"
-    created = runner(
-        [interpreter, "-m", "venv", str(venv)], capture_output=True, encoding="utf-8", check=False
-    )
-    if created.returncode != 0:
-        shutil.rmtree(root, ignore_errors=True)
-        message = "The isolated Python environment for the new version could not be created."
-        raise UpdateError(
-            message,
-            recovery=(
-                "On Debian and Raspberry Pi OS this usually means the python3-venv package is "
-                "missing. Nothing was installed."
-            ),
-        )
+    try:
+        try:
+            # Bounded at exactly the signed size. A correct artifact is that long; anything longer
+            # is refused before it is all in memory, and anything shorter fails the digest check.
+            payload = fetch(artifact.url, artifact.size)
+        except UpdateError:
+            # Already a precise refusal — a size bound, a non-HTTPS address, an HTTP status.
+            # Wrapping it would hide a supply-chain answer behind a network one.
+            raise
+        except Exception as error:
+            message = f"The connector artifact could not be downloaded: {error}"
+            raise UpdateError(
+                message, recovery="Nothing was installed. Try again when online."
+            ) from error
 
-    installed = runner(
-        [
-            str(venv_python(root, system=system)),
-            "-m",
-            "pip",
-            "install",
-            "--quiet",
-            "--no-input",
-            "--upgrade",
-            str(wheel),
-        ],
-        capture_output=True,
-        encoding="utf-8",
-        check=False,
-    )
-    if installed.returncode != 0:
-        shutil.rmtree(root, ignore_errors=True)
-        message = "The verified connector artifact could not be installed into its environment."
-        raise UpdateError(
-            message, recovery="Nothing was activated. The previous version is untouched."
-        )
+        if not artifact.matches(payload):
+            message = (
+                f"The download does not match the manifest: {len(payload)} bytes against "
+                f"{artifact.size}, or a different SHA-256."
+            )
+            raise UpdateError(
+                message,
+                recovery=(
+                    "Nothing was installed. Refetch; if it fails again the published bytes and "
+                    "the signed manifest disagree and the origin needs looking at."
+                ),
+            )
 
-    verify_installation(root, runner=runner, system=system)
-    (root / INSTALLED_MARKER).write_text(f"{version}\n", encoding="utf-8")
+        wheel = root / artifact.filename
+        try:
+            wheel.write_bytes(payload)
+            written.append(wheel)
+        except OSError as error:
+            message = f"The connector artifact could not be written to {root}: {error}"
+            raise UpdateError(
+                message, recovery="Free space or fix permissions, then try again."
+            ) from error
+
+        interpreter = python_executable or sys.executable
+        environment_root = root / "venv"
+        created = runner(
+            [interpreter, "-m", "venv", str(environment_root)],
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
+        )
+        if created.returncode != 0:
+            message = "The isolated Python environment for the new version could not be created."
+            raise UpdateError(
+                message,
+                recovery=(
+                    "On Debian and Raspberry Pi OS this usually means the python3-venv package "
+                    "is missing. Nothing was installed."
+                ),
+            )
+
+        installed = runner(
+            [
+                str(venv_python(root, system=system)),
+                "-m",
+                "pip",
+                "install",
+                "--quiet",
+                "--no-input",
+                "--upgrade",
+                str(wheel),
+            ],
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
+        )
+        if installed.returncode != 0:
+            detail = (installed.stderr or installed.stdout or "").strip().splitlines()
+            message = "The verified connector artifact could not be installed into its environment."
+            raise UpdateError(
+                message,
+                recovery=(
+                    "Nothing was activated and every existing installation is untouched. "
+                    f"{detail[-1] if detail else 'No further detail.'}"
+                ),
+            )
+
+        report = verify_installation(root, runner=runner, system=system)
+        _require_reported_version(report, expected=version, root=root)
+    except UpdateError:
+        undo()
+        raise
+    except Exception:  # pragma: no cover - defensive; an unexpected failure must still not leak
+        undo()
+        raise
+
+    _write_marker(root, version=version, provenance="verified")
+    with contextlib.suppress(OSError):
+        (root / STAGING_MARKER).unlink()
     return InstallResult(
-        version=version, root=root, newly_installed=True, notes=["installed and verified"]
+        version=version,
+        root=root,
+        newly_installed=True,
+        notes=["downloaded against the signed manifest, installed and verified"],
+    )
+
+
+def _adopt_existing(
+    root: Path,
+    *,
+    version: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+    system: str,
+) -> InstallResult:
+    """Record an installation that was already here, after proving it actually runs.
+
+    This is the bootstrap case and the ordinary case at once: the first connector able to update
+    was itself installed by the shell loader, which writes no marker, and every re-run of `update
+    apply` for a version already present arrives here too.
+
+    What is proven is what can be proven — that the package in that directory imports, lists its
+    MCP tools, and reports the version its directory claims. What is **not** proven is that its
+    bytes ever passed a signature check, because nothing on disk records that. It is recorded as
+    adopted rather than verified, and the two are never conflated in the output.
+    """
+    report = verify_installation(root, runner=runner, system=system)
+    _require_reported_version(report, expected=version, root=root)
+    _write_marker(root, version=version, provenance="adopted")
+    return InstallResult(
+        version=version,
+        root=root,
+        newly_installed=False,
+        notes=[
+            "already installed here by the installer; checked that it runs and left unchanged",
+            "adopted, not signature-verified: nothing on disk records how those bytes arrived",
+        ],
+    )
+
+
+def _require_reported_version(report: dict[str, Any], *, expected: str, root: Path) -> None:
+    """Refuse an installation whose package does not agree with the directory it sits in.
+
+    A version directory is a claim about its contents, and a profile is pointed at it by path. If
+    the package inside reports something else the directory name is not trustworthy, and neither
+    is anything derived from it.
+    """
+    reported = report.get("version")
+    if reported == expected:
+        return
+    message = f"The package in {root} reports version {reported!r}, not {expected!r}."
+    raise UpdateError(
+        message,
+        recovery=(
+            "No profile was changed and nothing was deleted. That directory holds a different "
+            "version from the one its name claims; move it aside and install again."
+        ),
+    )
+
+
+def _write_marker(root: Path, *, version: str, provenance: str) -> None:
+    """Record that this version is usable, and how that was established."""
+    document = {
+        "version": version,
+        "provenance": provenance,
+        "recorded_at": dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    (root / INSTALLED_MARKER).write_text(
+        json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
 
@@ -650,14 +959,14 @@ def activate_version(
     from agentnexus_sdk.profiles import ProfileError, profile_lock
 
     root = version_root(install_root, version)
-    if not is_installed(install_root, version, system=environment.system):
+    state = classify_version(install_root, version, system=environment.system)
+    if not state.usable:
+        # Says which of the several ways it is unusable, because "install it first" is the wrong
+        # advice for a directory that is there but half-written or unrecognisable.
         return ProfileOutcome(
             profile=profile,
             status=STATUS_FAILED,
-            detail=(
-                f"{version} is not installed and verified here, so nothing was activated. "
-                "Install it first."
-            ),
+            detail=(f"{version} cannot be activated: {state.detail}. Nothing was changed."),
         )
 
     try:

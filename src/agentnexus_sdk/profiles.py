@@ -101,6 +101,14 @@ RESERVED_PROFILE_NAMES: Final = frozenset(
 #: name, so it can use the same per-profile lock file scheme without ever colliding with one.
 MIGRATION_LOCK_NAME: Final = "migration"
 
+#: The lock that serialises writes to `connector/<version>/`, which every profile shares.
+#:
+#: Profile locks do not cover this. Two updates for two different profiles are two legitimate
+#: concurrent runs, and before this existed both would have reached the same version directory
+#: with nothing between them. Reserved for the same reason `migration` is: it cannot collide with
+#: a profile name, because a profile name can never contain that character.
+INSTALLATION_LOCK_NAME: Final = "connector-installation"
+
 
 class ProfileError(Exception):
     """A profile-layout failure carrying an actionable recovery step."""
@@ -328,7 +336,11 @@ def profile_lock(install_root: Path, name: str) -> Iterator[Path]:
     The scope is one profile, so setting up `agent2` does not wait behind `agent1`, and two runs of
     the same profile cannot interleave a key creation with a redemption.
     """
-    validated = name if name == MIGRATION_LOCK_NAME else validate_profile_name(name)
+    validated = (
+        name
+        if name in {MIGRATION_LOCK_NAME, INSTALLATION_LOCK_NAME}
+        else validate_profile_name(name)
+    )
     directory = Path(install_root) / LOCKS_DIRECTORY_NAME
     directory.mkdir(parents=True, exist_ok=True)
     _harden(directory)
@@ -344,6 +356,27 @@ def profile_lock(install_root: Path, name: str) -> Iterator[Path]:
         handle.close()
 
 
+@contextlib.contextmanager
+def installation_lock(install_root: Path) -> Iterator[Path]:
+    """Hold an exclusive lock on the shared `connector/<version>/` tree.
+
+    One installation, one lock, held across the whole read-decide-write sequence: what an update
+    must not do is decide a directory is a leftover, and then act on that decision after another
+    process has finished putting a working installation there.
+
+    **Lock ordering: this one first, then a profile lock.** Nothing in the connector ever takes
+    them the other way round — setup and the soul commands take a profile lock and never this one —
+    so the order cannot deadlock. Like every other lock here it is non-blocking: a second run is
+    told another is in progress rather than waiting an unknown length of time.
+
+    It does not cover the shell loaders. `connect.sh` and `connect.ps1` take no lock at all, so a
+    loader running at the same moment as an update is outside what this serialises. See the
+    connector documentation for what that leaves open.
+    """
+    with profile_lock(install_root, INSTALLATION_LOCK_NAME) as path:
+        yield path
+
+
 def _acquire(handle: Any, name: str) -> None:
     handle.seek(0)
     try:
@@ -356,6 +389,15 @@ def _acquire(handle: Any, name: str) -> None:
 
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as error:
+        if name == INSTALLATION_LOCK_NAME:
+            message = "Another AgentNexus install or update is already running on this machine."
+            raise ProfileError(
+                message,
+                recovery=(
+                    "Wait for it to finish, then run this again. Nothing was downloaded, "
+                    "installed or changed."
+                ),
+            ) from error
         message = f"Another AgentNexus setup is already running for the {name!r} profile."
         raise ProfileError(
             message,
