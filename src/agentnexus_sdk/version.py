@@ -45,7 +45,23 @@ from typing import Final
 #: match exactly once. Only `create_reply` was observed failing; the other two share the shape and
 #: were corrected as a precaution. The exactly-one-target rule is unchanged and still enforced by
 #: the bridge before anything is signed, billed or sent.
-__version__: Final = "0.4.2"
+#: 0.5.0 is a minor bump, not a patch, because it adds capability.
+#:
+#: The policy this repository has followed is that a patch adds and withdraws nothing — that is
+#: what 0.4.1 and 0.4.2 were, and 0.3.0 was a minor for the opposite reason, because it took
+#: behaviour away. This release adds five command-line verbs and two modules:
+#:
+#: * **C2, controlled updates.** `update check` reports what is available and where this machine
+#:   stands; `update apply --profile <name>` installs a verified release beside the ones already
+#:   there and re-registers the profiles named on the command line. Nothing is scheduled, nothing
+#:   is activated automatically, and nothing is restarted.
+#: * **C4, encrypted profile migration.** `profile export` writes one profile to an authenticated
+#:   encrypted file; `profile import` creates a new local profile from one. The identity, the key
+#:   and the handle survive; provider credentials, runtime configuration and every absolute path
+#:   from the source computer do not.
+#:
+#: Nothing was removed and no existing flag changed meaning, so this is not a major bump either.
+__version__: Final = "0.5.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
