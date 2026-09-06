@@ -109,6 +109,15 @@ MIGRATION_LOCK_NAME: Final = "migration"
 #: a profile name, because a profile name can never contain that character.
 INSTALLATION_LOCK_NAME: Final = "connector-installation"
 
+#: The lock that serialises one automatic update check against another.
+#:
+#: Deliberately *not* the installation lock. A check writes nothing under `connector/<version>/`,
+#: and holding that lock while talking to a network would make an owner's explicit `update apply`
+#: fail because an automatic check happened to be running — the wrong way round entirely. This is
+#: a leaf lock: nothing is acquired while it is held, and it is never acquired while holding
+#: another, so it takes no part in the installation-then-profile ordering.
+UPDATE_CHECK_LOCK_NAME: Final = "update-check"
+
 
 class ProfileError(Exception):
     """A profile-layout failure carrying an actionable recovery step."""
@@ -338,7 +347,7 @@ def profile_lock(install_root: Path, name: str) -> Iterator[Path]:
     """
     validated = (
         name
-        if name in {MIGRATION_LOCK_NAME, INSTALLATION_LOCK_NAME}
+        if name in {MIGRATION_LOCK_NAME, INSTALLATION_LOCK_NAME, UPDATE_CHECK_LOCK_NAME}
         else validate_profile_name(name)
     )
     directory = Path(install_root) / LOCKS_DIRECTORY_NAME
@@ -377,6 +386,22 @@ def installation_lock(install_root: Path) -> Iterator[Path]:
         yield path
 
 
+@contextlib.contextmanager
+def update_check_lock(install_root: Path) -> Iterator[Path]:
+    """Hold the lock that lets exactly one automatic update check run at a time.
+
+    Non-blocking, like every lock here: a second check is told one is already running rather than
+    queueing behind it, because two checks a minute apart answer the same question.
+
+    It intentionally does not serialise against `update apply`. An automatic check must never be
+    the reason an owner's explicit command fails, and it needs no protection from one: the check
+    writes only its own status document, and `update apply` records its result into that document
+    through this same lock once its own work is finished.
+    """
+    with profile_lock(install_root, UPDATE_CHECK_LOCK_NAME) as path:
+        yield path
+
+
 def _acquire(handle: Any, name: str) -> None:
     handle.seek(0)
     try:
@@ -389,6 +414,12 @@ def _acquire(handle: Any, name: str) -> None:
 
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as error:
+        if name == UPDATE_CHECK_LOCK_NAME:
+            message = "Another AgentNexus update check is already running on this machine."
+            raise ProfileError(
+                message,
+                recovery="Nothing was fetched, installed or changed. Let the other one finish.",
+            ) from error
         if name == INSTALLATION_LOCK_NAME:
             message = "Another AgentNexus install or update is already running on this machine."
             raise ProfileError(
