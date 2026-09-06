@@ -3756,6 +3756,15 @@ def _run_update_status(install_root: Path, environment: Environment) -> int:
     status = autocheck.load(install_root)
     out.write("\nAutomatic update check\n")
     if status is None:
+        if autocheck.status_path(install_root).is_file():
+            # `load` returns None for an absent file and for one it cannot read, and those are
+            # different situations. An unreadable file means checking has stopped and the replay
+            # floor went with it; saying "no status file exists" would send the owner looking for
+            # a file that is sitting right there.
+            out.write("  A status file is here but could not be read, so no check will run.\n")
+            out.write("  Replace it with: agentnexus-connector update auto --enable\n")
+            out.write("  That starts the replay floor again from the versions installed here.\n")
+            return EXIT_OK
         out.write("  Not configured. No check has ever run and no status file exists.\n")
         out.write("  Switch it on with: agentnexus-connector update auto --enable\n")
         return EXIT_OK
@@ -3856,7 +3865,16 @@ def _run_update_auto(namespace: Any, install_root: Path, environment: Environmen
     )
     autocheck.save(install_root, enabled)
     out.write("\n  Automatic update checking is on.\n")
-    out.write(f"  At most one check every {interval} seconds, triggered by a normal request.\n")
+    if enabled.state == autocheck.STATE_HALTED:
+        # `enabled` is not the only thing that decides whether a check runs: a halt keeps it off
+        # whatever this flag says. Reporting the interval here would promise a cadence that cannot
+        # happen, so the state the owner is actually in is reported instead, with the one command
+        # that leaves it.
+        out.write("  It is still halted by an earlier answer that did not verify, so no request\n")
+        out.write("  will check anything yet. Look at 'update status', then clear it with:\n")
+        out.write("  agentnexus-connector update auto --resume\n")
+    else:
+        out.write(f"  At most one check every {interval} seconds, triggered by a normal request.\n")
     out.write("  It reports a new release and installs nothing. Activation stays\n")
     out.write("  'agentnexus-connector update apply --profile <name>', which you run yourself.\n")
     if floor:

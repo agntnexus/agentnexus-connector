@@ -492,8 +492,9 @@ def bounded_fetcher(
 
     `updater.https_fetcher` is built for a person waiting at a terminal and allows a 30-second
     read. That is the right choice there and the wrong one here: this runs between two messages of
-    a live session, so the budget is small, checked before the second request is started, and
-    enforced again by short per-request timeouts.
+    a live session, so the budget is small and it is a deadline on the whole check — tested before
+    each request *and* between chunks of the one in flight. The per-request timeouts stay, but they
+    are not the bound: a read timeout limits the gap between two chunks, not their number.
 
     Failures are raised as `TransientFetchError`. Everything that reaches the caller as a plain
     `UpdateError` therefore came from verification, which is what lets the classification above be
@@ -534,6 +535,16 @@ def bounded_fetcher(
                     message = f"{url} answered HTTP {response.status_code}."
                     raise TransientFetchError(message, code=CODE_ORIGIN)
                 for chunk in response.iter_bytes():
+                    # The deadline belongs *inside* the download, not only in front of it. A read
+                    # timeout bounds the gap between two chunks and says nothing about how many
+                    # chunks there are, so an origin that trickles bytes satisfies every individual
+                    # read and still never finishes — and `serve` handles one message at a time, so
+                    # what it holds is the agent's next tool call.
+                    if monotonic() - started > budget_seconds:
+                        message = (
+                            f"The update check's {budget_seconds:.0f} second budget was used up."
+                        )
+                        raise TransientFetchError(message, code=CODE_OFFLINE)
                     total += len(chunk)
                     if total > limit:
                         message = f"{url} returned more than the {limit} bytes this accepts."
@@ -788,7 +799,8 @@ def record_installed_version(install_root: Path, version: str) -> None:
 
     It is also the only place the floor is raised without a manifest, which is safe in the one
     direction that matters: a version whose signature and digest `update apply` has just verified
-    is at least as trustworthy as one a check merely read about.
+    is at least as trustworthy as one a check merely read about. The floor rises even while the
+    check is halted; the *state* does not, because those are different claims.
 
     Nothing here may fail the command that called it. An update that installed correctly has
     succeeded, whatever happens to a bookkeeping file afterwards.
@@ -804,9 +816,17 @@ def record_installed_version(install_root: Path, version: str) -> None:
             if raised is None or updater.version_key(version) > updater.version_key(raised):
                 raised = version
             state = status.state
-            if status.available_version is not None and updater.version_key(
-                version
-            ) >= updater.version_key(status.available_version):
+            # Never out of a halt. A halt records that the *origin* served something that did not
+            # verify, and installing a release answers a different question: the manifest this
+            # command verified is not the one that failed. Clearing it here would resume automatic
+            # checking without the owner ever acknowledging why it stopped, and would take the
+            # "Owner action required" line out of `update status` while the reason was still
+            # unresolved. `update auto --resume` is the one command that leaves this state.
+            if (
+                state != STATE_HALTED
+                and status.available_version is not None
+                and updater.version_key(version) >= updater.version_key(status.available_version)
+            ):
                 state = STATE_UP_TO_DATE
             save(
                 install_root,
