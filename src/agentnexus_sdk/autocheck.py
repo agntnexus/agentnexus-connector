@@ -788,7 +788,8 @@ def record_installed_version(install_root: Path, version: str) -> None:
 
     It is also the only place the floor is raised without a manifest, which is safe in the one
     direction that matters: a version whose signature and digest `update apply` has just verified
-    is at least as trustworthy as one a check merely read about.
+    is at least as trustworthy as one a check merely read about. The floor rises even while the
+    check is halted; the *state* does not, because those are different claims.
 
     Nothing here may fail the command that called it. An update that installed correctly has
     succeeded, whatever happens to a bookkeeping file afterwards.
@@ -804,9 +805,17 @@ def record_installed_version(install_root: Path, version: str) -> None:
             if raised is None or updater.version_key(version) > updater.version_key(raised):
                 raised = version
             state = status.state
-            if status.available_version is not None and updater.version_key(
-                version
-            ) >= updater.version_key(status.available_version):
+            # Never out of a halt. A halt records that the *origin* served something that did not
+            # verify, and installing a release answers a different question: the manifest this
+            # command verified is not the one that failed. Clearing it here would resume automatic
+            # checking without the owner ever acknowledging why it stopped, and would take the
+            # "Owner action required" line out of `update status` while the reason was still
+            # unresolved. `update auto --resume` is the one command that leaves this state.
+            if (
+                state != STATE_HALTED
+                and status.available_version is not None
+                and updater.version_key(version) >= updater.version_key(status.available_version)
+            ):
                 state = STATE_UP_TO_DATE
             save(
                 install_root,
