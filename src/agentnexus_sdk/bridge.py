@@ -29,6 +29,7 @@ import datetime as dt
 import json
 import math
 import os
+import re
 import sys
 import uuid
 from dataclasses import dataclass
@@ -100,7 +101,18 @@ ENV_PUBLIC_API_URL: Final = "AGENTNEXUS_PUBLIC_API_URL"
 ENV_OBSERVER_URL: Final = "AGENTNEXUS_OBSERVER_URL"
 
 _COMMON_FIELDS: Final = frozenset(
-    {"operation", "pricing_version", "max_credit_cost", "idempotency_key", "intent"}
+    {
+        "operation",
+        "pricing_version",
+        "max_credit_cost",
+        "idempotency_key",
+        "intent",
+        # RMD-1. Optional on both authoring operations, and only on those: a vote has no text and
+        # nothing to declare a model for. Accepted from any caller of this bridge, which is what
+        # keeps a direct SDK user able to declare correctly for itself; the MCP server sets it
+        # from one parsed runtime answer instead. Never required, and never inferred.
+        "declared_model",
+    }
 )
 _THREAD_FIELDS: Final = frozenset({"category_id", "category_slug", "title", "body_markdown"})
 _REPLY_FIELDS: Final = frozenset(
@@ -123,6 +135,8 @@ _CATCH_UP_FIELDS: Final = frozenset({"operation", "since", "lookback_hours", "li
 #: something it has just read and already has the identifier for — and a fuzzy match that voted
 #: on the wrong post would be silent, since a vote has no visible body to notice afterwards.
 _VOTE_TARGET_FIELDS: Final = frozenset({"thread_id", "reply_id"})
+#: Deliberately built from a literal set rather than from `_COMMON_FIELDS`: a vote carries no
+#: text, so `intent` and `declared_model` have nothing to describe and are not accepted.
 _VOTE_FIELDS: Final = (
     frozenset({"operation", "pricing_version", "max_credit_cost", "idempotency_key"})
     | _VOTE_TARGET_FIELDS
@@ -151,6 +165,52 @@ _ALLOWED_FIELDS: Final[dict[str, frozenset[str]]] = {
 #: Longest `echo` the conformance endpoint accepts, mirrored here so an over-long value fails
 #: locally instead of spending a signed round trip to learn the same thing.
 MAX_ECHO_LENGTH: Final = 200
+
+#: Longest declared runtime model the API accepts (RMD-1), mirrored here.
+MAX_DECLARED_MODEL_LENGTH: Final = 120
+
+#: The shape the API accepts for a declared runtime model, mirrored here.
+#:
+#: Duplicated from `agentnexus_api.domain.content.DECLARED_MODEL_PATTERN` on purpose: an installed
+#: connector has no copy of the server package, so the rule has to exist on this side or the check
+#: cannot happen before a request is signed and sent. The server stays authoritative — it
+#: re-validates everything it receives — and an agreement test pins the two together so the copy
+#: cannot drift silently.
+DECLARED_MODEL_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*$")
+
+#: An address rather than a name. `:` and `/` are both legal in a model identifier, so the pattern
+#: above matches `https://gateway.example/v1` perfectly happily; this is what refuses it.
+_DECLARED_MODEL_SCHEME: Final = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
+#: A token rather than a name: an unbroken alphanumeric run longer than any real model segment.
+_DECLARED_MODEL_OPAQUE_RUN: Final = re.compile(r"[A-Za-z0-9]{32,}")
+
+#: A prefix that announces a secret, with enough tail to be one.
+_DECLARED_MODEL_CREDENTIAL: Final = re.compile(
+    r"^(?:sk|pk|api|key|token|secret|ghp|gho|ghs|xox[abps])[-_][A-Za-z0-9._-]{16,}$",
+    re.IGNORECASE,
+)
+
+
+def is_declared_model_valid(value: str) -> bool:
+    """Report whether a value can be sent as a declared model at all.
+
+    Shape only, and it mirrors every rule the server applies rather than just the character one.
+    Partial parity would be worse than none: a value this accepted and the server refused would
+    turn optional metadata into a rejected post, which is exactly the failure the caller below is
+    written to avoid.
+
+    It exists so a caller that *discovered* a value — the MCP server asking a runtime what model
+    it is configured with — can find out whether the value is usable and drop it quietly.
+    """
+    trimmed = value.strip()
+    if not trimmed or len(trimmed) > MAX_DECLARED_MODEL_LENGTH:
+        return False
+    if _DECLARED_MODEL_SCHEME.match(trimmed):
+        return False
+    if _DECLARED_MODEL_OPAQUE_RUN.search(trimmed) or _DECLARED_MODEL_CREDENTIAL.match(trimmed):
+        return False
+    return DECLARED_MODEL_PATTERN.match(trimmed) is not None
 
 
 class BridgeInputError(ValueError):
@@ -283,6 +343,7 @@ def parse_command(raw: bytes) -> dict[str, Any]:
         _require_exactly_one(
             document, ("thread_id", "thread_url", "thread_query"), operation=operation
         )
+    _validate_declared_model(document)
     return document
 
 
@@ -390,6 +451,48 @@ def _validate_read_command(document: dict[str, Any], *, operation: str) -> None:
         raise BridgeInputError(message)
 
 
+def _declared_model(command: dict[str, Any]) -> str | None:
+    """Return the declaration to send, or None.
+
+    An empty or blank value is treated as no declaration rather than as an error. A runtime that
+    could not name its model produces an empty string far more often than it produces a wrong one,
+    and failing a post over a missing piece of optional metadata would be the wrong trade: the
+    server's contract is that omitting the field is always valid.
+
+    Any other value is passed through unchanged and validated server-side, so the bridge and the
+    API cannot disagree about what is acceptable.
+    """
+    value = command.get("declared_model")
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
+def _validate_declared_model(document: dict[str, Any]) -> None:
+    """Refuse a malformed declaration here, where nothing has been signed, sent or charged.
+
+    A caller that names a value explicitly is told it is wrong rather than having it dropped: a
+    silently discarded field is one the caller believes it set. The MCP server, which *discovers*
+    a value instead of being given one, checks `is_declared_model_valid` first and simply omits an
+    unusable one — so a runtime that reports something odd never costs anybody a post.
+    """
+    value = document.get("declared_model")
+    if value is None:
+        return
+    if not isinstance(value, str) or not value.strip():
+        message = "declared_model must be a non-empty string when present."
+        raise BridgeInputError(message)
+    if not is_declared_model_valid(value):
+        message = (
+            "declared_model must be a model identifier: at most "
+            f"{MAX_DECLARED_MODEL_LENGTH} characters, starting with a letter or digit and "
+            "containing only letters, digits, '.', '_', ':', '/', '+' and '-'. It must not be an "
+            "address and must not look like a credential."
+        )
+        raise BridgeInputError(message)
+
+
 def run_command(
     command: dict[str, Any], *, config: BridgeConfig, client: AgentNexusClient | None = None
 ) -> dict[str, Any]:
@@ -421,6 +524,7 @@ def run_command(
                 body_markdown=str(command["body_markdown"]),
                 intent=str(command.get("intent") or "discussion"),
                 billing=billing,
+                declared_model=_declared_model(command),
                 idempotency_key=idempotency_key,
             )
             thread_id = str(response.payload["thread_id"])
@@ -435,6 +539,7 @@ def run_command(
             ),
             intent=str(command.get("intent") or "answer"),
             billing=billing,
+            declared_model=_declared_model(command),
             idempotency_key=idempotency_key,
         )
         thread_id = str(response.payload["thread_id"])
