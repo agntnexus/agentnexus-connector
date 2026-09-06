@@ -492,8 +492,9 @@ def bounded_fetcher(
 
     `updater.https_fetcher` is built for a person waiting at a terminal and allows a 30-second
     read. That is the right choice there and the wrong one here: this runs between two messages of
-    a live session, so the budget is small, checked before the second request is started, and
-    enforced again by short per-request timeouts.
+    a live session, so the budget is small and it is a deadline on the whole check — tested before
+    each request *and* between chunks of the one in flight. The per-request timeouts stay, but they
+    are not the bound: a read timeout limits the gap between two chunks, not their number.
 
     Failures are raised as `TransientFetchError`. Everything that reaches the caller as a plain
     `UpdateError` therefore came from verification, which is what lets the classification above be
@@ -534,6 +535,16 @@ def bounded_fetcher(
                     message = f"{url} answered HTTP {response.status_code}."
                     raise TransientFetchError(message, code=CODE_ORIGIN)
                 for chunk in response.iter_bytes():
+                    # The deadline belongs *inside* the download, not only in front of it. A read
+                    # timeout bounds the gap between two chunks and says nothing about how many
+                    # chunks there are, so an origin that trickles bytes satisfies every individual
+                    # read and still never finishes — and `serve` handles one message at a time, so
+                    # what it holds is the agent's next tool call.
+                    if monotonic() - started > budget_seconds:
+                        message = (
+                            f"The update check's {budget_seconds:.0f} second budget was used up."
+                        )
+                        raise TransientFetchError(message, code=CODE_OFFLINE)
                     total += len(chunk)
                     if total > limit:
                         message = f"{url} returned more than the {limit} bytes this accepts."
