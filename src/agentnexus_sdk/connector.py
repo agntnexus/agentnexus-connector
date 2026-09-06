@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any, Final, TextIO
 from urllib.parse import urlsplit
 
-from agentnexus_sdk import migration, soul, soul_scan, updater
+from agentnexus_sdk import autocheck, migration, soul, soul_scan, updater
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions
 from agentnexus_sdk.errors import (
     AgentNexusError,
@@ -3436,7 +3436,68 @@ def _build_parser() -> Any:
         action="store_true",
         help="Install the release beside the others and change no profile at all.",
     )
+
+    # `status` reads local files and nothing else, so it works offline and while another run holds
+    # a lock. `auto` is the only way automatic checking is ever switched on: it is off until an
+    # owner turns it on, and there is still no scheduler, service or task anywhere.
+    update_actions.add_parser(
+        "status",
+        parents=[common],
+        help="Report what is known locally about releases. Reads no network.",
+    )
+
+    update_auto = update_actions.add_parser(
+        "auto",
+        parents=[common],
+        help="Switch the request-triggered update check on or off. Installs nothing, ever.",
+    )
+    auto_action = update_auto.add_mutually_exclusive_group(required=True)
+    auto_action.add_argument(
+        "--enable",
+        action="store_true",
+        help="Let a normal request check for a release at most once per interval.",
+    )
+    auto_action.add_argument("--disable", action="store_true", help="Switch it off again.")
+    auto_action.add_argument(
+        "--resume",
+        action="store_true",
+        help="Clear a halted check after looking at why it stopped. A deliberate owner action.",
+    )
+    update_auto.add_argument("--origin", default="https://agntnexus.com")
+    update_auto.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=autocheck.DEFAULT_INTERVAL_SECONDS,
+        help=(
+            f"How rarely to look. Default {autocheck.DEFAULT_INTERVAL_SECONDS} seconds, "
+            f"never less than {autocheck.MINIMUM_INTERVAL_SECONDS}."
+        ),
+    )
     return parser
+
+
+def _announce_update_once(namespace: Any, install_root: Path, environment: Environment) -> None:
+    """Print one short line if a release is waiting or the check halted, at most once each.
+
+    To standard error, so it can never be mistaken for a command's own output or parsed as part
+    of it. Silent unless automatic checking was switched on and has something new to say, which
+    means every installation that has not opted in sees no change at all.
+
+    `update status` is exempt: it prints the same facts in full a few lines later, and announcing
+    them first would both duplicate the message and consume the one-time flag before the owner had
+    read the detail.
+    """
+    if getattr(namespace, "update_action", None) == "status":
+        return
+    with contextlib.suppress(Exception):
+        status = autocheck.load(install_root)
+        if status is None:
+            return
+        notice = autocheck.notice_for(status)
+        if notice is None:
+            return
+        environment.stderr.write(f"{notice}\n")
+        autocheck.save(install_root, autocheck.announced(status))
 
 
 def main(argv: Sequence[str] | None = None, environment: Environment | None = None) -> int:
@@ -3444,6 +3505,7 @@ def main(argv: Sequence[str] | None = None, environment: Environment | None = No
     environment = environment or Environment(executable_directory=_entry_point_directory())
     namespace = _build_parser().parse_args(argv)
     install_root = namespace.install_root or default_install_root(environment)
+    _announce_update_once(namespace, install_root, environment)
 
     try:
         if namespace.command == "profile":
@@ -3647,6 +3709,10 @@ def _run_update_apply(namespace: Any, install_root: Path, environment: Environme
     out.write(f"  Installed at {result.root}\n")
     out.write("  Older versions were left in place.\n")
 
+    # Carry the result into the automatic check's status, so it stops reporting a release the
+    # owner has just installed. Best effort by construction: this cannot fail the update.
+    autocheck.record_installed_version(install_root, result.version)
+
     if namespace.install_only:
         out.write("\n  --install-only: no profile was changed.\n")
         out.write("  Installed and staged. No agent will use it until a profile is updated.\n")
@@ -3679,12 +3745,137 @@ def _run_update_apply(namespace: Any, install_root: Path, environment: Environme
     return EXIT_OK
 
 
+def _run_update_status(install_root: Path, environment: Environment) -> int:
+    """Report what is known locally about releases. Reads local files and nothing else.
+
+    Deliberately offline: this is what an owner runs when something looks wrong, which is exactly
+    when the origin may be the thing that is wrong. It takes no lock either, so it answers while
+    an update or a check is in progress.
+    """
+    out = environment.stdout
+    status = autocheck.load(install_root)
+    out.write("\nAutomatic update check\n")
+    if status is None:
+        out.write("  Not configured. No check has ever run and no status file exists.\n")
+        out.write("  Switch it on with: agentnexus-connector update auto --enable\n")
+        return EXIT_OK
+
+    installed = updater.installed_versions(install_root, system=environment.system)
+    changed = f" (changed {status.enabled_changed_at})" if status.enabled_changed_at else ""
+    released = f" (released {status.available_released_at})" if status.available_released_at else ""
+    out.write(f"  Enabled: {'yes' if status.enabled else 'no'}{changed}\n")
+    out.write(f"  State: {status.state}\n")
+    out.write(f"  Origin: {status.origin}\n")
+    out.write(f"  Interval: {status.interval_seconds} seconds\n")
+    out.write(f"  Last check: {status.last_check_at or 'never'}\n")
+    out.write(f"  Next check allowed after: {status.next_check_after or 'not scheduled'}\n")
+    out.write(f"  Available version: {status.available_version or 'unknown'}{released}\n")
+    out.write(f"  Highest version ever accepted here: {status.floor_version or 'none'}\n")
+    out.write(f"  Installed here: {', '.join(installed) or 'none found'}\n")
+    out.write(f"  Checked by connector version: {status.checked_by_version or 'unknown'}\n")
+    if status.last_error_code:
+        at = f" (at {status.last_error_at})" if status.last_error_at else ""
+        out.write(f"  Last error: {status.last_error_code} - {status.last_error_message}{at}\n")
+        out.write(f"  Consecutive failures: {status.consecutive_failures}\n")
+    out.write(f"  {updater.running_version_note()}\n")
+
+    out.write("\n")
+    if status.state == autocheck.STATE_HALTED:
+        out.write("  Owner action required. Checking stopped and will not retry on its own.\n")
+        out.write("  Look at the reason above, then: agentnexus-connector update auto --resume\n")
+    elif status.state == autocheck.STATE_AVAILABLE:
+        out.write("  Owner action available. Nothing was installed or staged.\n")
+        out.write("  To move a profile: agentnexus-connector update apply --profile <name>\n")
+    else:
+        out.write("  Nothing to do.\n")
+    return EXIT_OK
+
+
+def _run_update_auto(namespace: Any, install_root: Path, environment: Environment) -> int:
+    """Switch the request-triggered check on or off, or clear a halt after looking at it.
+
+    This installs no service, no scheduled task and no cron entry, and starts no background
+    process. All it does is write a local file that a normal request consults.
+    """
+    out = environment.stdout
+    status = autocheck.load(install_root) or autocheck.Status()
+    moment = autocheck.format_time(autocheck.now_utc())
+
+    if namespace.disable:
+        disabled = dataclasses.replace(status, enabled=False, enabled_changed_at=moment)
+        autocheck.save(install_root, disabled)
+        out.write("\n  Automatic update checking is off. No request will reach the network.\n")
+        return EXIT_OK
+
+    interval = int(namespace.interval_seconds)
+    if interval < autocheck.MINIMUM_INTERVAL_SECONDS:
+        message = (
+            f"An interval of {interval} seconds is below the "
+            f"{autocheck.MINIMUM_INTERVAL_SECONDS} second minimum."
+        )
+        raise ConnectorError(
+            message,
+            exit_code=EXIT_USAGE,
+            recovery="Choose a longer interval. Releases are rare; a day is the default.",
+        )
+
+    if namespace.resume:
+        if status.state != autocheck.STATE_HALTED:
+            out.write("\n  Nothing to resume: the check is not halted.\n")
+            return EXIT_OK
+        # The floor is deliberately kept. Resuming means "I have looked at this", not "forget that
+        # an older release was served here", and clearing the floor would reopen the replay the
+        # halt was recording.
+        resumed = dataclasses.replace(
+            status,
+            state=autocheck.STATE_NEVER_CHECKED,
+            next_check_after=None,
+            consecutive_failures=0,
+            announced_halt=False,
+        )
+        autocheck.save(install_root, resumed)
+        autocheck.append_event(
+            install_root, state=resumed.state, code=None, message="halt cleared by the owner"
+        )
+        out.write("\n  Cleared. The next request may check again.\n")
+        out.write(f"  The replay floor is kept at {status.floor_version or 'none'}.\n")
+        return EXIT_OK
+
+    # Enabling starts the floor at the highest version already installed, so a machine that has
+    # 0.5.0 on disk can never be told by any manifest that 0.4.1 is the current release.
+    installed = updater.installed_versions(install_root, system=environment.system)
+    floor = status.floor_version or (max(installed, key=updater.version_key) if installed else None)
+    enabled = dataclasses.replace(
+        status,
+        enabled=True,
+        enabled_changed_at=moment,
+        interval_seconds=interval,
+        origin=str(namespace.origin).rstrip("/"),
+        floor_version=floor,
+        next_check_after=None,
+    )
+    autocheck.save(install_root, enabled)
+    out.write("\n  Automatic update checking is on.\n")
+    out.write(f"  At most one check every {interval} seconds, triggered by a normal request.\n")
+    out.write("  It reports a new release and installs nothing. Activation stays\n")
+    out.write("  'agentnexus-connector update apply --profile <name>', which you run yourself.\n")
+    if floor:
+        out.write(f"  No release older than {floor} will be accepted.\n")
+    return EXIT_OK
+
+
 def _run_update_command(namespace: Any, install_root: Path, environment: Environment) -> int:
     """Dispatch one update action. Neither installs a service nor schedules anything."""
+    if namespace.update_action == "status":
+        # Before `prepare_installation`, which takes a lock and can migrate a layout. Reporting
+        # what is already written down must work while anything else is running.
+        return _run_update_status(install_root, environment)
     prepare_installation(install_root, environment)
     try:
         if namespace.update_action == "check":
             return _run_update_check(namespace, install_root, environment)
+        if namespace.update_action == "auto":
+            return _run_update_auto(namespace, install_root, environment)
         return _run_update_apply(namespace, install_root, environment)
     except updater.UpdateError as error:
         environment.stderr.write(f"\nUpdate stopped: {error}\n")

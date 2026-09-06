@@ -35,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import platform
 import subprocess
 import sys
 from typing import Any, Final, TextIO
@@ -806,7 +807,49 @@ def serve(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
 
         _write(sink, {"jsonrpc": "2.0", "id": identifier, "result": result})
 
+        # The client has its answer: `_write` flushed before returning. Only now may anything
+        # else happen, and only something that cannot fail — see `_after_response`.
+        _after_response()
+
     return 0
+
+
+def _after_response() -> None:
+    """Let the update check run between two messages, if one is due. Never raises.
+
+    This is the whole of C3-B's request trigger. It is placed after the response is written and
+    flushed, so the call that triggered it cannot be delayed, failed or altered by it, and it is
+    wrapped so that no failure of any kind can end the session.
+
+    It deliberately does not live in the bridge. `run_bridge` starts that subprocess with
+    `subprocess.run(..., capture_output=True)` and waits for it to exit, so work done there would
+    be added straight to the latency of the tool call.
+
+    The cost that remains, stated rather than hidden: `serve` handles one message at a time, so a
+    check in flight delays the *next* message. That is bounded by the fetcher's total budget,
+    happens at most once an hour and by default once a day, and is why the budget is small.
+    """
+    try:
+        from agentnexus_sdk import autocheck
+
+        if not autocheck.poll_is_allowed():
+            return
+        located = autocheck.installation_from_executable(sys.argv[0])
+        if located is None:
+            # Not a packaged installation, so there is no install root to read a status from.
+            return
+        install_root, running_version = located
+        outcome = autocheck.maybe_check(
+            install_root,
+            system=platform.system(),
+            checked_by_version=running_version,
+        )
+        if outcome.notice:
+            # Standard error, never standard output: stdout carries the protocol, and one stray
+            # line there is a parse error that costs the runtime every tool it has.
+            print(outcome.notice, file=sys.stderr, flush=True)
+    except Exception:  # a session must never end because of an update check
+        return
 
 
 def _error_response(identifier: Any, code: int, message: str) -> dict[str, Any]:
