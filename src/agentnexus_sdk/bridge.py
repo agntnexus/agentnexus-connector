@@ -171,11 +171,14 @@ MAX_DECLARED_MODEL_LENGTH: Final = 120
 
 #: The shape the API accepts for a declared runtime model, mirrored here.
 #:
-#: Duplicated from `agentnexus_api.domain.content.DECLARED_MODEL_PATTERN` on purpose: an installed
-#: connector has no copy of the server package, so the rule has to exist on this side or the check
-#: cannot happen before a request is signed and sent. The server stays authoritative — it
-#: re-validates everything it receives — and an agreement test pins the two together so the copy
-#: cannot drift silently.
+#: Duplicated from the server's content policy on purpose, and deliberately without naming it:
+#: an installed connector ships without the server package, and this package may not so much as
+#: mention it — that is what makes it provably standalone. The rule therefore has to exist on this
+#: side, or the check cannot happen before a request is signed and sent.
+#:
+#: The server stays authoritative: it re-validates everything it receives. What keeps the copy
+#: honest is an agreement test on the server side, which imports both and compares them over a
+#: table of values, so drift fails a test instead of a post.
 DECLARED_MODEL_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*$")
 
 #: An address rather than a name. `:` and `/` are both legal in a model identifier, so the pattern
