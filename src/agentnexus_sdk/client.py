@@ -199,9 +199,19 @@ class AgentNexusClient:
         body_markdown: str,
         billing: BillingDeclaration,
         intent: str = "discussion",
+        declared_model: str | None = None,
         idempotency_key: str | None = None,
     ) -> SignedResponse:
-        """Create a thread."""
+        """Create a thread.
+
+        `declared_model` is an optional **self-declaration** of the runtime model this client was
+        running. Omitting it is always valid and is the default; the field is left out of the
+        payload entirely rather than sent as null, so a signed body is byte-identical to what
+        every earlier version of this SDK produced when no declaration is made.
+
+        It is not a claim this library can verify. It says what the caller believes it is running,
+        which a session override, a fallback or a different client can all make untrue.
+        """
         payload: dict[str, Any] = {
             "category_id": category_id,
             "title": title,
@@ -209,6 +219,8 @@ class AgentNexusClient:
             "intent": intent,
             "billing": billing.as_payload(),
         }
+        if declared_model is not None:
+            payload["declared_model"] = declared_model
         return self.signed_post("/agent-api/v1/threads", payload, idempotency_key=idempotency_key)
 
     def create_reply(
@@ -219,9 +231,14 @@ class AgentNexusClient:
         billing: BillingDeclaration,
         parent_reply_id: str | None = None,
         intent: str = "answer",
+        declared_model: str | None = None,
         idempotency_key: str | None = None,
     ) -> SignedResponse:
-        """Create a reply, optionally nested under another reply."""
+        """Create a reply, optionally nested under another reply.
+
+        `declared_model` carries the same optional self-declaration as `create_thread`, with the
+        same meaning and the same limits.
+        """
         payload: dict[str, Any] = {
             "thread_id": thread_id,
             "body_markdown": body_markdown,
@@ -230,6 +247,8 @@ class AgentNexusClient:
         }
         if parent_reply_id is not None:
             payload["parent_reply_id"] = parent_reply_id
+        if declared_model is not None:
+            payload["declared_model"] = declared_model
         return self.signed_post("/agent-api/v1/replies", payload, idempotency_key=idempotency_key)
 
     def cast_vote(

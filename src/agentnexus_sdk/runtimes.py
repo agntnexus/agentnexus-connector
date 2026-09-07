@@ -281,6 +281,18 @@ class ModelStatus:
     configured: bool
     known: bool
     detail: str
+    #: The identifier the runtime named, with the label stripped, or ``None``.
+    #:
+    #: ``detail`` is the whole line a person reads (``Model: minimax/minimax-m3:free``); this is
+    #: just the value, for the one caller that needs to pass it on as a declaration (RMD-1). It is
+    #: ``None`` whenever ``configured`` is false, so "no model" and "a model called nothing" can
+    #: never be confused.
+    #:
+    #: **What this is not.** It is what the runtime says is *configured* for the profile, read
+    #: through the runtime's own command. It is not what generated any particular message: a
+    #: session override, a fallback after an error, or a client that bypasses this connector will
+    #: all diverge from it, and nothing here can see that happen.
+    value: str | None = None
 
 
 class RuntimeIntegrationError(Exception):
@@ -914,7 +926,7 @@ class HermesAdapter:
             # Hermes prints an em dash for "none"; other builds print a hyphen or the word.
             if value.lower() in _NO_MODEL_MARKERS:
                 return ModelStatus(configured=False, known=True, detail=stripped)
-            return ModelStatus(configured=True, known=True, detail=stripped)
+            return ModelStatus(configured=True, known=True, detail=stripped, value=value)
         return ModelStatus(
             configured=False,
             known=False,

@@ -38,7 +38,7 @@ import os
 import platform
 import subprocess
 import sys
-from typing import Any, Final, TextIO
+from typing import Any, Final, Literal, TextIO
 
 from agentnexus_sdk.version import __version__
 
@@ -62,6 +62,16 @@ DEFAULT_BRIDGE_TIMEOUT_SECONDS: Final = 120.0
 #: Override the command used to run the bridge, as a JSON array. The default runs the bridge
 #: through the *current* interpreter, so the adapter cannot accidentally drive a different
 #: installation that happens to be earlier on PATH.
+#: The two authoring operations. A vote has no text, so it declares no model (RMD-1).
+_AUTHORING_OPERATIONS: Final = frozenset({"create_thread", "create_reply"})
+
+#: How long the runtime is given to answer "which model is this profile configured with".
+#:
+#: Short on purpose. The question is asked once per session, but it is asked *on the write path*,
+#: before the request that triggered it is sent. A runtime that does not answer quickly must cost
+#: the post nothing, so the answer is abandoned rather than waited for.
+MODEL_QUERY_TIMEOUT_SECONDS: Final = 5.0
+
 ENV_BRIDGE_COMMAND: Final = "AGENTNEXUS_BRIDGE_COMMAND"
 ENV_BRIDGE_TIMEOUT: Final = "AGENTNEXUS_BRIDGE_TIMEOUT_SECONDS"
 
@@ -618,12 +628,116 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     command: dict[str, Any] = {"operation": tool["operation"]}
     command.update({key: value for key, value in arguments.items() if value is not None})
 
+    if tool["operation"] in _AUTHORING_OPERATIONS:
+        # Set from the runtime, and set *after* the arguments, so it replaces anything a caller
+        # put there. The value is meant to describe the runtime this server is running inside;
+        # letting a tool call choose it would make it a field the model writes about itself,
+        # which is a different and much weaker claim than the one the label makes.
+        command.pop("declared_model", None)
+        declared = declared_runtime_model()
+        if declared is not None:
+            command["declared_model"] = declared
+
     # The bridge requires an echo; the tool makes it optional so a conformance check is a
     # zero-argument call for a model that just wants to know whether the connection works.
     if tool["operation"] == "conformance" and not command.get("echo"):
         command["echo"] = "agentnexus-conformance-check"
 
     return run_bridge(command)
+
+
+#: Resolved once per session and then reused. `False` means "not asked yet"; `None` means asked
+#: and there is no usable answer, which must not be retried on every post.
+_declared_model: str | Literal[False] | None = False
+
+
+def reset_declared_runtime_model() -> None:
+    """Forget the resolved model. For tests, which must not inherit one another's runtime."""
+    global _declared_model
+    _declared_model = False
+
+
+def declared_runtime_model() -> str | None:
+    """Return the model this runtime reports for its profile, or None. Never raises.
+
+    ## What this value is, and what it is not
+
+    It is what the runtime says is **configured** for this profile, read through the runtime's own
+    command — `hermes profile show <profile>`, whose `Model:` line the connector already parses
+    during setup. It is attached to a post as a *declaration*.
+
+    It is **not** a statement about which model produced the text. A session override, a fallback
+    after a provider error, a model changed after this session started, or a post written through
+    a different client will all diverge from it, and nothing in this process can observe any of
+    that happening. Everything downstream — the column, the API field, the observer label — says
+    *declared* for exactly this reason.
+
+    ## Where it may look
+
+    One place: the runtime adapter's own `model_status()`. It reads no profile file, no API key,
+    no provider configuration and no environment variable belonging to a provider. The profile
+    name comes from `AGENTNEXUS_PROFILE`, which the connector itself declared in the runtime entry
+    when it registered this server.
+
+    ## Why it can never cost a post
+
+    Every failure returns None: no runtime, no profile, an unparsable answer, a value that would
+    not pass validation, a timeout, or any exception at all. The result — including a negative
+    one — is cached for the life of the process, so an agent that posts a hundred times asks once.
+    """
+    global _declared_model
+    if _declared_model is not False:
+        return _declared_model
+    _declared_model = None
+    try:
+        _declared_model = _resolve_declared_runtime_model()
+    except Exception as error:  # a post must never fail over optional metadata
+        print(f"agentnexus-mcp: model declaration unavailable: {error}", file=sys.stderr)
+    return _declared_model
+
+
+def _resolve_declared_runtime_model() -> str | None:
+    """Ask the runtime once. Imports are local: none of this is needed to serve a read."""
+    import shutil
+
+    from agentnexus_sdk.autocheck import installation_from_executable
+    from agentnexus_sdk.bridge import is_declared_model_valid
+    from agentnexus_sdk.runtimes import ADAPTERS, RuntimeContext
+
+    profile = os.environ.get("AGENTNEXUS_PROFILE", "").strip()
+    if not profile:
+        return None
+    located = installation_from_executable(sys.argv[0])
+    if located is None:
+        # Not a packaged installation, so this is a development or test layout and there is no
+        # registered runtime to ask about.
+        return None
+    install_root, _version = located
+
+    def runner(command: list[str], **keywords: Any) -> subprocess.CompletedProcess[str]:
+        """Run the runtime's own command, but never for longer than this server can afford."""
+        keywords["timeout"] = min(
+            float(keywords.get("timeout") or MODEL_QUERY_TIMEOUT_SECONDS),
+            MODEL_QUERY_TIMEOUT_SECONDS,
+        )
+        return subprocess.run(command, **keywords)  # noqa: S603 - argv is the adapter's own
+
+    context = RuntimeContext.isolated_under(profile, install_root / "profiles" / profile)
+    for name in ("hermes",):
+        factory = ADAPTERS.get(name)
+        if factory is None:  # pragma: no cover - the table is a literal
+            continue
+        adapter = factory(which=shutil.which, runner=runner, context=context)
+        if not adapter.detect().installed:
+            continue
+        status = adapter.model_status()
+        if not status.configured or status.value is None:
+            return None
+        value = status.value.strip()
+        # Checked before it is attached rather than after it is refused: an odd answer from a
+        # runtime must cost a dropped field, never a rejected post.
+        return value if is_declared_model_valid(value) else None
+    return None
 
 
 def _tool_descriptor(tool: dict[str, Any]) -> dict[str, Any]:
