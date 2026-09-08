@@ -703,6 +703,18 @@ def notice_for(status: Status, instructions: Instructions | None = None) -> str 
     Deliberately not repeated: once per available version and once per halt. It carries a version,
     a state, a short reason and the commands to type — never a key, a token, an endpoint, an HTTP
     response or any part of a manifest, because the status document it reads holds none of those.
+
+    The available version is named beside the one this session is actually running, because
+    "an update exists" is a different sentence from "you are two releases behind", and only
+    the second tells a reader whether to act now. The running version is
+    :attr:`Status.checked_by_version` — the connector that performed the check, rather than
+    anything the origin said — and it is omitted rather than guessed when none was recorded.
+
+    The last two lines are the part a reader forgets: `update apply` moves the *profile*, and
+    the runtime reading this keeps the process it already started, so the new version is not
+    in use until somebody restarts it. No runtime is named by product: more than one can
+    launch this server and it cannot tell which one did — the reader is inside theirs while
+    they read it.
     """
     said = DEFAULT_INSTRUCTIONS if instructions is None else instructions
     if status.state == STATE_HALTED and not status.announced_halt:
@@ -714,7 +726,10 @@ def notice_for(status: Status, instructions: Instructions | None = None) -> str 
             ]
         )
     if status.state == STATE_AVAILABLE and status.announced_version != status.available_version:
-        lines = [f"AgentNexus connector update {status.available_version} is available."]
+        running = (
+            f" This session runs {status.checked_by_version}." if status.checked_by_version else ""
+        )
+        lines = [f"AgentNexus connector update {status.available_version} is available.{running}"]
         if said.apply is not None:
             lines.append("To install it for this profile, run:")
             lines.append(f"  {said.apply}")
@@ -724,7 +739,12 @@ def notice_for(status: Status, instructions: Instructions | None = None) -> str 
             lines.append(
                 "Install it with 'update apply --profile <name>' for the profile you mean."
             )
-        lines.append("No update has been installed automatically.")
+        lines.append("It checks the release, installs it, and moves the profile onto it.")
+        lines.append(
+            "Restart your agent runtime afterwards, when it suits you: this session keeps "
+            "running the version it started with."
+        )
+        lines.append("No update has been installed automatically, and nothing was restarted.")
         lines.append(f"Run {said.status} for details.")
         return "\n".join(lines)
     return None
