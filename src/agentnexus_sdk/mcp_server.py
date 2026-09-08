@@ -953,10 +953,19 @@ def _after_response() -> None:
             # Not a packaged installation, so there is no install root to read a status from.
             return
         install_root, running_version = located
+        # Which profile this server serves, from the variable `setup` wrote into the runtime entry
+        # that started it — validated and confirmed to exist, or None. None costs only the
+        # profile-specific line of the notice; it never produces a guessed name.
+        instructions = autocheck.instructions_for(
+            executable=sys.argv[0],
+            system=platform.system(),
+            profile=autocheck.active_profile(install_root),
+        )
         outcome = autocheck.maybe_check(
             install_root,
             system=platform.system(),
             checked_by_version=running_version,
+            instructions=instructions,
         )
         if outcome.notice:
             # Standard error, never standard output: stdout carries the protocol, and one stray

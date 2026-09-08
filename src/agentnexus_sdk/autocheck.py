@@ -72,12 +72,13 @@ import os
 import random
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
 from agentnexus_sdk import updater
+from agentnexus_sdk.runtimes import PROFILE_ENVIRONMENT_VARIABLE
 from agentnexus_sdk.updater import Fetcher, UpdateError
 
 #: Where the answer is kept, beside the profiles rather than inside one: a release is a property of
@@ -595,24 +596,157 @@ class Outcome:
     notice: str | None = None
 
 
-def notice_for(status: Status) -> str | None:
-    """Return the single line worth telling somebody, or None when there is nothing new.
+@dataclass(frozen=True)
+class Instructions:
+    """The commands a notice tells somebody to run, already runnable in their own shell.
 
-    Deliberately short and deliberately not repeated: it is emitted once per available version and
-    once per halt, and it never carries the result of anything the agent asked for.
+    A notice naming a command nobody can paste is barely better than no notice. A packaged
+    connector lives in a virtual environment whose `Scripts`/`bin` directory is not on the parent
+    shell's `PATH`, so the bare name does not resolve there, and on Windows a quoted path in
+    command position prints itself and starts nothing. `connector.runnable_command` already knows
+    both rules, and `instructions_for` is where they are asked rather than re-implemented.
+
+    `apply` is None when this process could not establish *which profile it serves*. That is not a
+    degraded string worth pasting anyway: `update apply` acts on the profile it is handed, so a
+    guessed name would move an agent the owner did not mean to move. The notice then offers only
+    `status`, which is read-only and correct whatever the profile.
     """
+
+    status: str
+    apply: str | None = None
+
+
+#: What a development checkout or an unrecognised layout gets: the bare name, which is the right
+#: answer exactly there, and no profile-specific command at all.
+DEFAULT_INSTRUCTIONS: Final = Instructions(status="agentnexus-connector update status")
+
+
+def active_profile(install_root: Path, *, environ: Mapping[str, str] | None = None) -> str | None:
+    """Return the profile this server was started for, or None when that cannot be established.
+
+    `setup` writes `AGENTNEXUS_PROFILE` into the runtime entry that starts this very process, so
+    the value is the connector's own record rather than a guess. It is still treated as untrusted
+    input, because a runtime configuration file is editable by hand and the name reaches a command
+    line that a person is invited to paste.
+
+    Three things must hold before a name is used, and any failure returns None rather than a best
+    effort:
+
+    * it validates under the same rule that created it, which is what makes a name carrying a
+      space, a quote, a path separator or a control character impossible rather than quoted;
+    * a directory for it exists under *this* installation, so an entry naming a profile that was
+      removed, renamed, or belongs to another installation does not speak for this one;
+    * nothing raised on the way.
+    """
+    from agentnexus_sdk.profiles import ProfileError, profile_directory, validate_profile_name
+
+    values = os.environ if environ is None else environ
+    declared = values.get(PROFILE_ENVIRONMENT_VARIABLE, "").strip()
+    if not declared:
+        return None
+    try:
+        name = validate_profile_name(declared)
+        if not profile_directory(install_root, name).is_dir():
+            return None
+    except (ProfileError, OSError, ValueError):
+        return None
+    return name
+
+
+def instructions_for(*, executable: str | None, system: str, profile: str | None) -> Instructions:
+    """Build the runnable commands for this installation, naming `profile` only if there is one.
+
+    Nothing is assembled by hand: `connector_executable` finds the packaged executable beside the
+    one already running, and `runnable_command` quotes it for the shell in question. The import is
+    function-local because `connector` imports this module.
+    """
+    from agentnexus_sdk.connector import (
+        CONNECTOR_EXECUTABLE_NAME,
+        Environment,
+        connector_executable,
+        runnable_command,
+    )
+
+    directory: Path | None = None
+    if executable:
+        with contextlib.suppress(OSError, ValueError):
+            candidate = Path(executable).resolve().parent
+            directory = candidate if candidate.is_dir() else None
+
+    found = connector_executable(Environment(executable_directory=directory, system=system))
+    if found is None:
+        # The development and test layout, where the bare name on `PATH` is the right answer and
+        # quoting it would be the wrong one. The profile needs no quoting either: every character
+        # that would require it is one `validate_profile_name` has already refused.
+        return Instructions(
+            status=f"{CONNECTOR_EXECUTABLE_NAME} update status",
+            apply=(
+                None
+                if profile is None
+                else f"{CONNECTOR_EXECUTABLE_NAME} update apply --profile {profile}"
+            ),
+        )
+
+    return Instructions(
+        status=runnable_command(found, "update", "status", system=system),
+        apply=(
+            None
+            if profile is None
+            else runnable_command(found, "update", "apply", "--profile", profile, system=system)
+        ),
+    )
+
+
+def notice_for(status: Status, instructions: Instructions | None = None) -> str | None:
+    """Return the notice worth showing somebody, or None when there is nothing new.
+
+    Deliberately not repeated: once per available version and once per halt. It carries a version,
+    a state, a short reason and the commands to type — never a key, a token, an endpoint, an HTTP
+    response or any part of a manifest, because the status document it reads holds none of those.
+
+    The available version is named beside the one this session is actually running, because
+    "an update exists" is a different sentence from "you are two releases behind", and only
+    the second tells a reader whether to act now. The running version is
+    :attr:`Status.checked_by_version` — the connector that performed the check, rather than
+    anything the origin said — and it is omitted rather than guessed when none was recorded.
+
+    The last two lines are the part a reader forgets: `update apply` moves the *profile*, and
+    the runtime reading this keeps the process it already started, so the new version is not
+    in use until somebody restarts it. No runtime is named by product: more than one can
+    launch this server and it cannot tell which one did — the reader is inside theirs while
+    they read it.
+    """
+    said = DEFAULT_INSTRUCTIONS if instructions is None else instructions
     if status.state == STATE_HALTED and not status.announced_halt:
         detail = status.last_error_message or "the reason was not recorded"
-        return (
-            f"AgentNexus: automatic update checking stopped — {detail} "
-            "Run 'agentnexus-connector update status' for the detail."
+        return "\n".join(
+            [
+                f"AgentNexus: automatic update checking stopped — {detail}",
+                f"Run {said.status} for the detail.",
+            ]
         )
     if status.state == STATE_AVAILABLE and status.announced_version != status.available_version:
-        return (
-            f"AgentNexus: connector {status.available_version} is available. "
-            "Nothing was installed. Run 'agentnexus-connector update apply --profile <name>' "
-            "when it suits you."
+        running = (
+            f" This session runs {status.checked_by_version}." if status.checked_by_version else ""
         )
+        lines = [f"AgentNexus connector update {status.available_version} is available.{running}"]
+        if said.apply is not None:
+            lines.append("To install it for this profile, run:")
+            lines.append(f"  {said.apply}")
+        else:
+            # No profile could be established, so none is named. `update apply` acts on the profile
+            # it is given, and inventing one here is the single mistake this must not make.
+            lines.append(
+                "Install it with 'update apply --profile <name>' for the profile you mean."
+            )
+        lines.append("It checks the release, installs it, and moves the profile onto it.")
+        lines.append(
+            "Restart your agent runtime afterwards, when it suits you: this session keeps "
+            "running the version it started with."
+        )
+        lines.append("No update has been installed automatically, and nothing was restarted.")
+        lines.append(f"Run {said.status} for details.")
+        return "\n".join(lines)
     return None
 
 
@@ -703,6 +837,7 @@ def maybe_check(
     now: Callable[[], dt.datetime] = now_utc,
     jitter: Callable[[float], float] = default_jitter,
     checked_by_version: str | None = None,
+    instructions: Instructions | None = None,
 ) -> Outcome:
     """Check if one is due, and never raise whatever happens.
 
@@ -718,6 +853,7 @@ def maybe_check(
             now=now,
             jitter=jitter,
             checked_by_version=checked_by_version,
+            instructions=instructions,
         )
     except Exception:  # a request must never fail because of an update check
         return Outcome(state=STATE_DISABLED, checked=False)
@@ -731,6 +867,7 @@ def _maybe_check(
     now: Callable[[], dt.datetime],
     jitter: Callable[[float], float],
     checked_by_version: str | None,
+    instructions: Instructions | None = None,
 ) -> Outcome:
     """Do the work `maybe_check` guards."""
     from agentnexus_sdk.profiles import ProfileError, update_check_lock
@@ -742,7 +879,11 @@ def _maybe_check(
     moment = now()
     if not due(status, now=moment):
         # Still worth delivering a notice that was recorded earlier and never shown.
-        return Outcome(state=status.state, checked=False, notice=_deliver(install_root, status))
+        return Outcome(
+            state=status.state,
+            checked=False,
+            notice=_deliver(install_root, status, instructions),
+        )
 
     try:
         with update_check_lock(install_root):
@@ -752,7 +893,9 @@ def _maybe_check(
             current = load(install_root) or status
             if not due(current, now=moment):
                 return Outcome(
-                    state=current.state, checked=False, notice=_deliver(install_root, current)
+                    state=current.state,
+                    checked=False,
+                    notice=_deliver(install_root, current, instructions),
                 )
             updated = perform_check(
                 install_root,
@@ -772,7 +915,9 @@ def _maybe_check(
                 or f"available {updated.available_version or '-'}",
             )
             return Outcome(
-                state=updated.state, checked=True, notice=_deliver(install_root, updated)
+                state=updated.state,
+                checked=True,
+                notice=_deliver(install_root, updated, instructions),
             )
     except ProfileError:
         # Another check holds the lock. Not a failure, so it does not count toward backoff and
@@ -780,14 +925,83 @@ def _maybe_check(
         return Outcome(state=STATE_BLOCKED, checked=False)
 
 
-def _deliver(install_root: Path, status: Status) -> str | None:
+def _deliver(
+    install_root: Path, status: Status, instructions: Instructions | None = None
+) -> str | None:
     """Return the pending notice and record that it was shown, or None."""
-    notice = notice_for(status)
+    notice = notice_for(status, instructions)
     if notice is None:
         return None
     with contextlib.suppress(OSError):
         save(install_root, announced(status))
     return notice
+
+
+def enable_on_first_setup(
+    install_root: Path,
+    *,
+    system: str,
+    now: Callable[[], dt.datetime] = now_utc,
+) -> bool:
+    """Switch checking on for an installation that has never had an answer either way.
+
+    Called once, by a `setup` run that has already finished: the profile exists, the identity is
+    redeemed and the connection has been proved. It writes one local file and returns whether it
+    did. It reaches no network, performs no check, schedules nothing and starts nothing — the
+    first check happens later, inside an ordinary request, under every bound that already governs
+    one.
+
+    **The setting belongs to the installation, not to the profile.** A release is a property of
+    the connector on this machine, and a second profile is not a second connector. That is why the
+    only question asked here is whether a status document exists.
+
+    An existing document is an answer the owner has already given, and every one of them is left
+    exactly as it stands:
+
+    * `enabled: false` — switched off deliberately. Setting up another profile is not a request to
+      undo that, and re-enabling would make `update auto --disable` mean "until next time".
+    * halted — an answer from the origin did not verify. Only `update auto --resume` leaves that
+      state, after a person has looked at why.
+    * already on, in backoff, or mid-schedule — the interval, origin, replay floor and next-check
+      time are its own; nothing here is a reason to move them.
+
+    Existing installations are therefore untouched by an upgrade: no file is written until a
+    *successful setup* runs, and none is migrated in the background.
+
+    Never raises. A profile that is connected and working is a successful setup whatever happens
+    to a bookkeeping file afterwards.
+    """
+    from agentnexus_sdk.profiles import ProfileError, update_check_lock
+
+    try:
+        with update_check_lock(install_root):
+            # Re-read under the lock. Without it, a `update auto --disable` running beside this
+            # setup could be overwritten by a decision taken before it was made.
+            if load(install_root) is not None:
+                return False
+            # The floor starts at the highest version already on disk, exactly as `update auto
+            # --enable` sets it: no manifest may then tell a machine holding 0.5.0 that 0.4.1 is
+            # the current release.
+            installed = updater.installed_versions(install_root, system=system)
+            floor = max(installed, key=updater.version_key) if installed else None
+            save(
+                install_root,
+                Status(
+                    enabled=True,
+                    enabled_changed_at=_format(now()),
+                    state=STATE_NEVER_CHECKED,
+                    floor_version=floor,
+                ),
+            )
+            append_event(
+                install_root,
+                state=STATE_NEVER_CHECKED,
+                code=None,
+                message="enabled by default on first profile setup",
+            )
+            return True
+    except (ProfileError, OSError, ValueError):
+        return False
 
 
 def record_installed_version(install_root: Path, version: str) -> None:

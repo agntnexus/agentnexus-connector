@@ -725,8 +725,10 @@ def build_server_spec(
         "AGENTNEXUS_KEY_ID": identity.key_id,
         "AGENTNEXUS_PRIVATE_KEY_FILE": private_key_path,
         "AGENTNEXUS_AGENT_API_URL": endpoints.agent_api_url,
-        # Not read by the MCP server. It is here so an entry says which profile owns it, which is
-        # how a rerun tells its own entry from another agent's and refuses to overwrite the latter.
+        # Written so an entry says which profile owns it: that is how a rerun tells its own
+        # entry from another agent's and refuses to overwrite the latter. The MCP server also
+        # reads it back, as the only trustworthy answer to "which profile am I serving?" when an
+        # update notice offers a profile-specific command.
         PROFILE_ENVIRONMENT_VARIABLE: profile,
     }
     if endpoints.public_api_url:
@@ -1587,6 +1589,7 @@ def run_setup(
         adapters=adapters,
     )
     _report_how_to_start(paths, adapters, context, environment)
+    _offer_default_update_checking(paths, environment)
 
     # The optional local step, offered only once the identity is already connected and saved. Its
     # failures are reported and swallowed: an agent that can sign is a successful setup, and a
@@ -1633,6 +1636,43 @@ def run_setup(
             allowed=soul_mode != "skip",
         )
     return EXIT_OK
+
+
+def _offer_default_update_checking(paths: Paths, environment: Environment) -> None:
+    """Switch update checking on for a new installation, and say plainly what that does.
+
+    Reached only from the end of `run_setup`, after the connection has been proved and the state
+    written as complete. A run that raised, was interrupted, or refused never arrives here, so a
+    failed setup leaves no update status behind.
+
+    The write itself is `autocheck.enable_on_first_setup`, which does nothing at all if a status
+    document already exists — including one the owner switched off. Nothing here reaches the
+    network: `setup` makes no update request of any kind, and the first check happens later,
+    inside an ordinary request.
+    """
+    if paths.install_root is None:
+        # No installation root to own the setting. The development and test layout; guessing at a
+        # root and writing into it is exactly what `installation_from_executable` refuses to do.
+        return
+
+    if not autocheck.enable_on_first_setup(paths.install_root, system=environment.system):
+        # Already answered, one way or the other. Reporting a setting this run did not make would
+        # invite an owner to believe it had just been changed.
+        return
+
+    out = environment.stdout
+    out.write("\nUpdate checking\n")
+    out.write("  Automatic update checking is on for this connector installation.\n")
+    out.write("  It only reports that a release exists. Nothing is downloaded, installed,\n")
+    out.write("  activated or restarted, and no service or scheduled task was created.\n")
+    out.write("  The first check happens during a later ordinary AgentNexus request.\n")
+    out.write(f"  What it found:  {connector_command(environment, 'update', 'status')}\n")
+    out.write(
+        f"  Turn it off:    {connector_command(environment, 'update', 'auto', '--disable')}\n"
+    )
+    # Said because the file is one per installation, not one per profile, and an owner who sets up
+    # a second agent should not expect a second switch.
+    out.write("  The setting covers this whole connector installation, not one profile.\n")
 
 
 def offer_soul(*, paths: Paths, adapters: list[RuntimeAdapter], environment: Environment) -> None:
@@ -2384,6 +2424,20 @@ def connector_executable(environment: Environment) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def connector_command(environment: Environment, *arguments: str) -> str:
+    """Return one runnable line for this connector, whatever shell the reader is in.
+
+    The same rule `resume_command` follows, generalised because more than one message now has to
+    name a command: point at the packaged executable when there is one, because a virtual
+    environment's `Scripts`/`bin` is not on the parent shell's `PATH`, and fall back to the bare
+    name in the development layout where that is the correct answer.
+    """
+    executable = connector_executable(environment)
+    if executable is None:
+        return " ".join([CONNECTOR_EXECUTABLE_NAME, *arguments])
+    return runnable_command(executable, *arguments, system=environment.system)
 
 
 def resume_command(profile: str, environment: Environment | None = None) -> str:
@@ -3438,8 +3492,9 @@ def _build_parser() -> Any:
     )
 
     # `status` reads local files and nothing else, so it works offline and while another run holds
-    # a lock. `auto` is the only way automatic checking is ever switched on: it is off until an
-    # owner turns it on, and there is still no scheduler, service or task anywhere.
+    # a lock. `auto` is how an owner changes the answer afterwards; the answer itself is first
+    # written by a successful `setup`, and never by an upgrade. There is still no scheduler,
+    # service or task anywhere.
     update_actions.add_parser(
         "status",
         parents=[common],
