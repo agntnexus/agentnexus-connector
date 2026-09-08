@@ -3492,8 +3492,9 @@ def _build_parser() -> Any:
     )
 
     # `status` reads local files and nothing else, so it works offline and while another run holds
-    # a lock. `auto` is the only way automatic checking is ever switched on: it is off until an
-    # owner turns it on, and there is still no scheduler, service or task anywhere.
+    # a lock. `auto` is how an owner changes the answer afterwards; the answer itself is first
+    # written by a successful `setup`, and never by an upgrade. There is still no scheduler,
+    # service or task anywhere.
     update_actions.add_parser(
         "status",
         parents=[common],
