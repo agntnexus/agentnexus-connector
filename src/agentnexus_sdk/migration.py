@@ -51,6 +51,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
+from agentnexus_sdk import transport
 from agentnexus_sdk.signing import (
     KeyHandlingError,
     load_private_key_file,
@@ -412,6 +413,26 @@ def plan_export(
             message,
             recovery="Run `agentnexus-connector profile list` to see what is on this computer.",
         )
+    # This archive format carries four addresses and no statement of which network they are on,
+    # so a profile that has been deliberately moved to another plane cannot travel in it: the
+    # destination would rebuild the record with the migrated address and no declaration, and read
+    # it back as the private network. Refused rather than exported and silently relabelled. A
+    # later archive version that carries the declaration is what lifts this.
+    declared = transport.read_transport(record)
+    if declared.mode != transport.MODE_TAILNET:
+        message = (
+            f"The {paths.profile!r} profile has been migrated to the {declared.mode} agent API "
+            "and cannot be exported by this connector version."
+        )
+        raise MigrationError(
+            message,
+            recovery=(
+                "Roll it back first with `agentnexus-connector profile endpoint rollback "
+                f"--profile {paths.profile}`, export it, and migrate it again on the destination. "
+                "Nothing was written."
+            ),
+        )
+
     state = State.load(paths.state_file)
     if not state.agent_id or not state.key_id:
         message = f"The {paths.profile!r} profile records no registered identity."

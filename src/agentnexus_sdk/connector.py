@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any, Final, TextIO
 from urllib.parse import urlsplit
 
-from agentnexus_sdk import autocheck, migration, soul, soul_scan, updater
+from agentnexus_sdk import autocheck, migration, soul, soul_scan, transport, updater
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions
 from agentnexus_sdk.errors import (
     AgentNexusError,
@@ -2532,6 +2532,15 @@ def run_profile_status(install_root: Path, profile: str, environment: Environmen
         )
     if record is not None and record.endpoints.get("agent_api_url"):
         out.write(f"  agent API:   {record.endpoints['agent_api_url']}\n")
+    if record is not None:
+        # Only for a profile that has actually been migrated, so an installation that never was
+        # prints exactly what it printed before this existed. A declaration this build cannot read
+        # is reported by `profile endpoint show`, whose whole job that is; `status` is a local
+        # summary and stays readable when one field is not.
+        with contextlib.suppress(transport.TransportError):
+            declared = transport.read_transport(record)
+            if declared.declared:
+                out.write(f"  transport:   {declared.mode}\n")
     if record is not None and record.runtime.get("server_name"):
         out.write(f"  MCP entry:   {record.runtime['server_name']}\n")
     context = paths.runtime_context()
@@ -3252,6 +3261,273 @@ def _retire_key(
 
 
 # ---------------------------------------------------------------------------------------------
+# Where this profile connects: the endpoint and the plane it is on
+# ---------------------------------------------------------------------------------------------
+
+
+def _endpoint_subject(install_root: Path, profile: str) -> tuple[Paths, ProfileRecord, State]:
+    """Resolve one complete, connected profile, or refuse to act on it at all.
+
+    "Complete" is checked rather than assumed, because every refusal here is cheaper than the
+    alternative: moving a half-installed profile's endpoint produces an installation that points
+    somewhere new with nothing behind it, and the applicant would have no way to tell that from a
+    deployment problem.
+    """
+    paths = Paths.for_profile(install_root, profile)
+    if not paths.root.is_dir():
+        message = f"There is no {profile!r} profile in {install_root}."
+        raise transport.TransportError(
+            message,
+            recovery=(
+                "Run `agentnexus-connector profile list` to see what is on this machine. "
+                "Nothing was changed."
+            ),
+        )
+    record = ProfileRecord.load(paths.profile_record)
+    state = State.load(paths.state_file)
+    missing = []
+    if record is None or not record.endpoints.get("agent_api_url"):
+        missing.append("it records no Agent API address")
+    if not state.agent_id or not state.key_id:
+        missing.append("it holds no registered identity")
+    if not paths.private_key.is_file():
+        missing.append("its private key is not on this machine")
+    if record is None or missing:
+        message = f"The {profile!r} profile is incomplete: {'; '.join(missing)}."
+        raise transport.TransportError(
+            message,
+            recovery=(
+                f"Finish it first with `agentnexus-connector setup --profile {profile}`, which "
+                "resumes without a second invitation. Nothing was changed."
+            ),
+        )
+    return paths, record, state
+
+
+def _reregister_endpoint(
+    *, paths: Paths, record: ProfileRecord, state: State, environment: Environment
+) -> list[str]:
+    """Point this profile's runtime entries at the address the record now names.
+
+    Without this the command would change a file and leave the agent talking to the old address,
+    because a runtime spawns the MCP server with that address baked into its own configuration.
+    Rollback is scoped to this call: a failure restores every entry this call changed and leaves
+    the record unwritten, so the profile stays on the endpoint it already had.
+    """
+    endpoints = Endpoints(
+        onboarding_base_url=str(record.endpoints.get("onboarding_base_url", "")),
+        agent_api_url=str(record.endpoints.get("agent_api_url", "")),
+        public_api_url=str(record.endpoints.get("public_api_url", "")) or None,
+        observer_url=str(record.endpoints.get("observer_url", "")) or None,
+    )
+    identity = Identity(
+        agent_id=state.agent_id or "", key_id=state.key_id or "", handle=state.handle or ""
+    )
+    spec = build_server_spec(
+        identity=identity,
+        private_key_path=state.private_key_path or str(paths.private_key),
+        endpoints=endpoints,
+        environment=environment,
+        profile=paths.profile,
+    )
+    context = paths.runtime_context()
+    configured: list[tuple[RuntimeAdapter, ConfigurationOutcome]] = []
+    try:
+        for name in sorted(set(state.runtimes)):
+            factory = ADAPTERS.get(name)
+            if factory is None:
+                continue
+            adapter = factory(which=environment.which, runner=environment.run, context=context)
+            if not adapter.detect().installed:
+                continue
+            configured.append((adapter, adapter.configure(spec, backup_directory=paths.backups)))
+    except RuntimeIntegrationError as error:
+        for adapter, outcome in reversed(configured):
+            if outcome.changed:
+                with contextlib.suppress(RuntimeIntegrationError):
+                    adapter.rollback(outcome.backup)
+        message = f"The runtime entry could not be updated: {error}"
+        raise transport.TransportError(
+            message,
+            recovery=(
+                "Every runtime entry this command changed was put back, and the profile still "
+                "records its previous endpoint. Nothing else was changed."
+            ),
+        ) from error
+    return [adapter.display_name for adapter, outcome in configured if outcome.changed]
+
+
+def _apply_endpoint_change(
+    *,
+    change: transport.EndpointChange,
+    paths: Paths,
+    record: ProfileRecord,
+    state: State,
+    environment: Environment,
+    confirm: str | None,
+) -> int:
+    """Show the change, take the confirmation, back the record up, and write it exactly once."""
+    out = environment.stdout
+    out.write(f"\nProfile {paths.profile}\n")
+    out.write(transport.describe(change))
+    out.write("\n  The identity, its key, its soul and every other profile are untouched.\n")
+    _confirm_endpoint_change(paths.profile, environment, confirm=confirm)
+
+    backup = transport.take_backup(
+        paths.profile_record,
+        profile=paths.profile,
+        backups=transport.backup_directory(paths.root),
+    )
+    if backup is not None:
+        out.write(f"\n  Previous configuration kept at {backup}\n")
+
+    transport.apply_change(record, change)
+    changed = _reregister_endpoint(paths=paths, record=record, state=state, environment=environment)
+    # Written last, and only once every runtime that had to move has moved. A record that named
+    # an address no runtime had been told about would be the one state this command must not
+    # leave behind: the file would say migrated and the agent would still be signing elsewhere.
+    record.save(paths.profile_record)
+
+    out.write(f"  {paths.profile} now uses {change.after.agent_api_url} ({change.after.mode})\n")
+    if changed:
+        out.write(f"  Runtime entry updated: {', '.join(changed)}\n")
+        out.write("  Restart the agent for it to take effect.\n")
+    else:
+        out.write(
+            "  No runtime on this machine needed changing. Re-run setup for this profile if you\n"
+            "  add one later.\n"
+        )
+    return EXIT_OK
+
+
+def _confirm_endpoint_change(
+    profile: str, environment: Environment, *, confirm: str | None
+) -> None:
+    """Require the profile's own name, typed or passed. A blank line confirms nothing."""
+    if confirm is not None:
+        if confirm == profile:
+            return
+        message = f"The confirmation {confirm!r} does not match the profile {profile!r}."
+        raise transport.TransportError(
+            message,
+            recovery="Nothing was changed. Pass `--confirm <profile>` with the exact name.",
+        )
+    typed = environment.ask(f"\n  Continue? Type '{profile}' to confirm: ").strip()
+    if typed != profile:
+        message = "That is not the profile's name."
+        raise transport.TransportError(message, recovery="Nothing was changed.")
+
+
+def run_endpoint_show(install_root: Path, profile: str, environment: Environment) -> int:
+    """Report which plane one profile is on, and say plainly what is not available.
+
+    Reads local files only. It contacts nothing, and — the part that matters for an un-migrated
+    installation — it writes nothing, so looking at a profile does not change its record.
+    """
+    paths = Paths.for_profile(install_root, profile)
+    record = ProfileRecord.load(paths.profile_record)
+    if record is None:
+        message = f"There is no {profile!r} profile in {install_root}."
+        raise transport.TransportError(
+            message, recovery="Run `agentnexus-connector profile list` to see what is there."
+        )
+    current = transport.read_transport(record)
+    gate = transport.public_agent_api_gate()
+    out = environment.stdout
+    out.write(f"Profile {profile}\n")
+    out.write(f"  transport:   {current.mode}\n")
+    out.write(f"  agent API:   {current.agent_api_url or '-'}\n")
+    if not current.declared:
+        out.write("               (never migrated; this is the address setup was given)\n")
+    if current.changed_at:
+        out.write(f"  changed:     {current.changed_at}\n")
+    if current.can_roll_back:
+        out.write(
+            f"  rollback to: {current.previous_mode}  {current.previous_agent_api_url}\n"
+            "               `agentnexus-connector profile endpoint rollback "
+            f"--profile {profile}`\n"
+        )
+    else:
+        out.write("  rollback:    nothing to roll back; no previous endpoint is recorded\n")
+    if gate.is_open:
+        out.write(
+            "  public:      available. It is never selected for you: pass the address your\n"
+            "               operator gave you to `profile endpoint set-public`.\n"
+        )
+    else:
+        out.write(f"  public:      not available - {gate.reason}\n")
+    return EXIT_OK
+
+
+def run_endpoint_set_public(
+    install_root: Path,
+    profile: str,
+    *,
+    agent_api_url: str,
+    confirm: str | None,
+    environment: Environment,
+) -> int:
+    """Move exactly one profile to a public Agent API address, once, on purpose.
+
+    The gate is checked first and on its own. A closed gate is not a problem with the address
+    somebody typed, and reporting it as one would send them away to correct a URL that was never
+    the reason — so nothing here looks at the address until the build says the destination exists.
+    """
+    gate = transport.public_agent_api_gate()
+    if not gate.is_open:
+        message = (
+            f"This connector cannot move a profile to a public Agent API address: {gate.reason}."
+        )
+        raise transport.TransportError(
+            message,
+            exit_code=transport.EXIT_TRANSPORT_GATE,
+            recovery=(
+                "Nothing was changed, and this profile keeps the endpoint it already has. "
+                "Existing connectors stay on their current endpoint until a released connector "
+                "offers this and you choose it, for one profile at a time."
+            ),
+        )
+    paths, record, state = _endpoint_subject(install_root, profile)
+    change = transport.plan_public_migration(
+        record, profile=paths.profile, agent_api_url=agent_api_url
+    )
+    if change.unchanged:
+        environment.stdout.write(
+            f"Profile {paths.profile} already uses {change.after.agent_api_url} "
+            f"({change.after.mode}). Nothing was changed.\n"
+        )
+        return EXIT_OK
+    return _apply_endpoint_change(
+        change=change,
+        paths=paths,
+        record=record,
+        state=state,
+        environment=environment,
+        confirm=confirm,
+    )
+
+
+def run_endpoint_rollback(
+    install_root: Path, profile: str, *, confirm: str | None, environment: Environment
+) -> int:
+    """Put one profile back on the endpoint it recorded before it was migrated.
+
+    Deliberately not gated. A machine that migrated while the gate was open has to stay
+    recoverable after it shuts: turning something off must never be the action that fails.
+    """
+    paths, record, state = _endpoint_subject(install_root, profile)
+    change = transport.plan_rollback(record, profile=paths.profile)
+    return _apply_endpoint_change(
+        change=change,
+        paths=paths,
+        record=record,
+        state=state,
+        environment=environment,
+        confirm=confirm,
+    )
+
+
+# ---------------------------------------------------------------------------------------------
 # The entry point
 # ---------------------------------------------------------------------------------------------
 
@@ -3373,6 +3649,56 @@ def _build_parser() -> Any:
     soul_restore.add_argument("--runtime", choices=sorted(ADAPTERS), default=None)
     soul_restore.add_argument(
         "--backup", default=None, help="Backup file name; the newest is used when omitted."
+    )
+
+    # Where a profile connects, and the one command that may change it. Its own noun, because an
+    # endpoint is neither the connector version (`update`) nor the machine a profile lives on
+    # (`export`/`import`), and a command that conflated them would let one intention perform
+    # another. There is no `--all` and no `--yes`: one profile, named, with its name typed back.
+    endpoint = actions.add_parser(
+        "endpoint",
+        parents=[common],
+        help="Show, and deliberately change, where one profile reaches the signed agent API.",
+    )
+    endpoint_actions = endpoint.add_subparsers(dest="endpoint_action", required=True)
+
+    endpoint_show = endpoint_actions.add_parser(
+        "show",
+        parents=[common],
+        help="Report one profile's network plane and address. Reads no network, writes nothing.",
+    )
+    endpoint_show.add_argument("--profile", default=DEFAULT_PROFILE_NAME)
+
+    endpoint_public = endpoint_actions.add_parser(
+        "set-public",
+        parents=[common],
+        help="Move one profile to a public agent API address. Refused unless a release offers one.",
+    )
+    endpoint_public.add_argument("--profile", default=DEFAULT_PROFILE_NAME)
+    # Required, and required for a reason: there is no default, no fallback to `--origin`, and
+    # nothing derived from the site the connector was downloaded from. The address is routing
+    # information the operator supplies, or the command does not run.
+    endpoint_public.add_argument(
+        "--agent-api-url",
+        required=True,
+        help="The public agent API address, supplied in full. Never inferred from anything.",
+    )
+    endpoint_public.add_argument(
+        "--confirm",
+        default=None,
+        help="The profile name, typed back, to confirm without an interactive prompt.",
+    )
+
+    endpoint_rollback = endpoint_actions.add_parser(
+        "rollback",
+        parents=[common],
+        help="Put one profile back on the endpoint it recorded before it was migrated.",
+    )
+    endpoint_rollback.add_argument("--profile", default=DEFAULT_PROFILE_NAME)
+    endpoint_rollback.add_argument(
+        "--confirm",
+        default=None,
+        help="The profile name, typed back, to confirm without an interactive prompt.",
     )
 
     remove = actions.add_parser(
@@ -3568,6 +3894,14 @@ def main(argv: Sequence[str] | None = None, environment: Environment | None = No
         if namespace.command == "update":
             return _run_update_command(namespace, install_root, environment)
         return _run_setup_command(namespace, install_root, environment)
+    except transport.TransportError as error:
+        # Its own branch, and its own exit code: a caller has to be able to tell "the public
+        # endpoint is not available in this build" from "that address is wrong" without reading
+        # the message, and both from a setup failure.
+        environment.stderr.write(f"\nStopped: {error}\n")
+        if error.recovery:
+            environment.stderr.write(f"What to do: {error.recovery}\n")
+        return error.exit_code
     except ProfileError as error:
         environment.stderr.write(f"\nStopped: {error}\n")
         if error.recovery:
@@ -3657,6 +3991,32 @@ def _run_soul_command(namespace: Any, install_root: Path, environment: Environme
                 action, paths=paths, namespace=namespace, environment=environment
             )
     return _run_soul_action(action, paths=paths, namespace=namespace, environment=environment)
+
+
+def _run_endpoint_command(namespace: Any, install_root: Path, environment: Environment) -> int:
+    """Dispatch one endpoint action for exactly one profile.
+
+    `show` reads, so it answers while another run holds the lock. The two that write take the
+    profile lock for the whole command, because a setup resuming at the same moment would
+    otherwise re-record the address this one is in the middle of replacing.
+    """
+    if namespace.endpoint_action == "show":
+        return run_endpoint_show(install_root, namespace.profile, environment)
+    with profile_lock(install_root, validate_profile_name(namespace.profile)):
+        if namespace.endpoint_action == "set-public":
+            return run_endpoint_set_public(
+                install_root,
+                namespace.profile,
+                agent_api_url=namespace.agent_api_url,
+                confirm=namespace.confirm,
+                environment=environment,
+            )
+        return run_endpoint_rollback(
+            install_root,
+            namespace.profile,
+            confirm=namespace.confirm,
+            environment=environment,
+        )
 
 
 #: Soul actions that change this profile's soul or its record, and therefore need the lock.
@@ -4135,6 +4495,9 @@ def _run_profile_command(namespace: Any, install_root: Path, environment: Enviro
     if namespace.action == "doctor":
         prepare_installation(install_root, environment)
         return run_profile_doctor(install_root, namespace.profile, environment)
+    if namespace.action == "endpoint":
+        prepare_installation(install_root, environment)
+        return _run_endpoint_command(namespace, install_root, environment)
     if namespace.action == "soul":
         prepare_installation(install_root, environment)
         return _run_soul_command(namespace, install_root, environment)

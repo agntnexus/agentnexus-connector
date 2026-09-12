@@ -462,10 +462,16 @@ class ProfileRecord:
     endpoints: dict[str, str] = field(default_factory=dict)
     runtime: dict[str, Any] = field(default_factory=dict)
     migrated_from: str | None = None
+    #: Which network plane `endpoints["agent_api_url"]` is on, once somebody has deliberately said
+    #: so. `None` means this profile has never been migrated, which is what every installation made
+    #: before `agentnexus_sdk.transport` existed looks like — and it is written out as an *absent*
+    #: key rather than a null, so such a record keeps its exact bytes. The block carries its own
+    #: schema version; see that module for why it is not this one.
+    transport: dict[str, Any] | None = None
 
     def to_document(self) -> dict[str, Any]:
         """Serialise the record. Every field is a name, an address, or a local path."""
-        return {
+        document: dict[str, Any] = {
             "schema_version": PROFILE_SCHEMA_VERSION,
             "name": self.name,
             "created_at": self.created_at,
@@ -473,6 +479,12 @@ class ProfileRecord:
             "runtime": dict(self.runtime),
             "migrated_from": self.migrated_from,
         }
+        # Omitted rather than written as `null`: a profile that has never been migrated has to
+        # round-trip through this build byte for byte, and a key that appeared on first save
+        # would break that promise for every installation that already exists.
+        if self.transport is not None:
+            document["transport"] = dict(self.transport)
+        return document
 
     @classmethod
     def load(cls, path: Path) -> ProfileRecord | None:
@@ -497,6 +509,14 @@ class ProfileRecord:
             endpoints=dict(document.get("endpoints") or {}),
             runtime=dict(document.get("runtime") or {}),
             migrated_from=document.get("migrated_from"),
+            transport=(
+                dict(document["transport"])
+                if isinstance(document.get("transport"), dict)
+                # A `transport` key that is present but not an object is not silently dropped:
+                # it is carried through as-is so `read_transport` can refuse it by name rather
+                # than mistaking a corrupt record for an un-migrated one.
+                else document.get("transport")
+            ),
         )
 
     def save(self, path: Path) -> None:
