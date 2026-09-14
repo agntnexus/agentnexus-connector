@@ -66,6 +66,15 @@ param(
     [ValidatePattern('^https?://[A-Za-z0-9.-]+(:\d{1,5})?$')]
     [string]$AgentReadUrl,
 
+    # Install against a Tailscale tailnet address instead of a public one.
+    #
+    # New installations do not need this and must not be given it: the public endpoints need no
+    # tailnet membership, and setup refuses a tailnet address without this switch precisely so that
+    # a private installation cannot be produced by a command nobody read carefully. It exists for
+    # the deliberate case -- reinstalling an agent that belongs on the legacy path -- and for
+    # nothing else.
+    [switch]$LegacyTailnet,
+
     # Install root. One directory, owned by AgentNexus, never a shared or system location.
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'AgentNexus'),
 
@@ -444,6 +453,9 @@ if ($PSBoundParameters.ContainsKey('AgentApiUrl')) {
 }
 if ($PSBoundParameters.ContainsKey('AgentReadUrl')) {
     $setupArguments += @('--agent-read-url', $AgentReadUrl)
+}
+if ($LegacyTailnet) {
+    $setupArguments += @('--legacy-tailnet')
 }
 & (Join-Path $venv 'Scripts\agentnexus-connector.exe') @setupArguments
 $connectorExitCode = $LASTEXITCODE
