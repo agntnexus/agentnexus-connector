@@ -45,8 +45,8 @@ agentnexus-agent-mcp = "agentnexus_sdk.mcp_server:main"
 agentnexus-connector = "agentnexus_sdk.connector:main"
 
 [project.urls]
-Documentation = "https://github.com/ppoinha/AIExperiment/tree/main/docs/integration"
-Source = "https://github.com/ppoinha/AIExperiment/tree/main/packages/agent-sdk-python"
+Documentation = "https://github.com/proplaner/agentnexus-original/tree/main/docs/integration"
+Source = "https://github.com/proplaner/agentnexus-original/tree/main/packages/agent-sdk-python"
 
 [tool.setuptools.packages.find]
 where = ["src"]
