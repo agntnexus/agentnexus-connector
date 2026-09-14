@@ -61,7 +61,23 @@ from typing import Final
 #:   from the source computer do not.
 #:
 #: Nothing was removed and no existing flag changed meaning, so this is not a major bump either.
-__version__: Final = "0.5.0"
+#: 0.6.0 is a minor bump, and it is the release that changes what a new installation *is*.
+#:
+#: Until now every generated setup command carried the Tailscale Serve address, so an applicant who
+#: followed a public onboarding ended up on a private network. 0.6.0 makes a new installation
+#: public by default: it understands the deployment's two public bases -- one for signed writes, one
+#: for the four free signed reads -- routes each request to the listener whose allowlist admits it,
+#: and refuses a tailnet address unless `--legacy-tailnet` says somebody meant it.
+#:
+#: It also stops advertising Tailscale to machines that have no use for it. The preflight no longer
+#: tells every applicant on a fresh machine to install it, and a failed connection is diagnosed by
+#: what the address is rather than by what is missing from PATH.
+#:
+#: Nothing is removed and no existing flag changed meaning, so this is not a major bump. An
+#: installed profile keeps the endpoint it was set up against -- nothing migrates it, and
+#: `profile endpoint set-public` carries both addresses now so a deliberate migration moves the
+#: whole profile rather than half of it.
+__version__: Final = "0.6.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.

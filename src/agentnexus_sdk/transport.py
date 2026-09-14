@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import datetime as dt
 import ipaddress
+import re
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -149,6 +150,11 @@ class Transport:
     previous_mode: str | None = None
     previous_agent_api_url: str | None = None
     changed_at: str | None = None
+    #: Where signed reads go, when the deployment serves them on a second host. `None` means one
+    #: address for both directions, which is what every tailnet profile has and what a profile
+    #: written before this field existed reads back as.
+    agent_read_url: str | None = None
+    previous_agent_read_url: str | None = None
 
     @property
     def can_roll_back(self) -> bool:
@@ -164,11 +170,18 @@ class Transport:
         }
         if self.changed_at:
             document["changed_at"] = self.changed_at
+        if self.agent_read_url:
+            document["agent_read_url"] = self.agent_read_url
         if self.can_roll_back:
-            document["previous"] = {
+            previous: dict[str, Any] = {
                 "mode": self.previous_mode,
                 "agent_api_url": self.previous_agent_api_url,
             }
+            # Only when there was one. A profile that had no read address must roll back to having
+            # none, and an empty string recorded here would roll it back to an address of "".
+            if self.previous_agent_read_url:
+                previous["agent_read_url"] = self.previous_agent_read_url
+            document["previous"] = previous
         return document
 
 
@@ -182,7 +195,12 @@ def read_transport(record: ProfileRecord) -> Transport:
     recorded = str(record.endpoints.get("agent_api_url", "") or "")
     block: Any = record.transport
     if block is None:
-        return Transport(mode=MODE_TAILNET, agent_api_url=recorded, declared=False)
+        return Transport(
+            mode=MODE_TAILNET,
+            agent_api_url=recorded,
+            declared=False,
+            agent_read_url=str(record.endpoints.get("agent_read_url", "") or "") or None,
+        )
 
     if not isinstance(block, Mapping):
         message = "The profile's transport declaration is not an object."
@@ -240,6 +258,10 @@ def read_transport(record: ProfileRecord) -> Transport:
         previous_mode=str(previous_mode) if previous_mode else None,
         previous_agent_api_url=(
             str(previous.get("agent_api_url")) if previous.get("agent_api_url") else None
+        ),
+        agent_read_url=str(block.get("agent_read_url", "") or "") or None,
+        previous_agent_read_url=(
+            str(previous.get("agent_read_url")) if previous.get("agent_read_url") else None
         ),
         changed_at=str(block["changed_at"]) if block.get("changed_at") else None,
     )
@@ -384,6 +406,27 @@ _SUPPLY: Final = (
 )
 
 
+#: A MagicDNS name, and the CGNAT range tailnet addresses come from. Kept here rather than
+#: imported from `connector` so this module stays free of that import; a test holds the two
+#: definitions equal, so they cannot drift into disagreeing about what a tailnet is.
+_TAILNET_NAME: Final = re.compile(r"[a-z0-9-]+\.[a-z0-9-]+\.ts\.net")
+_TAILNET_RANGE: Final = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _is_tailnet(host: str) -> bool:
+    """Return whether this host name or address belongs to a Tailscale tailnet."""
+    candidate = host.strip("[]").lower()
+    if not candidate:
+        return False
+    if _TAILNET_NAME.fullmatch(candidate):
+        return True
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    return address in _TAILNET_RANGE
+
+
 def _refuse_unroutable(host: str) -> None:
     """Refuse an address that could not be a public endpoint even if everything else were right.
 
@@ -392,6 +435,19 @@ def _refuse_unroutable(host: str) -> None:
     pointing at their own machine is doing tailnet-shaped work and keeps using the tailnet mode.
     """
     literal = host.strip("[]")
+    # Before the routability test, because a tailnet address passes it. A MagicDNS name is a fully
+    # qualified, resolvable host, and a `100.64.0.0/10` address is neither private nor reserved in
+    # the stdlib's sense -- so every rule below admitted the tailnet endpoint under a public label,
+    # which is precisely the mislabelling this function exists to prevent.
+    if _is_tailnet(literal):
+        message = "A Tailscale tailnet address is not a public Agent API address."
+        raise TransportError(
+            message,
+            recovery=(
+                "Reaching it needs tailnet membership, which is what a public endpoint does not. "
+                "Pass the address this deployment publishes. Nothing was changed."
+            ),
+        )
     try:
         address = ipaddress.ip_address(literal)
     except ValueError:
@@ -422,14 +478,26 @@ class EndpointChange:
 
     @property
     def unchanged(self) -> bool:
-        """Whether applying this would write the same plane and the same address back."""
-        return self.before.mode == self.after.mode and _normalise(
-            self.before.agent_api_url
-        ) == _normalise(self.after.agent_api_url)
+        """Whether applying this would write the same plane and the same addresses back.
+
+        Both addresses, since PAI-4 gave a profile two. A profile already on the public write host
+        that is now being given its deployment's read host is a real change, and reporting it as
+        "already uses that address" would leave its four reads on the old one for good.
+        """
+        return (
+            self.before.mode == self.after.mode
+            and _normalise(self.before.agent_api_url) == _normalise(self.after.agent_api_url)
+            and _normalise(self.before.agent_read_url or "")
+            == _normalise(self.after.agent_read_url or "")
+        )
 
 
 def plan_public_migration(
-    record: ProfileRecord, *, profile: str, agent_api_url: str
+    record: ProfileRecord,
+    *,
+    profile: str,
+    agent_api_url: str,
+    agent_read_url: str | None = None,
 ) -> EndpointChange:
     """Decide the move to a public endpoint, refusing anything ambiguous before it is written.
 
@@ -444,9 +512,47 @@ def plan_public_migration(
         for name in ("onboarding_base_url", "public_api_url", "observer_url")
     }
     target = validate_public_agent_api_url(agent_api_url, reserved=reserved)
+    # The same rule for the second address, because it lands in the same place and carries the
+    # same consequence. Optional: a deployment with one address for both directions supplies
+    # none, and the profile then reads at the address it writes to, exactly as it does today.
+    read_target = (
+        validate_public_agent_api_url(agent_read_url, reserved=reserved) if agent_read_url else None
+    )
+    if read_target is not None and read_target == target:
+        message = "The signed read address is the write address."
+        raise TransportError(
+            message,
+            recovery=(
+                "Leave `--agent-read-url` out to send signed reads to the write address. "
+                "Declaring one address twice describes a split this deployment does not have. "
+                "Nothing was changed."
+            ),
+        )
 
     if current.mode == MODE_PUBLIC and _normalise(current.agent_api_url) == target:
-        return EndpointChange(profile=profile, before=current, after=current)
+        # Same write host. That used to be the whole question, and returning `before` as `after`
+        # said "nothing to do". With two addresses it is only half of it: a profile migrated before
+        # its deployment had a read host is on the right write address and the wrong read one, and
+        # answering "already uses that address" would leave it there permanently.
+        if _normalise(current.agent_read_url or "") == _normalise(read_target or ""):
+            return EndpointChange(profile=profile, before=current, after=current)
+        return EndpointChange(
+            profile=profile,
+            before=current,
+            after=Transport(
+                mode=MODE_PUBLIC,
+                agent_api_url=target,
+                declared=True,
+                # The write address is not moving, so what a rollback has to restore is the
+                # profile's *current* pair -- not the pre-migration one, which a later rollback
+                # of the original migration is still responsible for.
+                previous_mode=current.mode,
+                previous_agent_api_url=current.agent_api_url,
+                previous_agent_read_url=current.agent_read_url,
+                changed_at=_now(),
+                agent_read_url=read_target,
+            ),
+        )
 
     if current.mode == MODE_PUBLIC:
         message = f"The {profile!r} profile is already on a different public Agent API address."
@@ -480,7 +586,9 @@ def plan_public_migration(
             declared=True,
             previous_mode=current.mode,
             previous_agent_api_url=current.agent_api_url,
+            previous_agent_read_url=current.agent_read_url,
             changed_at=_now(),
+            agent_read_url=read_target,
         ),
     )
 
@@ -510,6 +618,10 @@ def plan_rollback(record: ProfileRecord, *, profile: str) -> EndpointChange:
             agent_api_url=str(current.previous_agent_api_url),
             declared=True,
             changed_at=_now(),
+            # Both addresses, or neither. A rollback that restored the write address and left
+            # the migrated read host in place would leave the profile signing reads at a host
+            # its own declaration no longer names -- which is worse than either endpoint.
+            agent_read_url=current.previous_agent_read_url,
         ),
     )
 
@@ -521,16 +633,34 @@ def apply_change(record: ProfileRecord, change: EndpointChange) -> None:
     a profile record holds — its name, its creation time, its runtime layout — is not an endpoint
     and is not this command's to touch.
     """
-    record.endpoints = {**record.endpoints, "agent_api_url": change.after.agent_api_url}
+    record.endpoints = {
+        **record.endpoints,
+        "agent_api_url": change.after.agent_api_url,
+        # Written as the empty string rather than omitted, so a rollback to "no read host" is a
+        # value the record states rather than a key a reader has to notice is missing.
+        "agent_read_url": change.after.agent_read_url or "",
+    }
     record.transport = change.after.to_document()
 
 
 def describe(change: EndpointChange) -> str:
-    """Return the before-and-after block an operator reads before confirming anything."""
-    return (
-        f"  before:  {change.before.mode}  {change.before.agent_api_url}\n"
-        f"  after:   {change.after.mode}  {change.after.agent_api_url}\n"
-    )
+    """Return the before-and-after block an operator reads before confirming anything.
+
+    The read address is shown only where one side has one. On a deployment with a single address
+    for both directions -- every tailnet one -- a line reading `reads: (same address)` would be
+    noise on every migration, and noise in a confirmation block is how confirmations stop being
+    read.
+    """
+    lines = [
+        f"  before:  {change.before.mode}  {change.before.agent_api_url}\n",
+        f"  after:   {change.after.mode}  {change.after.agent_api_url}\n",
+    ]
+    if change.before.agent_read_url or change.after.agent_read_url:
+        lines.append(
+            f"  reads:   {change.before.agent_read_url or '(the address above)'}"
+            f"  ->  {change.after.agent_read_url or '(the address above)'}\n"
+        )
+    return "".join(lines)
 
 
 # ---------------------------------------------------------------------------------------------

@@ -34,9 +34,11 @@ import contextlib
 import dataclasses
 import datetime as dt
 import getpass
+import ipaddress
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -428,11 +430,10 @@ def preflight(environment: Environment, paths: Paths) -> list[str]:
             recovery="Choose a writable location with --install-root.",
         ) from error
 
-    if environment.which("tailscale") is None:
-        notes.append(
-            "Tailscale was not found on PATH. The connectivity check will still try the agent "
-            "address directly; install Tailscale from https://tailscale.com/download if it fails."
-        )
+    # Deliberately no Tailscale note. A public installation has no use for one, and the version
+    # that printed it unconditionally told every applicant on a fresh machine to go and install a
+    # network they do not need. Where the endpoint really is a tailnet address, `check_connectivity`
+    # says so at the point it matters -- when that address did not answer.
 
     return notes
 
@@ -651,6 +652,13 @@ def resolve_mcp_executable(environment: Environment) -> str:
     )
 
 
+#: A MagicDNS name: `<machine>.<tailnet>.ts.net`. Only a tailnet issues one.
+_TAILNET_NAME: Final = re.compile(r"[a-z0-9-]+\.[a-z0-9-]+\.ts\.net")
+
+#: The CGNAT range Tailscale assigns node addresses from (RFC 6598).
+_TAILNET_RANGE: Final = ipaddress.ip_network("100.64.0.0/10")
+
+
 def endpoints_for(
     *,
     origin: str,
@@ -659,6 +667,7 @@ def endpoints_for(
     public_api_url: str | None,
     observer_url: str | None,
     agent_read_url: str | None = None,
+    allow_tailnet: bool = False,
 ) -> Endpoints:
     """Resolve the addresses setup talks to, keeping the signed planes separate.
 
@@ -670,6 +679,15 @@ def endpoints_for(
 
     A loopback or explicitly private origin is exempt, because the local Compose stack really does
     serve every plane from one address and refusing it would break development for no gain.
+
+    **A new installation is public by default.** A tailnet address supplied to this call is refused
+    unless `allow_tailnet` says it was asked for, because a command that quietly produced a private
+    installation is the failure this repository has already had once: an applicant follows a public
+    onboarding, runs what they were given, and ends up needing a network nobody told them about.
+
+    `allow_tailnet` is set for a profile that is *resuming* — the address then comes from what that
+    profile already recorded rather than from this run — and by `--legacy-tailnet` for the rare
+    deliberate case. Neither is a default, and neither reaches a first-time applicant.
     """
     resolved_origin = origin.rstrip("/")
     resolved_agent = (agent_api_url or "").rstrip("/")
@@ -699,6 +717,27 @@ def endpoints_for(
             exit_code=EXIT_USAGE,
             recovery="Ask your operator for the private agent API address for this deployment.",
         )
+    if not allow_tailnet:
+        candidates = (
+            ("--agent-api-url", resolved_agent),
+            ("--agent-read-url", agent_read_url),
+        )
+        for label, candidate in candidates:
+            if candidate and is_tailnet_endpoint(candidate):
+                message = (
+                    f"{label} names a Tailscale tailnet address. A new installation uses the "
+                    "public Agent API and needs no tailnet membership."
+                )
+                raise ConnectorError(
+                    message,
+                    exit_code=EXIT_USAGE,
+                    recovery=(
+                        "Ask your operator for this deployment's public address. If you are "
+                        "deliberately installing on the legacy tailnet path, pass --legacy-tailnet "
+                        "as well; nothing is installed until you do."
+                    ),
+                )
+
     resolved_read = (agent_read_url or "").rstrip("/") or None
     if (
         resolved_read is not None
@@ -723,6 +762,35 @@ def endpoints_for(
         # value that then gets written into a profile and read back as a deliberate declaration.
         agent_read_url=resolved_read,
     )
+
+
+def is_tailnet_host(host: str) -> bool:
+    """Return whether this host name or address belongs to a Tailscale tailnet.
+
+    Two shapes, both of which only a tailnet produces. MagicDNS names end in `.ts.net` under a
+    tailnet identifier, and tailnet addresses live in `100.64.0.0/10`, the CGNAT range Tailscale
+    assigns from. Neither can be reached without membership, which is exactly what a public
+    installation must not require.
+
+    Deliberately a name check rather than a probe: this decides what a command *means* before
+    anything is contacted, and a machine that happens to be on a tailnet today must not get a
+    different answer from one that is not.
+    """
+    candidate = host.strip("[]").lower()
+    if not candidate:
+        return False
+    if _TAILNET_NAME.fullmatch(candidate):
+        return True
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    return address in _TAILNET_RANGE
+
+
+def is_tailnet_endpoint(url: str) -> bool:
+    """Return whether this URL names a tailnet host."""
+    return is_tailnet_host(urlsplit(url).hostname or "")
 
 
 def _is_local_origin(origin: str) -> bool:
@@ -1101,14 +1169,25 @@ def check_connectivity(endpoints: Endpoints, environment: Environment) -> None:
         environment.stdout.write(f"  Reached {host} on TCP/{port}\n")
         return
 
-    tailscale = environment.which("tailscale")
-    hint = (
-        "Run `tailscale up` and accept the machine your operator shared with you, then re-run "
-        "`agentnexus-connector setup`. It resumes where it stopped."
-        if tailscale is not None
-        else "Install Tailscale from https://tailscale.com/download, run `tailscale up`, accept "
-        "the machine your operator shared with you, then re-run `agentnexus-connector setup`."
-    )
+    if is_tailnet_host(host):
+        # Only here. This address is unreachable without tailnet membership, so membership is the
+        # actionable advice; for any other host it would be a wrong diagnosis that sends somebody
+        # to install software their problem has nothing to do with.
+        hint = (
+            "Run `tailscale up` and accept the machine your operator shared with you, then re-run "
+            "`agentnexus-connector setup`. It resumes where it stopped."
+            if environment.which("tailscale") is not None
+            else "Install Tailscale from https://tailscale.com/download, run `tailscale up`, "
+            "accept the machine your operator shared with you, then re-run "
+            "`agentnexus-connector setup`."
+        )
+    else:
+        hint = (
+            "Check that this machine has working DNS and outbound HTTPS, then re-run "
+            "`agentnexus-connector setup`; it resumes where it stopped. If the address itself is "
+            "wrong, ask your operator for the one this deployment publishes -- the connector never "
+            "guesses it."
+        )
     message = f"{host} did not answer on TCP/{port}."
     raise ConnectorError(message, exit_code=EXIT_CONNECTIVITY, recovery=hint)
 
@@ -3499,6 +3578,7 @@ def run_endpoint_set_public(
     agent_api_url: str,
     confirm: str | None,
     environment: Environment,
+    agent_read_url: str | None = None,
 ) -> int:
     """Move exactly one profile to a public Agent API address, once, on purpose.
 
@@ -3522,7 +3602,10 @@ def run_endpoint_set_public(
         )
     paths, record, state = _endpoint_subject(install_root, profile)
     change = transport.plan_public_migration(
-        record, profile=paths.profile, agent_api_url=agent_api_url
+        record,
+        profile=paths.profile,
+        agent_api_url=agent_api_url,
+        agent_read_url=agent_read_url,
     )
     if change.unchanged:
         environment.stdout.write(
@@ -3589,6 +3672,13 @@ def _build_parser() -> Any:
     setup.add_argument("--onboarding-base-url", default=None)
     setup.add_argument("--agent-api-url", default=None)
     setup.add_argument("--agent-read-url", default=None)
+    # Public by default. This is how somebody says they mean the legacy path, and it exists so
+    # that saying it is an act rather than an omission.
+    setup.add_argument(
+        "--legacy-tailnet",
+        action="store_true",
+        help="Install against a Tailscale tailnet address. New installations do not need this.",
+    )
     setup.add_argument("--public-api-url", default=None)
     setup.add_argument("--observer-url", default=None)
     setup.add_argument(
@@ -3716,6 +3806,14 @@ def _build_parser() -> Any:
         "--agent-api-url",
         required=True,
         help="The public agent API address, supplied in full. Never inferred from anything.",
+    )
+    # Optional rather than required, and optional on purpose. A deployment with one address for
+    # both directions supplies none, and a migration command that demanded one would fail on every
+    # such deployment. Where there are two, leaving this out migrates only half the profile.
+    endpoint_public.add_argument(
+        "--agent-read-url",
+        default=None,
+        help="The public signed-read address, where the deployment serves reads on its own host.",
     )
     endpoint_public.add_argument(
         "--confirm",
@@ -3991,6 +4089,13 @@ def _run_setup_command(namespace: Any, install_root: Path, environment: Environm
             getattr(namespace, "agent_read_url", None)
             or _remembered_endpoint(paths, "agent_read_url")
         ),
+        # Two ways to reach the legacy path, and both are deliberate. `--legacy-tailnet` is somebody
+        # saying so; a remembered address is a profile that was installed that way before this rule
+        # existed, and refusing it would break the installations this rule is supposed to protect.
+        allow_tailnet=(
+            bool(getattr(namespace, "legacy_tailnet", False))
+            or _remembered_endpoint(paths, "agent_api_url") is not None
+        ),
     )
     # One profile at a time. Two runs of the same profile could otherwise interleave a key
     # creation with a redemption and produce an identity whose key is not the one on disk.
@@ -4051,6 +4156,7 @@ def _run_endpoint_command(namespace: Any, install_root: Path, environment: Envir
                 install_root,
                 namespace.profile,
                 agent_api_url=namespace.agent_api_url,
+                agent_read_url=namespace.agent_read_url,
                 confirm=namespace.confirm,
                 environment=environment,
             )

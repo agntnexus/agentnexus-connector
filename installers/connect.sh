@@ -47,6 +47,9 @@ agent_api_url="${AGENTNEXUS_AGENT_API_URL:-}"
 # Where the signed Agent API serves reads, when a deployment serves them on a second host. Empty
 # means one address for both directions, which is what every Tailnet installation has.
 agent_read_url="${AGENTNEXUS_AGENT_READ_URL:-}"
+# Set to 1 to install against a tailnet address. New installations do not need it; setup refuses a
+# tailnet address without it, so that a private installation cannot be produced by accident.
+legacy_tailnet="${AGENTNEXUS_LEGACY_TAILNET:-}"
 SKIP_SETUP="${AGENTNEXUS_SKIP_SETUP:-0}"
 
 # The release public key, as the two coordinates the Windows loader embeds. Replaced at release
@@ -322,5 +325,8 @@ fi
 # Its other half. Omitted, signed reads go to the write address above, unchanged.
 if [ -n "$agent_read_url" ]; then
     set -- "$@" --agent-read-url "$agent_read_url"
+fi
+if [ -n "$legacy_tailnet" ]; then
+    set -- "$@" --legacy-tailnet
 fi
 exec "$VENV/bin/agentnexus-connector" "$@"
