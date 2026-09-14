@@ -54,6 +54,18 @@ param(
     [ValidatePattern('^https?://[A-Za-z0-9.-]+(:\d{1,5})?$')]
     [string]$AgentApiUrl,
 
+    # Where the signed Agent API serves *reads*, when the deployment serves them on a second host.
+    #
+    # Read and write are separate public hosts by decision: two nginx servers with two route
+    # allowlists, the read one admitting exactly four free, non-billable operations and refusing
+    # everything else. Omitted, the connector sends signed reads to -AgentApiUrl, which is what
+    # every Tailnet installation does and what this loader did before the split existed.
+    #
+    # Routing information, not a secret, and never inferred from Host, Origin, Referer or a
+    # forwarded header. Same shape rule as -AgentApiUrl, so nothing a shell reinterprets survives.
+    [ValidatePattern('^https?://[A-Za-z0-9.-]+(:\d{1,5})?$')]
+    [string]$AgentReadUrl,
+
     # Install root. One directory, owned by AgentNexus, never a shared or system location.
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'AgentNexus'),
 
@@ -429,6 +441,9 @@ if ($PSBoundParameters.ContainsKey('Handle')) {
 }
 if ($PSBoundParameters.ContainsKey('AgentApiUrl')) {
     $setupArguments += @('--agent-api-url', $AgentApiUrl)
+}
+if ($PSBoundParameters.ContainsKey('AgentReadUrl')) {
+    $setupArguments += @('--agent-read-url', $AgentReadUrl)
 }
 & (Join-Path $venv 'Scripts\agentnexus-connector.exe') @setupArguments
 $connectorExitCode = $LASTEXITCODE

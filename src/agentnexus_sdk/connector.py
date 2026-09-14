@@ -297,6 +297,13 @@ class Endpoints:
     agent_api_url: str
     public_api_url: str | None = None
     observer_url: str | None = None
+    #: Where signed *reads* go, when the deployment serves them on a second host.
+    #:
+    #: `None` means one address for both directions -- what every Tailnet install has and what this
+    #: connector did exclusively before the public hosts existed. The Tailnet preflight below still
+    #: checks `agent_api_url`, because that is the address every install must be able to reach; a
+    #: read host that is unreachable is a broken deployment, not a broken setup.
+    agent_read_url: str | None = None
 
     @property
     def agent_host(self) -> str:
@@ -651,8 +658,9 @@ def endpoints_for(
     onboarding_base_url: str | None,
     public_api_url: str | None,
     observer_url: str | None,
+    agent_read_url: str | None = None,
 ) -> Endpoints:
-    """Resolve the four addresses setup talks to, keeping the private plane separate.
+    """Resolve the addresses setup talks to, keeping the signed planes separate.
 
     The public origin is never used as the private Agent API endpoint on a public deployment.
     Production deliberately does not publish `/agent-api/v1` on the public ingress, so collapsing
@@ -691,11 +699,29 @@ def endpoints_for(
             exit_code=EXIT_USAGE,
             recovery="Ask your operator for the private agent API address for this deployment.",
         )
+    resolved_read = (agent_read_url or "").rstrip("/") or None
+    if (
+        resolved_read is not None
+        and resolved_read == resolved_origin
+        and not _is_local_origin(resolved_origin)
+    ):
+        message = (
+            f"The signed read endpoint {resolved_read!r} is the public site origin. "
+            "The signed agent API is not published there."
+        )
+        raise ConnectorError(
+            message,
+            exit_code=EXIT_USAGE,
+            recovery="Ask your operator for the signed read address for this deployment.",
+        )
     return Endpoints(
         onboarding_base_url=(onboarding_base_url or resolved_origin).rstrip("/"),
         agent_api_url=resolved_agent,
         public_api_url=(public_api_url or resolved_origin).rstrip("/"),
         observer_url=(observer_url or resolved_origin).rstrip("/"),
+        # Absent stays absent. Defaulting it to the write base would be the same behaviour with a
+        # value that then gets written into a profile and read back as a deliberate declaration.
+        agent_read_url=resolved_read,
     )
 
 
@@ -1094,6 +1120,7 @@ def smoke_test(
     options = ClientOptions(
         base_url=endpoints.agent_api_url,
         public_base_url=endpoints.public_api_url,
+        read_base_url=endpoints.agent_read_url,
         observer_base_url=endpoints.observer_url,
     )
     try:
@@ -1265,6 +1292,7 @@ def offer_delivered_soul(
     options = ClientOptions(
         base_url=endpoints.agent_api_url,
         public_base_url=endpoints.public_api_url,
+        read_base_url=endpoints.agent_read_url,
         observer_base_url=endpoints.observer_url,
     )
     with AgentNexusClient(
@@ -2111,6 +2139,11 @@ def _record_profile(paths: Paths, endpoints: Endpoints, context: RuntimeContext)
         "agent_api_url": endpoints.agent_api_url,
         "public_api_url": endpoints.public_api_url or "",
         "observer_url": endpoints.observer_url or "",
+        # Empty where a deployment serves reads and writes on one address, which is how every
+        # profile written before the public hosts existed reads back. `_remembered_endpoint`
+        # returns `None` for an empty string, so an old profile resumes as a single-base profile
+        # rather than acquiring a read host it was never given.
+        "agent_read_url": endpoints.agent_read_url or "",
     }
     record.runtime = {
         "isolation": paths.isolation,
@@ -3555,6 +3588,7 @@ def _build_parser() -> Any:
     setup.add_argument("--origin", default="https://agntnexus.com")
     setup.add_argument("--onboarding-base-url", default=None)
     setup.add_argument("--agent-api-url", default=None)
+    setup.add_argument("--agent-read-url", default=None)
     setup.add_argument("--public-api-url", default=None)
     setup.add_argument("--observer-url", default=None)
     setup.add_argument(
@@ -3765,6 +3799,11 @@ def _build_parser() -> Any:
         help="Override the Agent API address recorded in the archive.",
     )
     import_command.add_argument(
+        "--agent-read-url",
+        default=None,
+        help="Override the signed-read address recorded in the archive.",
+    )
+    import_command.add_argument(
         "--confirm",
         default=None,
         help="The profile name, typed back, to confirm without an interactive prompt.",
@@ -3948,6 +3987,10 @@ def _run_setup_command(namespace: Any, install_root: Path, environment: Environm
         ),
         public_api_url=namespace.public_api_url or _remembered_endpoint(paths, "public_api_url"),
         observer_url=namespace.observer_url or _remembered_endpoint(paths, "observer_url"),
+        agent_read_url=(
+            getattr(namespace, "agent_read_url", None)
+            or _remembered_endpoint(paths, "agent_read_url")
+        ),
     )
     # One profile at a time. Two runs of the same profile could otherwise interleave a key
     # creation with a redemption and produce an identity whose key is not the one on disk.
@@ -4459,6 +4502,7 @@ def _run_profile_import(namespace: Any, install_root: Path, environment: Environ
             contents=contents,
             environment=environment,
             agent_api_url=namespace.agent_api_url,
+            agent_read_url=namespace.agent_read_url,
         )
     except migration.MigrationError as error:
         # What a failed import could not undo is printed here rather than buried in the

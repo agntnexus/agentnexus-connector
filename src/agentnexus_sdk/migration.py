@@ -463,6 +463,9 @@ def plan_export(
             "agent_api_url": str(record.endpoints.get("agent_api_url", "")),
             "public_api_url": str(record.endpoints.get("public_api_url", "")),
             "observer_url": str(record.endpoints.get("observer_url", "")),
+            # Empty for a single-base profile, which is every profile written before the
+            # read host existed. An import of such an archive stays single-base.
+            "agent_read_url": str(record.endpoints.get("agent_read_url", "")),
         },
         runtimes=sorted(set(state.runtimes)),
         source_system=environment.system,
@@ -1009,6 +1012,7 @@ def import_profile(
     contents: ArchiveContents,
     environment: Any,
     agent_api_url: str | None = None,
+    agent_read_url: str | None = None,
 ) -> ImportResult:
     """Create one new local profile from a validated archive.
 
@@ -1034,6 +1038,10 @@ def import_profile(
         raise MigrationError(str(error), recovery=error.recovery) from error
 
     address = agent_api_url or contents.endpoints.get("agent_api_url", "")
+    # An archive written before the split records none, and an import of one stays a single-base
+    # profile. Unlike the write address there is no "and none was supplied" refusal: one address
+    # for both directions is a supported deployment, not a missing value.
+    read_address = agent_read_url or contents.endpoints.get("agent_read_url", "") or None
     if not address:
         message = "The archive records no Agent API address and none was supplied."
         raise MigrationError(
@@ -1054,6 +1062,7 @@ def import_profile(
                 contents=contents,
                 environment=environment,
                 address=address,
+                read_address=read_address,
             )
     except ProfileError as error:
         raise MigrationError(str(error), recovery=error.recovery) from error
@@ -1252,6 +1261,7 @@ def _import_locked(
     contents: ArchiveContents,
     environment: Any,
     address: str,
+    read_address: str | None,
 ) -> ImportResult:
     """Perform the import. The caller holds the destination profile's lock.
 
@@ -1295,6 +1305,11 @@ def _import_locked(
             agent_api_url=address,
             public_api_url=contents.endpoints.get("public_api_url", "") or None,
             observer_url=contents.endpoints.get("observer_url", "") or None,
+            # An archive written before the split records none, and an import of one stays a
+            # single-base profile. Unlike the write address there is no "and none was supplied"
+            # refusal: a deployment with one address for both directions is a supported state,
+            # not a missing value.
+            agent_read_url=read_address,
         )
         identity = Identity(
             agent_id=identity_document["agent_id"],
@@ -1344,6 +1359,7 @@ def _import_locked(
                 "agent_api_url": endpoints.agent_api_url,
                 "public_api_url": endpoints.public_api_url or "",
                 "observer_url": endpoints.observer_url or "",
+                "agent_read_url": endpoints.agent_read_url or "",
             },
             runtime={
                 "isolation": paths.isolation,

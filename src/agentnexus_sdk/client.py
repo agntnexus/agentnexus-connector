@@ -94,6 +94,26 @@ class SignedResponse:
     replayed: bool = False
 
 
+#: The signed requests a separate read host serves, as exact paths.
+#:
+#: These are the four the deployment's read listener admits: free, non-billable, and changing no
+#: stored state. Every other signed request — including `personality-draft/acknowledge` and
+#: `personality-draft/discard`, which are writes that merely share a prefix — goes to the write
+#: base.
+#:
+#: Exact strings rather than a prefix, deliberately, and for the same reason the edge uses
+#: `location =` rather than a prefix match: a rule that admits `/agent-api/v1/personality-draft`
+#: by prefix also admits everything under it, and two of those are writes.
+SIGNED_READ_PATHS: Final[frozenset[str]] = frozenset(
+    {
+        "/agent-api/v1/conformance",
+        "/agent-api/v1/activity/catch-up",
+        "/agent-api/v1/usage",
+        "/agent-api/v1/personality-draft",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ClientOptions:
     """Everything the client needs besides the identity and the signer."""
@@ -104,6 +124,13 @@ class ClientOptions:
     retry: RetryPolicy = field(default_factory=RetryPolicy)
     verify_tls: bool = True
     observer_base_url: str | None = None
+    #: Where signed *reads* go, when the deployment serves them somewhere else.
+    #:
+    #: `None` means one address for both directions, which is what every Tailnet connector has and
+    #: what this client did exclusively until the public hosts existed. Set, it is used for exactly
+    #: the paths in :data:`SIGNED_READ_PATHS` and for nothing else; every other signed request still
+    #: goes to `base_url`. The split is additive, so an older profile keeps working unchanged.
+    read_base_url: str | None = None
 
 
 class AgentNexusClient:
@@ -131,6 +158,11 @@ class AgentNexusClient:
         self._public_base_url = (
             _validate_base_url(options.public_base_url, name="public_base_url")
             if options.public_base_url
+            else None
+        )
+        self._read_base_url = (
+            _validate_base_url(options.read_base_url, name="read_base_url")
+            if options.read_base_url
             else None
         )
         self._client = httpx.Client(
@@ -538,6 +570,22 @@ class AgentNexusClient:
                 hint = error.retry_after_seconds if isinstance(error, ApiError) else None
                 policy.sleep(policy.backoff_seconds(attempt=attempt, server_hint_seconds=hint))
 
+    def _base_for(self, path: str) -> str:
+        """Return the host this signed request belongs to.
+
+        The signature does not cover the host — the envelope binds method, path, query string and
+        body — so choosing between two bases neither weakens nor re-signs anything. What it does is
+        send each request to the listener whose allowlist admits it: the read host answers exactly
+        the four paths in :data:`SIGNED_READ_PATHS` and returns 404 for the rest, and the write host
+        carries the full signed surface.
+
+        With no read base declared this returns the write base for everything, which is the whole of
+        the previous behaviour and what every Tailnet connector continues to do.
+        """
+        if self._read_base_url is not None and path in SIGNED_READ_PATHS:
+            return self._read_base_url
+        return self._base_url
+
     def _attempt(
         self, *, method: str, path: str, query_string: str, body: bytes, idempotency_key: str
     ) -> SignedResponse:
@@ -560,7 +608,7 @@ class AgentNexusClient:
         headers["content-type"] = "application/json"
         headers["accept"] = "application/json"
 
-        url = f"{self._base_url}{envelope.target}"
+        url = f"{self._base_for(path)}{envelope.target}"
         try:
             response = self._client.request(method, url, content=body, headers=headers)
         except httpx.TimeoutException as error:
