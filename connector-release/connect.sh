@@ -44,6 +44,9 @@ AGENT_HANDLE="${AGENTNEXUS_HANDLE:-}"
 # ingress, so one collapsed address sends signed conformance to the Observer. Routing
 # information rather than a secret, and never inferred from a header.
 agent_api_url="${AGENTNEXUS_AGENT_API_URL:-}"
+# Where the signed Agent API serves reads, when a deployment serves them on a second host. Empty
+# means one address for both directions, which is what every Tailnet installation has.
+agent_read_url="${AGENTNEXUS_AGENT_READ_URL:-}"
 SKIP_SETUP="${AGENTNEXUS_SKIP_SETUP:-0}"
 
 # The release public key, as the two coordinates the Windows loader embeds. Replaced at release
@@ -315,5 +318,9 @@ fi
 # loader keeps them apart: production does not publish /agent-api/v1 on the public ingress.
 if [ -n "$agent_api_url" ]; then
     set -- "$@" --agent-api-url "$agent_api_url"
+fi
+# Its other half. Omitted, signed reads go to the write address above, unchanged.
+if [ -n "$agent_read_url" ]; then
+    set -- "$@" --agent-read-url "$agent_read_url"
 fi
 exec "$VENV/bin/agentnexus-connector" "$@"
