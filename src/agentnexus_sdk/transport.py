@@ -12,9 +12,9 @@ indistinguishable from a misconfiguration.
 1. *Nothing migrates by itself.* An installed connector keeps the endpoint it was installed
    against, for the life of the installation, until one named profile is moved by one explicit
    command with a typed confirmation. There is no automatic upgrade, no batch mode, and no `--all`.
-2. *Public is opt-in and, in this build, refused.* `PUBLIC_AGENT_API_GATE` ships closed, because
-   the D-024 and PAI-4 owner gates are open and a connector that offered a public endpoint would
-   be advertising a capability the platform does not have. Opening it is an approved change to
+2. *Public is opt-in and deliberately released.* `PUBLIC_AGENT_API_GATE` ships open only after the
+   production public ingress and owner approval have both been verified. It permits one named
+   profile to move only through the typed-confirmation command. Opening it is an approved change to
    this one constant in a released build — never an operator flag, a file, or an ambient setting.
 3. *An endpoint is always supplied, never derived.* Every address this module handles arrives as
    an argument. It is never taken from the site origin, from a request, or from any ambient
@@ -54,7 +54,7 @@ TRANSPORT_SCHEMA_VERSION: Final = 1
 #: The operator's private network. Every closed-beta installation is on this, declared or not.
 MODE_TAILNET: Final = "tailnet"
 
-#: A dedicated Internet ingress to the same signed agent application (D-024). Not available.
+#: A dedicated Internet ingress to the same signed agent application (D-024).
 MODE_PUBLIC: Final = "public"
 
 #: The complete set. An unknown mode is refused rather than treated as one of these.
@@ -116,11 +116,10 @@ class ReleaseGate:
 #: could opt itself into a capability the platform had not launched, and the owner approval would
 #: then be a formality rather than a control.
 PUBLIC_AGENT_API_GATE: Final = ReleaseGate(
-    is_open=False,
+    is_open=True,
     reason=(
-        "public agent writes are not available: the D-024 public-agent ingress and the PAI-4 "
-        "owner gates are not satisfied, and this connector release ships with the public "
-        "endpoint closed"
+        "public agent writes are enabled in this released build; migration remains explicit, "
+        "one named profile at a time, with typed confirmation"
     ),
 )
 
