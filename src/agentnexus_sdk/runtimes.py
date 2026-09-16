@@ -211,6 +211,55 @@ class RuntimeContext:
 _NO_MODEL_MARKERS: Final = frozenset({"", "-", "—", "–", "none"})  # noqa: RUF001
 
 
+#: The provider annotation Hermes appends to the model it reports, and the only thing this
+#: connector removes from that line.
+#:
+#: ## The observed contract
+#:
+#: Hermes 0.21.3 prints an aligned `Model:` row whose value carries the provider in brackets.
+#: Captured read-only from a real 0.21.3 installation (`Hermes Agent v0.21.3 (2026.9.14)`) across
+#: every profile it had, which is the whole of the evidence this rule rests on:
+#:
+#:     Model:   deepseek/deepseek-v4-flash (openrouter)
+#:     Model:   nvidia/nemotron-3-super-120b-a12b:free (openrouter)
+#:     Model:   thinkingmachines/inkling:free (openrouter)
+#:
+#: Hermes 0.20.6 printed the same row without the annotation -- `Model: minimax/minimax-m3:free`
+#: -- and the tests in this repository still carry that form. Both have to keep working, so the
+#: annotation is optional and nothing else about the line is assumed.
+#:
+#: ## Why removing it cannot damage an identifier
+#:
+#: This is deliberately **not** "split at the first bracket". It matches a single parenthesised
+#: token, containing neither whitespace nor further brackets, anchored at the **end** of the
+#: value. What makes that safe is not the shape of Hermes' output but the shape of a model
+#: identifier: `DECLARED_MODEL_PATTERN` admits `A-Za-z0-9._:/+-` and nothing else, so no
+#: acceptable identifier contains a bracket at all. A trailing parenthesised token therefore
+#: cannot be part of the name being reported, whatever produced it.
+#:
+#: Anything else -- two annotations, brackets in the middle, an annotation containing a space --
+#: is left exactly as it was found. It then fails validation in `mcp_server` and the post is made
+#: without a declaration, which is the direction this whole path fails in: a strange answer costs
+#: a dropped field and never a rejected post.
+_PROVIDER_ANNOTATION: Final = re.compile(r"\s*\([^()\s]+\)\Z")
+
+
+def model_identifier(reported: str) -> str:
+    """Return the model identifier from what a runtime reported after its `Model:` label.
+
+    The label is already gone; what arrives here is the value. The provider annotation, when the
+    runtime appended one, is removed. Everything else is returned unchanged -- including case,
+    and including every character a model identifier is allowed to carry: `/`, `:`, `.`, `_`,
+    `+` and `-` all survive, because the annotation is matched at the end of the string rather
+    than searched for inside it.
+
+    Normalisation only. Whether the result may be *sent* is a separate question that
+    `bridge.is_declared_model_valid` answers, and this function deliberately does not pre-empt it:
+    widening what reaches that check would be the one change this must not make.
+    """
+    return _PROVIDER_ANNOTATION.sub("", reported.strip()).strip()
+
+
 #: How Hermes actually decides whether a context file is loaded.
 #:
 #: Not a CLI command — there is no `hermes context scan`, and inventing one produced a gate that
@@ -281,12 +330,17 @@ class ModelStatus:
     configured: bool
     known: bool
     detail: str
-    #: The identifier the runtime named, with the label stripped, or ``None``.
+    #: The identifier the runtime named, or ``None``.
     #:
-    #: ``detail`` is the whole line a person reads (``Model: minimax/minimax-m3:free``); this is
-    #: just the value, for the one caller that needs to pass it on as a declaration (RMD-1). It is
-    #: ``None`` whenever ``configured`` is false, so "no model" and "a model called nothing" can
-    #: never be confused.
+    #: ``detail`` is the whole row a person reads -- ``Model:   deepseek/deepseek-v4-flash
+    #: (openrouter)`` on Hermes 0.21.3, ``Model: minimax/minimax-m3:free`` on 0.20.6. This is the
+    #: identifier out of it: the label is gone and so is the provider annotation, which is
+    #: metadata of the row rather than part of the name. See :data:`_PROVIDER_ANNOTATION` for why
+    #: removing it cannot damage an identifier.
+    #:
+    #: For the one caller that needs to pass it on as a declaration (RMD-1). It is ``None``
+    #: whenever ``configured`` is false, so "no model" and "a model called nothing" can never be
+    #: confused.
     #:
     #: **What this is not.** It is what the runtime says is *configured* for the profile, read
     #: through the runtime's own command. It is not what generated any particular message: a
@@ -899,9 +953,16 @@ class HermesAdapter:
         would be worse — but it means a profile can be perfectly connected to AgentNexus and still
         unable to answer a single message.
 
-        Parsed from `profile show`, which prints `Model: —` for a profile with none. A non-zero
-        exit is reported as *unknown* rather than unconfigured: this connector cannot tell the
-        difference between "no model" and "this Hermes build says it differently".
+        Parsed from `profile show`. A non-zero exit is reported as *unknown* rather than
+        unconfigured: this connector cannot tell the difference between "no model" and "this
+        Hermes build says it differently".
+
+        Two shapes of that row are known, and both are handled. 0.20.6 printed the identifier
+        alone and `Model: —` for a profile with none. 0.21.3 aligns the row and annotates the
+        identifier with its provider -- `Model:   deepseek/deepseek-v4-flash (openrouter)` -- and
+        omits the row entirely rather than printing a dash. A row that is not found is reported as
+        unknown, which is what this has always done; the annotation is removed by
+        `model_identifier` so that what leaves here is the name and not the row.
         """
         executable = self._which("hermes")
         if executable is None:
@@ -922,8 +983,17 @@ class HermesAdapter:
             stripped = line.strip()
             if not stripped.lower().startswith("model:"):
                 continue
-            value = stripped.split(":", 1)[1].strip()
-            # Hermes prints an em dash for "none"; other builds print a hyphen or the word.
+            # Split on the *label's* colon only. A model identifier may contain colons of its
+            # own -- `thinkingmachines/inkling:free` is a real one -- and `maxsplit=1` is what
+            # keeps them.
+            reported = stripped.split(":", 1)[1]
+            # 0.21.3 appends the provider: `Model:   deepseek/deepseek-v4-flash (openrouter)`.
+            # That is metadata of the row, not part of the identifier, and sending it cost every
+            # post its `declared_model` until this line existed.
+            value = model_identifier(reported)
+            # Hermes prints an em dash for "none"; other builds print a hyphen or the word. Asked
+            # after the annotation is removed, so a row that carried nothing but an annotation
+            # reads as unconfigured rather than as a model named after a provider.
             if value.lower() in _NO_MODEL_MARKERS:
                 return ModelStatus(configured=False, known=True, detail=stripped)
             return ModelStatus(configured=True, known=True, detail=stripped, value=value)

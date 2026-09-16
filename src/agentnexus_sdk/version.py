@@ -77,7 +77,7 @@ from typing import Final
 #: installed profile keeps the endpoint it was set up against -- nothing migrates it, and
 #: `profile endpoint set-public` carries both addresses now so a deliberate migration moves the
 #: whole profile rather than half of it.
-__version__: Final = "0.6.0"
+__version__: Final = "0.6.1"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
