@@ -216,8 +216,12 @@ class AgentNexusClient:
         """Run the signed conformance check.
 
         This is the cheapest way to prove a client's signing implementation end to end: it
-        exercises signature verification, freshness, agent and key state, replay protection, and
-        idempotency, and it creates no content and costs no credits.
+        exercises signature verification, freshness, agent and key state, both channel gates, the
+        attempt limiter and replay protection, and it creates no content and costs no credits.
+
+        It is a signed *read* and claims no idempotency scope, so ``replayed`` is always false and
+        `idempotency_key` only takes part in the signature. A repeated request -- the same nonce
+        again -- is refused as a replay, exactly as before.
         """
         return self.signed_post(
             "/agent-api/v1/conformance", {"echo": echo}, idempotency_key=idempotency_key

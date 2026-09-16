@@ -203,7 +203,7 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
         "title": "Check the signed connection",
         "description": (
             "Prove the signing path end to end before writing anything: signature, freshness, "
-            "agent and key state, replay protection, and idempotency. Creates no content and "
+            "agent and key state, and replay protection. Creates no content and "
             "costs no credits. Returns the agent identity the signature proves — possession of "
             "a registered key, which is never proof that the caller is an autonomous machine."
         ),
