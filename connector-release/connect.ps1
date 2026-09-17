@@ -189,20 +189,98 @@ function Get-RemoteBytes([string]$Url, [int]$MaximumBytes) {
     return , $bytes
 }
 
+# The embedded coordinates are checked for shape before anything tries to use them, because
+# .NET's own answer to malformed key material actively misdirects. In a cold process - which is
+# exactly what a loader fetched with `irm` and run once is - `ImportParameters` rejects a point it
+# cannot accept with `PlatformNotSupportedException: The specified curve 'nistP256' or its
+# parameters are not valid for this platform.` That sentence names the curve and the platform, so
+# it reads as "this runtime has no P-256". It is not. Measured on Windows 11 on 2026-09-17, both
+# Windows PowerShell 5.1 and PowerShell 7 import a well-formed point and verify a real release
+# signature without complaint; what they refuse is 31 bytes, 33 bytes, an unstamped placeholder,
+# or a pair that is not on the curve. The same input in a process that has already imported one
+# valid P-256 key yields an ordinary `CryptographicException` instead, which is why the misleading
+# form only ever appears in the one situation an applicant is actually in.
+function Assert-ReleaseCoordinate([string]$Value, [string]$Name) {
+    # The release build stamps lower-case hex, but hex case is only presentation: the same 32
+    # bytes may appear in a manually maintained loader as upper-case. Preserve that compatibility
+    # while still refusing every non-hex or non-32-byte value before it reaches cryptography.
+    if ($Value -notmatch '^[0-9A-Fa-f]{64}$') {
+        throw "This loader's embedded release public key coordinate $Name is not 64 hexadecimal characters, so it is not a P-256 coordinate. This copy cannot verify anything and refuses to try. Fetch the loader again from the origin."
+    }
+}
+
+function New-ReleaseVerifierFromCurveName([byte[]]$X, [byte[]]$Y) {
+    # The portable construction, and the one the release runbook documents. `ECParameters.Q` is a
+    # struct, so the point is built and then assigned whole: writing `$parameters.Q.X` would
+    # mutate a copy and leave the key silently empty.
+    $parameters = New-Object System.Security.Cryptography.ECParameters
+    $parameters.Curve = [System.Security.Cryptography.ECCurve]::CreateFromFriendlyName('nistP256')
+    $point = New-Object System.Security.Cryptography.ECPoint
+    $point.X = $X
+    $point.Y = $Y
+    $parameters.Q = $point
+    $ecdsa = [System.Security.Cryptography.ECDsa]::Create()
+    try { $ecdsa.ImportParameters($parameters) }
+    catch { $ecdsa.Dispose(); throw }
+    return $ecdsa
+}
+
+function New-ReleaseVerifierFromCngBlob([byte[]]$X, [byte[]]$Y) {
+    # The same key by a route that resolves no name. The construction above reaches the provider
+    # through a *friendly name*: Windows PowerShell 5.1 leaves `Oid.Value` empty for 'nistP256'
+    # and carries the name alone, so that route depends on a lookup a host can lack. A
+    # BCRYPT_ECCKEY_BLOB names CNG's own P-256 algorithm by magic constant instead - same curve,
+    # same two coordinates, same raw r||s verification, one fewer thing to resolve.
+    #
+    # It relaxes nothing. Measured in both runtimes on 2026-09-17: this import refuses an
+    # off-curve point, a fabricated pair and an all-zero pair with the same `CryptographicException`
+    # the managed path gives, so a key that fails there does not pass here.
+    $blob = New-Object byte[] (8 + $X.Length + $Y.Length)
+    [BitConverter]::GetBytes([uint32]0x31534345).CopyTo($blob, 0)   # BCRYPT_ECDSA_PUBLIC_P256_MAGIC
+    [BitConverter]::GetBytes([uint32]$X.Length).CopyTo($blob, 4)
+    $X.CopyTo($blob, 8)
+    $Y.CopyTo($blob, 8 + $X.Length)
+    $key = [System.Security.Cryptography.CngKey]::Import(
+        $blob, [System.Security.Cryptography.CngKeyBlobFormat]::EccPublicBlob)
+    return New-Object System.Security.Cryptography.ECDsaCng $key
+}
+
+function New-ReleaseVerifier {
+    Assert-ReleaseCoordinate $ReleasePublicKeyX 'X'
+    Assert-ReleaseCoordinate $ReleasePublicKeyY 'Y'
+    $x = Convert-FromHex $ReleasePublicKeyX
+    $y = Convert-FromHex $ReleasePublicKeyY
+    Add-Type -AssemblyName System.Core
+
+    # Two constructions of one key, tried in order. Every branch either returns a verifier that
+    # holds the published coordinates or throws: there is no path on which an unverified manifest
+    # is treated as verified, which is the property that must survive this function.
+    $refusals = @()
+    try { return New-ReleaseVerifierFromCurveName $x $y }
+    catch { $refusals += "named curve: $($_.Exception.Message)" }
+    try { return New-ReleaseVerifierFromCngBlob $x $y }
+    catch { $refusals += "CNG blob: $($_.Exception.Message)" }
+
+    # Both refused the same coordinates. That is a statement about this key, not about P-256 on
+    # this machine, and saying so is the difference between correcting a release stamp and
+    # rewriting a verifier that was never wrong.
+    #
+    # The underlying refusals are kept, because a screenshot is often all an operator gets - but
+    # they are introduced, not quoted bare. One of them is .NET's own `The specified curve
+    # 'nistP256' or its parameters are not valid for this platform.`, which is the sentence that
+    # sent issue #63 looking for a runtime incompatibility that was never there.
+    throw "This loader's embedded release public key is not a valid P-256 public point, so nothing was verified, downloaded or changed. The fault is in this copy of the loader, not in this computer: where a refusal below says the curve is not valid for this platform, that is .NET describing key material it rejected, not a runtime without P-256. Fetch the loader again from the origin. Refusals: $($refusals -join '; ')"
+}
+
 function Test-ReleaseSignature([byte[]]$Payload, [byte[]]$Signature) {
     if ($Signature.Length -ne 64) {
         throw "The release signature is $($Signature.Length) bytes; expected 64 raw r||s bytes."
     }
-    Add-Type -AssemblyName System.Core
-    $parameters = New-Object System.Security.Cryptography.ECParameters
-    $parameters.Curve = [System.Security.Cryptography.ECCurve]::CreateFromFriendlyName('nistP256')
-    $point = New-Object System.Security.Cryptography.ECPoint
-    $point.X = Convert-FromHex $ReleasePublicKeyX
-    $point.Y = Convert-FromHex $ReleasePublicKeyY
-    $parameters.Q = $point
-    $ecdsa = [System.Security.Cryptography.ECDsa]::Create()
-    $ecdsa.ImportParameters($parameters)
-    return $ecdsa.VerifyData($Payload, $Signature, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    $ecdsa = New-ReleaseVerifier
+    try {
+        return $ecdsa.VerifyData($Payload, $Signature, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    }
+    finally { $ecdsa.Dispose() }
 }
 
 function Get-Sha256Hex([byte[]]$Bytes) {
