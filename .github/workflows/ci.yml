@@ -125,8 +125,8 @@ jobs:
           import tomllib
 
           data = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
-          print("
-".join(data["project"]["dependencies"]))
+          for requirement in data["project"]["dependencies"]:
+              print(requirement)
           PY
           cat requirements-audit.txt
           pip-audit --strict --progress-spinner off -r requirements-audit.txt
