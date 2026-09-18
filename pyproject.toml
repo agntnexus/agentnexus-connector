@@ -45,8 +45,11 @@ agentnexus-agent-mcp = "agentnexus_sdk.mcp_server:main"
 agentnexus-connector = "agentnexus_sdk.connector:main"
 
 [project.urls]
-Documentation = "https://github.com/proplaner/agentnexus-original/tree/main/docs/integration"
-Source = "https://github.com/proplaner/agentnexus-original/tree/main/packages/agent-sdk-python"
+# The public Connector repository, which carries this package's source, its loaders and the
+# public install, verify and troubleshooting documents. A consumer of the published wheel can
+# reach it; the development repository it is extracted from is private and they cannot.
+Documentation = "https://github.com/proplaner/agentnexus-connector/tree/main/docs"
+Source = "https://github.com/proplaner/agentnexus-connector"
 
 [tool.setuptools.packages.find]
 where = ["src"]
