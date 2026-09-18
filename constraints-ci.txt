@@ -1,0 +1,31 @@
+# The toolchain this repository's CI resolves, pinned.
+#
+# `pyproject.toml` declares dependency *ranges* deliberately: this package is installed next to
+# somebody else's dependencies, and an exact pin would force a resolver conflict on them for no
+# safety gain. Those ranges are not narrowed here. What is pinned is the toolchain the workflow
+# runs, so that a green run means the same thing next week as it does today, and so that a range
+# drifting into something broken is found by the scheduled run rather than by an operator.
+#
+# `build`, `ruff` and `mypy` match the versions the canonical repository already pins for this
+# package, so a check that passes here passes there.
+#
+# Update by changing a line and reading what CI then says, never by loosening a pin to make a run
+# go green.
+
+# Build frontend, so the wheel this repository produces is built the way a consumer's tooling
+# would build it.
+build==1.5.0
+
+# Lint and format.
+ruff==0.16.4
+
+# Types. The package ships `py.typed`, so its annotations are part of what it publishes.
+mypy==2.3.1
+
+# Type stubs. `runtimes.py` reads a runtime's own YAML configuration, and without these mypy
+# reports the import rather than checking the code that uses it.
+types-PyYAML==6.0.12.20250915
+
+# Known advisories against the resolved dependency set. This is the check that fails without
+# anybody pushing, which is why the workflow also runs weekly.
+pip-audit==2.10.1

@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentnexus-sdk"
+version = "0.6.1"
+description = "Reference client for the AgentNexus agentnexus-sig-v1 signed agent API"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = "Apache-2.0"
+keywords = ["agentnexus", "ed25519", "signed-requests", "agent"]
+
+# Version ranges rather than the exact pins used by the applications in this repository. This is
+# a library that an external owner installs next to their own dependencies, and an exact pin
+# would force a resolver conflict on them for no safety gain: the protocol is stable and both
+# dependencies follow semantic versioning.
+dependencies = [
+    "httpx2>=2.12,<3",
+    "cryptography>=50,<51",
+    # The connector reads Hermes' own config.yaml to tell an existing MCP entry apart from the one
+    # it would write. `hermes mcp list` prints a table and offers no machine-readable form, so
+    # there is no CLI route to the same answer. Declared rather than assumed: on a clean wheel
+    # install it was missing, and setup died on a bare ModuleNotFoundError mid-run.
+    "pyyaml>=6,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.16.4",
+    "mypy==2.3.1",
+    # Standard build frontend, used by the packaging test to produce a wheel and an sdist the
+    # way an external consumer's tooling would.
+    "build==1.5.0",
+]
+
+[project.scripts]
+agentnexus-agent = "agentnexus_sdk.cli:main"
+# Started by an agent runtime, never by a human. It needs no dependency of its own: the MCP
+# framing is a few hundred lines of JSON-RPC, and adding the reference MCP SDK here would push
+# a transitive dependency onto every external owner who only wants the signing client.
+agentnexus-agent-mcp = "agentnexus_sdk.mcp_server:main"
+# The applicant-facing setup. It is the only entry point a person runs by hand.
+agentnexus-connector = "agentnexus_sdk.connector:main"
+
+[project.urls]
+# The public Connector repository, which carries this package's source, its loaders and the
+# public install, verify and troubleshooting documents. A consumer of the published wheel can
+# reach it; the development repository it is extracted from is private and they cannot.
+Documentation = "https://github.com/proplaner/agentnexus-connector/tree/main/docs"
+Source = "https://github.com/proplaner/agentnexus-connector"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+agentnexus_sdk = ["py.typed"]
