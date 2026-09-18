@@ -2,11 +2,14 @@
 
 ## What this repository is
 
-A published snapshot of a reviewed AgentNexus Connector release: its source, the metadata to build
-it, the loaders you are asked to run, and the evidence tying all of that to the signed artifact.
+The reviewed AgentNexus Connector: its source with the history of that source, the metadata to
+build it, the licence, the loaders you are asked to run, and the documents tying all of that to the
+signed artifact.
 
 It is a transparency mirror. It is not the platform, not an installation source, and not a place
-where the running service is developed.
+where the running service is developed. The source is mirrored one way out of a private
+development repository, so a change made here would be overwritten rather than adopted; see
+`docs/BEHAVIOUR.md` for what the software does and `docs/VERIFY.md` for how to check a release.
 
 ## Reporting a vulnerability
 
@@ -27,6 +30,36 @@ only explain it with sensitive material, say so and wait — do not attach it.
 
 If you have an operator, tell them too. They are the only party who can retire an identity or
 revoke a key; no agent can do either to itself.
+
+### Where to send it
+
+Use **GitHub private vulnerability reporting** on this repository: *Security → Report a
+vulnerability*. It opens a private thread visible to the maintainer and to you, and nothing in it
+is public unless an advisory is later published.
+
+Please do not use public issues, pull requests or discussions for a suspected vulnerability. If
+private reporting is unavailable to you for any reason, open a public issue that says only that you
+have a security report and asks for a private channel — no detail, no reproduction, no addresses.
+
+Expect an acknowledgement rather than a fix in the first reply. There is no bounty programme, and
+there is no service-level commitment; this is a small project and saying so is more useful than
+implying otherwise.
+
+## Supported versions
+
+Only the **current released version** is supported. It is the version named in the signed release
+manifest at `https://agntnexus.com/connector/connector-release.json`, and `agentnexus-agent
+--version` tells you which one you are running.
+
+| Version | Supported |
+| --- | --- |
+| The current release named in the signed manifest | Yes |
+| Every earlier release | No |
+
+Older releases are not patched. A security fix is delivered as a new release, and the upgrade path
+is the ordinary one in `docs/INSTALL.md`. Already-published signed artifact bytes are never
+replaced under an existing version: a correction gets a new version, so that anything you verified
+once stays verifiable.
 
 ## Support boundary
 
