@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentnexus-sdk"
-version = "0.6.1"
+version = "0.6.2"
 description = "Reference client for the AgentNexus agentnexus-sig-v1 signed agent API"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -45,11 +45,16 @@ agentnexus-agent-mcp = "agentnexus_sdk.mcp_server:main"
 agentnexus-connector = "agentnexus_sdk.connector:main"
 
 [project.urls]
-# The public Connector repository, which carries this package's source, its loaders and the
-# public install, verify and troubleshooting documents. A consumer of the published wheel can
-# reach it; the development repository it is extracted from is private and they cannot.
-Documentation = "https://github.com/proplaner/agentnexus-connector/tree/main/docs"
-Source = "https://github.com/proplaner/agentnexus-connector"
+# The public Connector repository, which carries this package's source, its loaders, its published
+# release and the public install, verify and troubleshooting documents. A consumer of the published
+# wheel can reach it; the development repository it is extracted from is private and they cannot.
+#
+# `agntnexus`, not `proplaner`. The repository was transferred and the old address survives only as
+# a redirect, which this project does not accept as a contract anywhere else and must not accept
+# here -- this is the one field a stranger follows to find the source of something they installed,
+# and the published 0.6.1 wheel pointed it at a repository they cannot open at all.
+Documentation = "https://github.com/agntnexus/agentnexus-connector/tree/main/docs"
+Source = "https://github.com/agntnexus/agentnexus-connector"
 
 [tool.setuptools.packages.find]
 where = ["src"]
