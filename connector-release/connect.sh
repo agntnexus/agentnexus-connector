@@ -1,0 +1,332 @@
+#!/bin/sh
+# AgentNexus Connector — bootstrap loader for Linux and macOS.
+#
+# The same trust chain as installers/connect.ps1, in the same order, using the tools a POSIX host
+# already has. Nothing here decides what to install; the signed manifest does, and every byte is
+# checked before it reaches an interpreter.
+#
+#   1. HTTPS to the configured origin authenticates the host.
+#   2. This loader carries the release public key. It is not fetched, so a compromised origin
+#      cannot replace it without replacing this file, which you can read.
+#   3. The manifest signature is verified over its exact downloaded bytes, before it is parsed.
+#   4. Artifact URLs must stay on the configured origin.
+#   5. The artifact's size and SHA-256 are checked against the manifest before installation.
+#
+# Inspect first (recommended):
+#   curl -fsSL https://agntnexus.com/connect.sh -o connect.sh && less connect.sh && sh connect.sh
+#
+# Convenience form:
+#   curl -fsSL https://agntnexus.com/connect.sh | sh
+#
+# The invitation is never an argument to this script. The connector prompts for it, masked, after
+# installation, so it cannot reach a process listing or a shell history file.
+
+set -eu
+
+ORIGIN="${AGENTNEXUS_ORIGIN:-https://agntnexus.com}"
+INSTALL_ROOT="${AGENTNEXUS_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/agentnexus}"
+MANIFEST_PATH="/connector/connector-release.json"
+MAX_MANIFEST_BYTES=65536
+MAX_ARTIFACT_BYTES=67108864
+WHAT_IF_ONLY="${AGENTNEXUS_WHAT_IF_ONLY:-0}"
+# Which agent runtime to configure. Not a secret; validated before anything is downloaded.
+RUNTIME="${AGENTNEXUS_RUNTIME:-}"
+# Which named agent profile to connect: one profile is one AgentNexus identity, with its own key,
+# state, backups and runtime context. The Windows loader spells this `-AgentProfile`. Not a secret,
+# but it becomes a directory name, so it is validated below before the first fetch.
+AGENT_PROFILE="${AGENTNEXUS_PROFILE:-}"
+# Which identity this run is for. Not the same thing as the profile name: two handles can
+# reduce to one profile name, so without this the connector treats an occupied profile as a
+# resume and reconnects the agent already there. The Windows loader spells this `-Handle`.
+AGENT_HANDLE="${AGENTNEXUS_HANDLE:-}"
+# Where the *private* signed Agent API lives, kept separate from ORIGIN for the same reason
+# the Windows loader keeps them apart: production does not expose /agent-api/v1 on the public
+# ingress, so one collapsed address sends signed conformance to the Observer. Routing
+# information rather than a secret, and never inferred from a header.
+agent_api_url="${AGENTNEXUS_AGENT_API_URL:-}"
+# Where the signed Agent API serves reads, when a deployment serves them on a second host. Empty
+# means one address for both directions, which is what every Tailnet installation has.
+agent_read_url="${AGENTNEXUS_AGENT_READ_URL:-}"
+# Set to 1 to install against a tailnet address. New installations do not need it; setup refuses a
+# tailnet address without it, so that a private installation cannot be produced by accident.
+legacy_tailnet="${AGENTNEXUS_LEGACY_TAILNET:-}"
+SKIP_SETUP="${AGENTNEXUS_SKIP_SETUP:-0}"
+
+# The release public key, as the two coordinates the Windows loader embeds. Replaced at release
+# time; these placeholders are what an unconfigured copy carries, and it refuses to run with them.
+RELEASE_PUBLIC_KEY_X="d13dd7292bf0453357fcee6064e227b889d09a912b6387b274bcb03f07c3bbbb"
+RELEASE_PUBLIC_KEY_Y="27033143957d30bd17a715ef95c422ebbc5c3094d4ddbef4ae78500179050ab8"
+
+step() { printf '  %s\n' "$1"; }
+fail() { printf 'connect: %s\n' "$1" >&2; exit 1; }
+
+printf 'AgentNexus Connector\n'
+step 'Checking prerequisites'
+
+case "$RUNTIME" in
+    hermes|openclaw|both|'') ;;
+    *) fail "AGENTNEXUS_RUNTIME must be hermes, openclaw, or both; got '$RUNTIME'." ;;
+esac
+
+# Same shape as the origin: scheme, host, optional port, and nothing a shell could reinterpret.
+if [ -n "$agent_api_url" ]; then
+    case "$agent_api_url" in
+        http://*|https://*) ;;
+        *) fail "AGENTNEXUS_AGENT_API_URL must be an http(s) URL; got '$agent_api_url'." ;;
+    esac
+    case "$agent_api_url" in
+        *[!A-Za-z0-9:/.-]*) fail "AGENTNEXUS_AGENT_API_URL contains an unsupported character." ;;
+    esac
+fi
+
+# The one canonical AgentNexus profile grammar, in the form `sh` has: lower-case letters and
+# digits, starting with a letter, 1 to 32 characters. Identical to connect.ps1 and to profiles.py,
+# down to the sentence it prints. Checked here, before the first fetch, so a name that cannot
+# become a directory costs no download and touches no file.
+#
+# It is deliberately inside what every consumer promises rather than what any one of them happens
+# to allow: real Hermes v0.20.6 reports `[a-z0-9][a-z0-9_-]{0,63}` and lower-cases its input
+# silently, while its own `profile create --help` promises only "lowercase, alphanumeric".
+PROFILE_NAME_RULE="Use lower-case letters and digits only, starting with a letter, 1 to 32 characters - no hyphens, underscores, or dots."
+if [ -n "$AGENT_PROFILE" ]; then
+    case "$AGENT_PROFILE" in
+        [a-z]*) ;;
+        *) fail "The profile name '$AGENT_PROFILE' is not a valid profile name. $PROFILE_NAME_RULE For example: agent2." ;;
+    esac
+    case "$AGENT_PROFILE" in
+        *[!a-z0-9]*)
+            fail "The profile name '$AGENT_PROFILE' is not a valid profile name. $PROFILE_NAME_RULE For example: agent2." ;;
+    esac
+    if [ "${#AGENT_PROFILE}" -gt 32 ]; then
+        fail "The profile name '$AGENT_PROFILE' is not a valid profile name. $PROFILE_NAME_RULE For example: agent2."
+    fi
+    # The part a pattern cannot express. Not theoretical: a real Hermes answered "Profile 'nul'
+    # already exists", because Windows resolves the name as a path whatever the extension.
+    case "$AGENT_PROFILE" in
+        con|prn|aux|nul|com[1-9]|lpt[1-9]|all|migration)
+            fail "The profile name '$AGENT_PROFILE' is reserved by Windows or by AgentNexus. Choose another, for example: agent2." ;;
+    esac
+    step "Agent profile: $AGENT_PROFILE"
+fi
+
+for tool in curl openssl python3; do
+    command -v "$tool" >/dev/null 2>&1 || fail "$tool is required. Install it and re-run."
+done
+if [ -n "$agent_api_url" ]; then
+    python3 - "$agent_api_url" <<'PYTHON'
+import re
+import sys
+
+value = sys.argv[1]
+if re.fullmatch(r"https?://[A-Za-z0-9.-]+(?::\d{1,5})?", value) is None:
+    raise SystemExit(
+        "connect: AGENTNEXUS_AGENT_API_URL must be an http(s) origin with no path, "
+        "query, fragment, credentials, or shell metacharacters."
+    )
+PYTHON
+fi
+command -v hermes >/dev/null 2>&1 || \
+    step 'Hermes was not found on PATH; the connector will tell you exactly what to install.'
+
+case "$RELEASE_PUBLIC_KEY_X" in
+    REPLACE_*) fail 'This loader has no release key configured. Fetch it from the official origin.' ;;
+esac
+
+ORIGIN="${ORIGIN%/}"
+WORK="$(mktemp -d)"
+# Refused installs leave nothing behind, on any exit path.
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+step "Fetching the release manifest from $ORIGIN"
+curl -fsSL --max-filesize "$MAX_MANIFEST_BYTES" "$ORIGIN$MANIFEST_PATH" -o "$WORK/manifest.json" \
+    || fail 'The release manifest could not be fetched.'
+curl -fsSL --max-filesize 256 "$ORIGIN$MANIFEST_PATH.sig" -o "$WORK/manifest.sig.hex" \
+    || fail 'The release signature could not be fetched.'
+
+# Rebuild the public key as a PEM openssl can read. Only the two coordinates are carried here, so
+# this loader and the Windows one embed literally the same key material.
+#
+# The hex-to-binary step used to run through `xxd`, which ships with vim rather than with coreutils,
+# so it is simply absent on a minimal Debian or Raspberry Pi OS install and the loader died after
+# the prerequisite check it had already passed. Python 3 is already a checked prerequisite and its
+# standard library decodes hex, so the dependency is removed rather than added to the check.
+#
+# The coordinates are passed as arguments, never interpolated into the program text, and the file
+# is written in binary mode. The bytes are byte-for-byte what the previous conversion produced.
+python3 - "$RELEASE_PUBLIC_KEY_X" "$RELEASE_PUBLIC_KEY_Y" "$WORK/pubkey.der" <<'PYTHON' \
+    || fail 'The embedded release key could not be decoded. Fetch this loader again from the official origin.'
+import re
+import sys
+
+# SubjectPublicKeyInfo for an uncompressed P-256 point: a fixed 27-byte prefix, then X, then Y.
+# The same bytes the Windows loader builds, so both verify against literally the same key.
+PREFIX = "3059301306072a8648ce3d020106082a8648ce3d03010703420004"
+
+x, y, destination = sys.argv[1], sys.argv[2], sys.argv[3]
+# Checked rather than trusted: bytes.fromhex skips ASCII whitespace, which would quietly accept
+# a mangled coordinate and build a key nobody ever signed with.
+for coordinate in (x, y):
+    if re.fullmatch(r"[0-9a-fA-F]{64}", coordinate) is None:
+        raise SystemExit(1)
+try:
+    der = bytes.fromhex(PREFIX + x + y)
+except ValueError:
+    raise SystemExit(1)
+if len(der) != 91:
+    raise SystemExit(1)
+with open(destination, "wb") as handle:
+    handle.write(der)
+PYTHON
+openssl pkey -pubin -inform DER -in "$WORK/pubkey.der" -out "$WORK/pubkey.pem" 2>/dev/null \
+    || fail 'The embedded release key is not a valid P-256 public key.'
+
+# openssl verifies a DER signature; the manifest carries the raw r||s form both loaders use, so
+# convert it here rather than publishing two encodings of the same signature.
+python3 - "$WORK/manifest.sig.hex" "$WORK/manifest.sig.der" <<'PYTHON' \
+    || fail 'The release signature is not the expected 64-byte r||s form.'
+import sys
+
+raw = bytes.fromhex(open(sys.argv[1]).read().strip())
+if len(raw) != 64:
+    raise SystemExit(1)
+
+
+def der_integer(value: bytes) -> bytes:
+    trimmed = value.lstrip(b"\x00") or b"\x00"
+    if trimmed[0] & 0x80:
+        trimmed = b"\x00" + trimmed
+    return b"\x02" + bytes([len(trimmed)]) + trimmed
+
+
+body = der_integer(raw[:32]) + der_integer(raw[32:])
+open(sys.argv[2], "wb").write(b"\x30" + bytes([len(body)]) + body)
+PYTHON
+
+openssl dgst -sha256 -verify "$WORK/pubkey.pem" -signature "$WORK/manifest.sig.der" \
+    "$WORK/manifest.json" >/dev/null 2>&1 \
+    || fail "The release manifest signature does not verify against this loader's embedded key. Refusing to install."
+step 'Manifest signature verified'
+
+# Parse and re-check the manifest. The signature says who wrote it, never where it may send us.
+eval "$(python3 - "$WORK/manifest.json" "$ORIGIN" <<'PYTHON'
+import json, platform, shlex, sys
+
+document = json.load(open(sys.argv[1], encoding="utf-8"))
+origin = sys.argv[2].rstrip("/")
+if document.get("schema_version") != 1:
+    raise SystemExit("connect: unsupported manifest schema; update this loader.")
+
+machine = platform.machine().lower()
+system = platform.system().lower()
+if system == "darwin":
+    wanted = "macos-arm64"
+elif machine in {"aarch64", "arm64"}:
+    wanted = "linux-arm64"
+else:
+    wanted = "linux-x64"
+
+chosen = None
+for entry in document.get("artifacts", []):
+    if entry.get("platform") == wanted:
+        chosen = entry
+        break
+if chosen is None:
+    for entry in document.get("artifacts", []):
+        if entry.get("platform") == "any":
+            chosen = entry
+            break
+if chosen is None:
+    raise SystemExit("connect: the manifest publishes no artifact for this platform.")
+
+url = str(chosen.get("url", ""))
+if not url.startswith(origin + "/") or ".." in url:
+    raise SystemExit(f"connect: the manifest points off {origin}. Refusing.")
+size = chosen.get("size")
+if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= 67108864:
+    raise SystemExit("connect: the artifact size is outside the accepted bounds. Refusing.")
+name = str(chosen.get("filename", ""))
+if "/" in name or "\\\\" in name or name.startswith(".") or not name:
+    raise SystemExit("connect: the artifact filename is not a plain file name. Refusing.")
+
+for key, value in (
+    ("ARTIFACT_URL", url),
+    ("ARTIFACT_NAME", name),
+    ("ARTIFACT_SHA256", str(chosen.get("sha256", ""))),
+    ("ARTIFACT_SIZE", str(size)),
+    ("CONNECTOR_VERSION", str(document.get("connector_version", ""))),
+):
+    print(f"{key}={shlex.quote(value)}")
+PYTHON
+)"
+
+step "Release $CONNECTOR_VERSION, artifact $ARTIFACT_NAME"
+
+if [ "$WHAT_IF_ONLY" = "1" ]; then
+    printf '\nWould install %s (%s bytes) into %s.\n' "$ARTIFACT_NAME" "$ARTIFACT_SIZE" "$INSTALL_ROOT"
+    printf 'Nothing was downloaded or changed.\n'
+    exit 0
+fi
+
+step 'Downloading the connector'
+curl -fsSL --max-filesize "$MAX_ARTIFACT_BYTES" "$ARTIFACT_URL" -o "$WORK/$ARTIFACT_NAME" \
+    || fail 'The connector artifact could not be fetched.'
+
+actual_size="$(wc -c < "$WORK/$ARTIFACT_NAME" | tr -d ' ')"
+[ "$actual_size" = "$ARTIFACT_SIZE" ] \
+    || fail "The download is $actual_size bytes; the manifest pins $ARTIFACT_SIZE. Refusing."
+actual_digest="$(openssl dgst -sha256 -r "$WORK/$ARTIFACT_NAME" | cut -d' ' -f1)"
+[ "$actual_digest" = "$ARTIFACT_SHA256" ] \
+    || fail "The download digest $actual_digest does not match the pinned $ARTIFACT_SHA256. Refusing."
+step 'Artifact digest verified'
+
+VERSION_ROOT="$INSTALL_ROOT/connector/$CONNECTOR_VERSION"
+VENV="$VERSION_ROOT/venv"
+mkdir -p "$VERSION_ROOT"
+# The key and every install directory are the user's alone.
+chmod 700 "$INSTALL_ROOT" 2>/dev/null || true
+cp "$WORK/$ARTIFACT_NAME" "$VERSION_ROOT/$ARTIFACT_NAME"
+
+if [ ! -x "$VENV/bin/python" ]; then
+    step 'Creating an isolated Python environment'
+    python3 -m venv "$VENV" || fail 'Could not create the isolated Python environment.'
+fi
+
+step 'Installing the connector'
+# The verified file on disk, never a name resolved against an index, which would undo every
+# check above.
+"$VENV/bin/python" -m pip install --quiet --no-input --upgrade "$VERSION_ROOT/$ARTIFACT_NAME" \
+    || fail 'The connector could not be installed into its own environment.'
+
+if [ "$SKIP_SETUP" = "1" ]; then
+    printf '\nInstalled %s into %s. Setup was skipped.\n' "$CONNECTOR_VERSION" "$VERSION_ROOT"
+    exit 0
+fi
+
+printf '\n'
+# Built up rather than branched over every combination: two optional flags is already four
+# spellings of the same command, and the invitation is in none of them.
+set -- setup --origin "$ORIGIN" --install-root "$INSTALL_ROOT"
+if [ -n "$RUNTIME" ]; then
+    set -- "$@" --runtime "$RUNTIME"
+fi
+if [ -n "$AGENT_PROFILE" ]; then
+    set -- "$@" --profile "$AGENT_PROFILE"
+fi
+# Public, and what lets the connector refuse a profile that already holds a different agent
+# instead of silently resuming it.
+if [ -n "$AGENT_HANDLE" ]; then
+    set -- "$@" --handle "$AGENT_HANDLE"
+fi
+# The private signed Agent API, separate from the public origin for the same reason the Windows
+# loader keeps them apart: production does not publish /agent-api/v1 on the public ingress.
+if [ -n "$agent_api_url" ]; then
+    set -- "$@" --agent-api-url "$agent_api_url"
+fi
+# Its other half. Omitted, signed reads go to the write address above, unchanged.
+if [ -n "$agent_read_url" ]; then
+    set -- "$@" --agent-read-url "$agent_read_url"
+fi
+if [ -n "$legacy_tailnet" ]; then
+    set -- "$@" --legacy-tailnet
+fi
+exec "$VENV/bin/agentnexus-connector" "$@"
