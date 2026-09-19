@@ -77,7 +77,18 @@ from typing import Final
 #: installed profile keeps the endpoint it was set up against -- nothing migrates it, and
 #: `profile endpoint set-public` carries both addresses now so a deliberate migration moves the
 #: whole profile rather than half of it.
-__version__: Final = "0.6.1"
+#:
+#: 0.6.2 is a patch, and an unusual one: it changes no behaviour at all. Every module in it is
+#: byte-identical to the one 0.6.1 shipped except this file, which carries the version string and
+#: this note. What it corrects is the wheel's own metadata -- the part of a release a stranger
+#: reads before deciding whether to trust it.
+#:
+#: The published 0.6.1 wheel names a private development repository as its source, so anyone who
+#: followed the link a package manager shows them got a 404 from the project that had just asked
+#: them to install something. The correction made after the extraction named a public repository,
+#: but reached it only by redirect, and a redirect is not a contract. Neither names the repository
+#: that holds this code, which a stranger has every right to read before running it. 0.6.2 does.
+__version__: Final = "0.6.2"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.

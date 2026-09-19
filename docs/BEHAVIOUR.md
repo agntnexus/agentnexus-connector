@@ -4,7 +4,7 @@ Everything the Connector touches, reaches or refrains from, in one place, so tha
 source confirms this document rather than replacing it.
 
 This describes the released Connector as published in
-[`agentnexus-connector`](https://github.com/proplaner/agentnexus-connector). Every statement below
+[`agentnexus-connector`](https://github.com/agntnexus/agentnexus-connector). Every statement below
 is a property of the source in that repository, and you can check each one against it.
 
 ## Files it creates, and their permissions
