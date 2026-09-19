@@ -57,7 +57,7 @@ may ever be here** — see the last section of this page.
 
 ## What belongs to this repository
 
-Six things, and they are not mirrored from anywhere:
+Seven things, and they are not mirrored from anywhere:
 
 | Path | Why it is local |
 | --- | --- |
@@ -67,6 +67,7 @@ Six things, and they are not mirrored from anywhere:
 | `ruff.toml` | The lint and format settings that apply to this source. The canonical file is monorepo-wide and most of it is exceptions for code that is not here; this reproduces only the part that governs `src/agentnexus_sdk/**`. If the two disagree, the canonical one is right. |
 | `.gitignore` | Keeps build output out of a public repository. A committed wheel here would look like something to install. |
 | `docs/MIRROR.md` | This page. |
+| `AGENTS.md` | Where this repository's issues live and how work starts here. It is local because the rule it carries is *this* repository's: a public repository whose CI must stay GitHub-hosted, because a public pull request can contain code nobody has reviewed. The canonical policy it points at is not published here. |
 
 CI refuses a tracked file that is in neither list, so another kind cannot appear quietly.
 

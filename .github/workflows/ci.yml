@@ -171,7 +171,7 @@ jobs:
           set -euo pipefail
           undeclared="$(git ls-files | grep -vE \
             '^(src/agentnexus_sdk/|installers/|connector-release/|docs/(BEHAVIOUR|INSTALL|VERIFY|TROUBLESHOOTING)\.md$|README\.md$|SECURITY\.md$|LICENSE$|pyproject\.toml$)' \
-            | grep -vE '^(\.github/|ci/|\.gitignore$|constraints-ci\.txt$|ruff\.toml$|docs/MIRROR\.md$)' || true)"
+            | grep -vE '^(\.github/|ci/|\.gitignore$|constraints-ci\.txt$|ruff\.toml$|docs/MIRROR\.md$|AGENTS\.md$)' || true)"
           if [ -n "${undeclared}" ]; then
             echo "REFUSED: these files are neither mirrored nor declared repository-local:" >&2
             printf '%s\n' "${undeclared}" >&2
