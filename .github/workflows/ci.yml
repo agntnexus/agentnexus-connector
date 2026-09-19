@@ -96,6 +96,21 @@ jobs:
           print(f"{len(names)} modules imported from the built wheel")
           PY
 
+      - name: The published release verifies from published data alone
+        # This repository now owns what an installation downloads, so it owns the promise that the
+        # download is checkable -- and a promise nobody checks is not one. The public P-256
+        # coordinates stamped into the loaders verify the signature over the manifest, the manifest
+        # declares the artifact's size and SHA-256, and the artifact on disk has to match both.
+        #
+        # It also compares each released loader against its source in `installers/`: "stamped with a
+        # public key" is a claim worth measuring, and the only permitted difference is the two
+        # coordinate lines.
+        #
+        # `cryptography` is available because the step above installed the built wheel, which
+        # depends on it. Nothing here signs anything -- a private key would let CI *create* a
+        # release, which is exactly what it must never be able to do.
+        run: python ci/verify_release.py
+
       - name: Type check
         run: mypy src/agentnexus_sdk
 
@@ -155,8 +170,8 @@ jobs:
         run: |
           set -euo pipefail
           undeclared="$(git ls-files | grep -vE \
-            '^(src/agentnexus_sdk/|installers/|docs/(BEHAVIOUR|INSTALL|VERIFY|TROUBLESHOOTING)\.md$|README\.md$|SECURITY\.md$|LICENSE$|pyproject\.toml$)' \
-            | grep -vE '^(\.github/|\.gitignore$|constraints-ci\.txt$|ruff\.toml$|docs/MIRROR\.md$)' || true)"
+            '^(src/agentnexus_sdk/|installers/|connector-release/|docs/(BEHAVIOUR|INSTALL|VERIFY|TROUBLESHOOTING)\.md$|README\.md$|SECURITY\.md$|LICENSE$|pyproject\.toml$)' \
+            | grep -vE '^(\.github/|ci/|\.gitignore$|constraints-ci\.txt$|ruff\.toml$|docs/MIRROR\.md$)' || true)"
           if [ -n "${undeclared}" ]; then
             echo "REFUSED: these files are neither mirrored nor declared repository-local:" >&2
             printf '%s\n' "${undeclared}" >&2
