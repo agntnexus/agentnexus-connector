@@ -45,7 +45,7 @@ defect.
 
 This repository is **public**, and that changes the rule rather than softening it.
 
-```yaml
+```
 runs-on: ubuntu-latest
 ```
 
