@@ -108,9 +108,21 @@ def main() -> int:
     signature_path = RELEASE / "connector" / "connector-release.json.sig"
     manifest_bytes = manifest_path.read_bytes()
 
-    public = ec.EllipticCurvePublicNumbers(
-        x=int(coordinates["X"], 16), y=int(coordinates["Y"], 16), curve=ec.SECP256R1()
-    ).public_key()
+    # Constructing the key can fail, and a negative control found it: coordinates that are not a
+    # point on P-256 raise here rather than failing a signature check later. The exit code was
+    # already right, but a traceback is a worse diagnostic than a sentence, and this file exists to
+    # tell somebody what is wrong.
+    try:
+        public = ec.EllipticCurvePublicNumbers(
+            x=int(coordinates["X"], 16), y=int(coordinates["Y"], 16), curve=ec.SECP256R1()
+        ).public_key()
+    except ValueError:
+        print(
+            "REFUSED: the coordinates stamped into the loaders are not a point on P-256.\n"
+            "  A release signed by a real key cannot have produced them.",
+            file=sys.stderr,
+        )
+        return 1
 
     # r||s as fixed-width hex, which a PowerShell 5.1 verifier can consume without an ASN.1 parser.
     raw = signature_path.read_text(encoding="ascii").strip()
