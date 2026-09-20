@@ -21,6 +21,22 @@ The released loaders are also compared against `installers/`, because "stamped w
 a claim that should be measurable rather than trusted: the only permitted difference is the two
 coordinate lines.
 
+## Why this file also checks `AGENTS.md`
+
+Because it is the only thing here that CI runs and that can refuse.
+
+This repository has no test suite and its workflow never invokes one, so there is nowhere else to
+put a check that the active instructions still name the right Issue tracker -- and adding a
+workflow step or a new collected file is a change `agntnexus/agentnexus#22` does not authorise.
+
+It is worth checking at all because instruction text rots silently. Nothing fails when it goes
+stale: a contributor opens an Issue in a repository nobody watches any more, and the first sign is
+that the work was never seen. There is no build to break and no runtime to observe.
+
+The two questions stay separate. The release chain and the instructions are reported apart and
+refused apart, so neither message can ever describe the other, and this half reads one local file
+and nothing else -- no network, no credential, no signature, no publication.
+
 Usage::
 
     python ci/verify_release.py
@@ -68,8 +84,86 @@ def lines(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").splitlines()
 
 
+#: The active instructions, and what they have to say. Read locally; nothing here reaches a network.
+INSTRUCTIONS = ROOT / "AGENTS.md"
+
+#: Where new portfolio work is tracked.
+UMBRELLA_TRACKER = "agntnexus/agentnexus"
+
+#: The account that stays forbidden for new Issue activity. Named rather than merely excluded: a
+#: refusal that says "some other repository" is one nobody can act on.
+RETIRED_ACCOUNT = "ppoinha/AIExperiment"
+
+#: The monolith. Mentioning it is legitimate and often necessary; presenting it as the present-tense
+#: authority is the regression, so the rule below is about how a line reads.
+HISTORICAL_REPOSITORY = "proplaner/agentnexus-original"
+
+#: A line naming the monolith is acceptable when it says, on that same line, that it is history.
+HISTORICAL_MARKERS = ("historical", "archived", "superseded")
+
+#: This repository is public, and that makes its runner rule stricter than the portfolio default
+#: rather than softer. If the sentence stating it disappears, the file has lost the boundary that
+#: exists because a public pull request can carry code nobody has reviewed.
+LOCAL_SECURITY_BOUNDARY = "GitHub-hosted runners only"
+
+
+def instruction_failures() -> list[str]:
+    """Return every way the active instructions fail to state the current issue authority.
+
+    Fail-closed. A missing or empty file is a refusal rather than a silent pass: a check that
+    stopped reading anything would otherwise report success for ever.
+    """
+    if not INSTRUCTIONS.is_file():
+        return [f"{INSTRUCTIONS.name} is missing; the active instructions cannot be checked"]
+
+    text = INSTRUCTIONS.read_text(encoding="utf-8", errors="replace")
+    if not text.strip():
+        return [f"{INSTRUCTIONS.name} is empty"]
+
+    found: list[str] = []
+
+    if "Issues for the portfolio belong in" not in text or UMBRELLA_TRACKER not in text:
+        found.append(f"they do not name {UMBRELLA_TRACKER} as the active issue authority")
+
+    if f"`{RETIRED_ACCOUNT}` is forbidden" not in text:
+        found.append(f"they do not forbid new issue activity in {RETIRED_ACCOUNT} by name")
+
+    stale = [
+        line
+        for line in text.splitlines()
+        if HISTORICAL_REPOSITORY in line
+        and not any(marker in line.lower() for marker in HISTORICAL_MARKERS)
+    ]
+    if stale:
+        found.append(
+            f"{len(stale)} line(s) name {HISTORICAL_REPOSITORY} without saying it is history: "
+            + "; ".join(line.strip()[:70] for line in stale[:2])
+        )
+
+    if f"https://github.com/{UMBRELLA_TRACKER}/blob/main/docs/ai/" not in text:
+        found.append("they do not link the portfolio rules in the umbrella")
+    if f"https://github.com/{HISTORICAL_REPOSITORY}/blob/" in text:
+        found.append("they still link rules out of the monolith")
+
+    # Whitespace-normalised: the sentence is wrapped in the file, and a check that depended on
+    # where the line breaks fall would fail the next time somebody reflows a paragraph.
+    flattened = " ".join(text.split())
+    if LOCAL_SECURITY_BOUNDARY not in flattened:
+        found.append(
+            f"they no longer state this repository's stricter boundary: {LOCAL_SECURITY_BOUNDARY!r}"
+        )
+    if "stricter local boundary is never overridden" not in flattened:
+        found.append("they no longer say a stricter local boundary outranks the portfolio default")
+
+    return found
+
+
 def main() -> int:
-    """Check the release chain and the loader stamps, and refuse anything that does not add up."""
+    """Check the release chain, the loader stamps and the active instructions.
+
+    Anything that does not add up is refused. The two questions are reported and refused apart, so
+    neither message can be mistaken for the other.
+    """
     failures: list[str] = []
 
     released = RELEASE / "connect.sh"
@@ -155,13 +249,29 @@ def main() -> int:
         else:
             print(f"artifact   : {name} matches its declared digest and size")
 
+    # Kept apart from the release chain on purpose, so neither refusal describes the other.
+    policy_failures = instruction_failures()
+    if not policy_failures:
+        print(f"instructions: {INSTRUCTIONS.name} names {UMBRELLA_TRACKER} as the issue authority")
+
     if failures:
         print("\nREFUSED: the published release does not check out:", file=sys.stderr)
         for failure in failures:
             print(f"  {failure}", file=sys.stderr)
+    if policy_failures:
+        print(
+            "\nREFUSED: the active instructions do not state the current issue authority:",
+            file=sys.stderr,
+        )
+        for failure in policy_failures:
+            print(f"  {failure}", file=sys.stderr)
+    if failures or policy_failures:
         return 1
 
-    print("\nThe release chain verifies from published data alone.")
+    print(
+        "\nThe release chain verifies from published data alone, and the instructions "
+        "name the current issue authority."
+    )
     return 0
 
 

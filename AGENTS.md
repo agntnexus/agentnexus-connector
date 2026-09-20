@@ -4,15 +4,21 @@ This repository is part of the AgentNexus portfolio. It owns the complete user-i
 
 ## Where issues live
 
-**All issues belong in [`proplaner/agentnexus-original`](https://github.com/proplaner/agentnexus-original/issues).** That repository
-remains canonical until an evidenced ownership cutover, and it is the single tracker for the whole
-portfolio — source lives in seven repositories, work is traced through one.
+**Issues for the portfolio belong in
+[`agntnexus/agentnexus`](https://github.com/agntnexus/agentnexus/issues).** The umbrella is the
+tracker: work crossing a repository boundary — a contract, a release, a shared policy, a platform
+gate — is traced there.
+
+This repository keeps Issues for work that is genuinely internal to it. When such work changes a
+cross-cutting fact, the durable record in the umbrella changes in the same slice.
 
 **`ppoinha/AIExperiment` is forbidden for all new issue activity.** It is not a fallback, a mirror,
 a canonical tracker or a destination for new work, whatever an old link elsewhere suggests. Do not
 create, update, comment on, reopen, close or transfer issues there.
 
-Do not open an issue tracker here. This file exists partly to say so.
+**`proplaner/agentnexus-original` is historical.** It is private, unchanged, and not the tracker.
+Its documentation is archived in the umbrella at `docs/history/original/`, marked non-normative. An
+older instruction found there that names it as canonical is superseded by this file.
 
 ## Work is issue-led, and test-first by default
 
@@ -31,15 +37,18 @@ audit, a mechanical move with byte-identity proof, generated output. An exceptio
 to skip tests because a test is inconvenient, and the issue must say which exception applies and
 why.
 
-The canonical rules, which this file points at rather than restates:
+The portfolio rules, which this file points at rather than restates:
 
-- [`AGENTS.md`](https://github.com/proplaner/agentnexus-original/blob/main/AGENTS.md)
-- [`docs/ai/ISSUE_LED_DEVELOPMENT.md`](https://github.com/proplaner/agentnexus-original/blob/main/docs/ai/ISSUE_LED_DEVELOPMENT.md)
-- [`docs/ai/GITHUB_ISSUE_TRACEABILITY.md`](https://github.com/proplaner/agentnexus-original/blob/main/docs/ai/GITHUB_ISSUE_TRACEABILITY.md)
-- [`docs/ai/CI_RUNNER_POLICY.md`](https://github.com/proplaner/agentnexus-original/blob/main/docs/ai/CI_RUNNER_POLICY.md)
+- [`AGENTS.md`](https://github.com/agntnexus/agentnexus/blob/main/AGENTS.md)
+- [`docs/ai/ISSUE_LED_DEVELOPMENT.md`](https://github.com/agntnexus/agentnexus/blob/main/docs/ai/ISSUE_LED_DEVELOPMENT.md)
+- [`docs/ai/GITHUB_ISSUE_TRACEABILITY.md`](https://github.com/agntnexus/agentnexus/blob/main/docs/ai/GITHUB_ISSUE_TRACEABILITY.md)
+- [`docs/ai/TESTING.md`](https://github.com/agntnexus/agentnexus/blob/main/docs/ai/TESTING.md)
+- [`docs/ai/CI_RUNNER_POLICY.md`](https://github.com/agntnexus/agentnexus/blob/main/docs/ai/CI_RUNNER_POLICY.md)
 
-Where this file and a canonical document disagree, the canonical document wins and this file is the
-defect.
+Where this file and a portfolio document disagree, the portfolio document wins and this file is the
+defect — **except** for the boundaries below that are this repository's own. Those are stated here
+because they are stricter than the portfolio default, and a stricter local boundary is never
+overridden by a more permissive shared one.
 
 ## Where CI may run
 
