@@ -49,6 +49,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Final
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
@@ -154,6 +155,202 @@ def instruction_failures() -> list[str]:
         )
     if "stricter local boundary is never overridden" not in flattened:
         found.append("they no longer say a stricter local boundary outranks the portfolio default")
+
+    return found
+
+
+#: The component documentation index, and the records #16 assigned to this repository. Written out
+#: rather than derived from the index: deriving it would make the index agree with itself, and the
+#: point of the list is that something outside the document says what the document must account for.
+DOCUMENTATION = ROOT / "docs"
+DOCUMENTATION_INDEX = DOCUMENTATION / "README.md"
+WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+
+ASSIGNED_RECORDS: Final = {
+    "docs/public-connector/INSTALL.md": "already here",
+    "docs/public-connector/VERIFY.md": "already here",
+    "docs/public-connector/BEHAVIOUR.md": "already here",
+    "docs/public-connector/TROUBLESHOOTING.md": "already here",
+    "docs/public-connector/SECURITY.md": "already here",
+    "docs/integration/CONNECTOR.md": "adopted",
+    "docs/integration/PROFILE_MIGRATION.md": "adopted",
+    "docs/integration/PROFILE_MIGRATION_ACCEPTANCE.md": "adopted",
+    "docs/integration/CONNECTOR_RELEASE_0_5_0_NOTES.md": "adopted",
+    "docs/releases/connector-0.5.0.md": "adopted",
+    "docs/releases/connector-0.6.0.md": "adopted",
+    "docs/releases/connector-0.6.1.md": "adopted",
+    "docs/releases/connector-release-state.json": "adopted",
+    "docs/ai/CONNECTOR_AUTOMATIC_UPDATE_SAFETY_PLAN.md": "adopted",
+    "docs/ai/CONNECTOR_RELEASE_READINESS.md": "adopted",
+    "docs/ai/PROFILE_MIGRATION_SLICE.md": "adopted",
+    "docs/ai/PUBLIC_CONNECTOR_RELEASE_REPOSITORY_PLAN.md": "adopted",
+    "docs/ai/REVIEW_C3B_REQUEST_UPDATE_SAFETY.md": "adopted",
+    "docs/ai/RUNTIME_MODEL_DECLARATION_PLAN.md": "adopted",
+    "docs/ai/SOUL_APPLICATION_HANDOFF.md": "adopted",
+}
+
+#: Every page an "adopted" row has to have produced, relative to `docs/`.
+ADOPTED_PAGES: Final = tuple(
+    record[len("docs/") :]
+    for record, disposition in ASSIGNED_RECORDS.items()
+    if disposition == "adopted"
+)
+
+#: A line naming the monolith has to say which kind of claim it is making. It is no longer the issue
+#: tracker or the documentation authority, but it *is* still the upstream source of the mirrored
+#: code. Erasing those sentences would make the documentation wrong to make a check pass.
+DOCUMENT_MARKERS: Final = (
+    "historical",
+    "archived",
+    "superseded",
+    "history",
+    "evidence",
+    "upstream",
+    "mirror",
+    "source",
+    "generated",
+    "canonical",
+)
+CITATION: Final = re.compile(r"/(issues|pull|actions/runs)/\d+")
+DIRECTING: Final = re.compile(
+    r"\b(open|create|file|report|track|raise)\b[^.]{0,60}\bissue", re.IGNORECASE
+)
+
+#: Things that are never legitimate in a document this repository publishes. Deliberately narrow:
+#: a rule wide enough to tell an example persona's home directory from a real operator's would
+#: need the real account name, and writing that name into a public repository is the disclosure
+#: it is meant to prevent. Operator paths are a review step, recorded in `docs/README.md`.
+NEVER_PUBLIC: Final = {
+    "a tailnet hostname": re.compile(r"[a-z0-9-]+\.ts\.net", re.IGNORECASE),
+    "a private network address": re.compile(
+        r"\b(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b"
+    ),
+    "private key material": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+}
+
+
+def documentation_pages() -> list[Path]:
+    """Every markdown page under `docs/`, in a stable order."""
+    return sorted(DOCUMENTATION.rglob("*.md"))
+
+
+def prose(page: Path) -> list[tuple[int, str]]:
+    """Return the lines of a page that make a claim, which is not all of them.
+
+    Fenced blocks are skipped. A diagram or a shell command naming the monolith is not asserting who
+    the authority is, and a rule that treated it as prose would push the documentation towards
+    writing worse diagrams rather than truer sentences.
+    """
+    kept: list[tuple[int, str]] = []
+    fenced = False
+    for number, line in enumerate(page.read_text(encoding="utf-8").splitlines(), 1):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if not fenced:
+            kept.append((number, line))
+    return kept
+
+
+def declared_expression() -> str | None:
+    """Pull the declared-file expression out of the workflow that enforces it.
+
+    Found by the one page the rule has always named rather than by a variable, because the
+    expression is piped straight into `grep` here. Restating it would create a second truth, and the
+    first thing it would fail to notice is the workflow changing.
+    """
+    if not WORKFLOW.is_file():
+        return None
+    for line in WORKFLOW.read_text(encoding="utf-8").splitlines():
+        if "MIRROR" not in line or line.count("'") < 2 or "grep" not in line:
+            continue
+        return line[line.index("'") + 1 : line.rindex("'")] or None
+    return None
+
+
+def documentation_failures() -> list[str]:
+    """Return every way the documentation fails to account for what was assigned to it.
+
+    Fail-closed. A missing or empty index is a refusal, not a silent pass: an adoption can look
+    complete while being empty, and a guard that stopped reading would report success for ever.
+    """
+    if not DOCUMENTATION_INDEX.is_file():
+        return ["docs/README.md is missing; the documentation cannot be checked"]
+    index = DOCUMENTATION_INDEX.read_text(encoding="utf-8")
+    if not index.strip():
+        return ["docs/README.md is empty"]
+
+    pages = documentation_pages()
+    if not pages:
+        return ["docs/ holds no pages"]
+
+    found: list[str] = []
+
+    for record, disposition in ASSIGNED_RECORDS.items():
+        rows = [
+            line for line in index.splitlines() if line.startswith("|") and f"`{record}`" in line
+        ]
+        if len(rows) != 1:
+            found.append(f"{record}: {len(rows)} ledger rows, expected exactly one")
+        elif disposition not in rows[0]:
+            found.append(f"{record}: the ledger does not say {disposition!r}")
+
+    for relative in ADOPTED_PAGES:
+        page = DOCUMENTATION / relative
+        if not page.is_file():
+            found.append(f"{relative} is claimed adopted but absent")
+        elif page.stat().st_size == 0:
+            found.append(f"{relative} is empty")
+
+    for page in pages:
+        for match in re.finditer(r"\]\(([^)\s]+)\)", page.read_text(encoding="utf-8")):
+            target = match.group(1)
+            if target.startswith(("http", "#", "mailto:")):
+                continue
+            if not (page.parent / target.split("#")[0]).exists():
+                found.append(f"{page.name}: broken link to {target}")
+
+    for page in pages:
+        for number, line in prose(page):
+            lowered = line.lower()
+            unmarked = not any(marker in lowered for marker in DOCUMENT_MARKERS)
+            if "agentnexus-original" in line and not CITATION.search(line) and unmarked:
+                found.append(f"{page.name}:{number} reads as current authority")
+
+            names_retired = "agentnexus-original" in line or "ppoinha/AIExperiment" in line
+            unexcused = not any(
+                excuse in lowered for excuse in ("historical", "archived", "superseded", "citation")
+            )
+            if names_retired and DIRECTING.search(line) and unexcused:
+                found.append(f"{page.name}:{number} directs new issue activity to a dead tracker")
+
+    for path in sorted(DOCUMENTATION.rglob("*")):
+        if not path.is_file():
+            continue
+        body = path.read_text(encoding="utf-8", errors="replace")
+        for label, pattern in NEVER_PUBLIC.items():
+            if pattern.search(body):
+                found.append(f"{path.name} publishes {label}")
+
+    declared = declared_expression()
+    if declared is None:
+        found.append("the workflow no longer declares which documents belong to this repository")
+    else:
+        rule = re.compile(declared)
+        for relative in (*ADOPTED_PAGES, "README.md"):
+            if not rule.search(f"docs/{relative}"):
+                found.append(f"docs/{relative} would be refused as undeclared")
+        # The negative probe. Widening the declared set is only safe if it stayed a set: an
+        # enumeration that quietly became "anything under docs/" would satisfy every check above
+        # while admitting a document no migration record accounts for.
+        for stray in (
+            "docs/NOT_AN_ASSIGNED_RECORD.md",
+            "docs/notes/scratch.md",
+            "docs/ai/UNASSIGNED_PLAN.md",
+            "docs/releases/connector-9.9.9.md",
+        ):
+            if rule.search(stray):
+                found.append(f"the declared set admits {stray}, which nothing assigned")
 
     return found
 
@@ -265,12 +462,26 @@ def main() -> int:
         )
         for failure in policy_failures:
             print(f"  {failure}", file=sys.stderr)
-    if failures or policy_failures:
+    documentation = documentation_failures()
+    if not documentation:
+        print(
+            f"documentation: {len(ASSIGNED_RECORDS)} assigned records accounted for, "
+            f"{len(ADOPTED_PAGES)} adopted pages present"
+        )
+
+    if documentation:
+        print(
+            "\nREFUSED: the documentation does not account for what was assigned to it:",
+            file=sys.stderr,
+        )
+        for failure in documentation:
+            print(f"  {failure}", file=sys.stderr)
+    if failures or policy_failures or documentation:
         return 1
 
     print(
-        "\nThe release chain verifies from published data alone, and the instructions "
-        "name the current issue authority."
+        "\nThe release chain verifies from published data alone, the instructions name the "
+        "current issue authority, and the documentation accounts for every assigned record."
     )
     return 0
 

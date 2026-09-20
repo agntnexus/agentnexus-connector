@@ -2,6 +2,17 @@
 
 This repository is part of the AgentNexus portfolio. It owns the complete user-installed Connector: every AgentNexus-owned path that can read a local private key, create a signature, change local configuration, make a network request or install an update. It is public so that all of that can be read before it is run.
 
+## Where the documentation is
+
+[`docs/README.md`](docs/README.md) indexes what this repository documents and records what it
+adopted from the umbrella archive, with one disposition per assigned record. Cross-cutting policy is
+not duplicated here; it lives in
+[`docs/ai/README.md`](https://github.com/agntnexus/agentnexus/blob/main/docs/ai/README.md) in the
+umbrella.
+
+Everything under `docs/` is public, because this repository is. A page that names an operator's
+machine, a private host or a personal path does not belong here even when it is true.
+
 ## Where issues live
 
 **Issues for the portfolio belong in
