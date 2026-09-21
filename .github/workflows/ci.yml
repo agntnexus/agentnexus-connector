@@ -76,6 +76,14 @@ jobs:
       - name: Formatter
         run: ruff format --check .
 
+      # What this repository says about where work is tracked, checked rather than trusted. It
+      # rots silently: nothing breaks when the tracker named here goes stale, a contributor just
+      # opens an Issue in a repository nobody watches. Reads local files only -- no network, no
+      # credential, no other repository -- so it runs before anything is built
+      # (agntnexus/agentnexus#46).
+      - name: The governance this repository states about itself
+        run: python -m pytest ci/test_governance.py -q
+
       - name: Build the distribution
         run: python -m build
 

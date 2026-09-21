@@ -33,6 +33,13 @@ ignore = [
     "D213",  # conflicts with D212
 ]
 
+[lint.per-file-ignores]
+# The governance guard asserts, which is what a test does. `S101` exists to stop `assert` being
+# used as a runtime check in shipped code, and nothing under `ci/` is shipped: the wheel is built
+# from `src/agentnexus_sdk/**`. Scoped to test files rather than to the whole directory, so
+# `ci/verify_release.py` -- which does run as a program -- keeps the rule.
+"ci/test_*.py" = ["S101"]
+
 [lint.pydocstyle]
 convention = "pep257"
 

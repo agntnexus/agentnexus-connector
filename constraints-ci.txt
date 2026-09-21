@@ -29,3 +29,7 @@ types-PyYAML==6.0.12.20250915
 # Known advisories against the resolved dependency set. This is the check that fails without
 # anybody pushing, which is why the workflow also runs weekly.
 pip-audit==2.10.1
+
+# The governance guard under `ci/`. The same version `pyproject.toml` already pins for the `dev`
+# extra, so running the guard locally and running it in CI mean the same thing.
+pytest==9.1.1
