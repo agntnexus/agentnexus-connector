@@ -58,12 +58,13 @@ may ever be here** — see the last section of this page.
 
 ## What belongs to this repository
 
-Seven things that serve this repository rather than the people who install the Connector:
+Eight things that serve this repository rather than the people who install the Connector:
 
 | Path | Why it is local |
 | --- | --- |
 | `.github/**` | This repository's own CI: what a reader would otherwise have to run by hand before trusting what they are about to install. |
-| `ci/**` | The checks this repository runs on itself. `verify_release.py` checks the release chain on every run; `test_governance.py` checks that the instructions still name the right tracker; `test_termux_support.py` and `test_release_verification.py` check the platform decision behind the Termux fix and that the release chain still refuses what it must. They exist here rather than canonically because this repository is the one that now owns the release, and therefore owns the promise that it is checkable. |
+| `ci/**` | The checks this repository runs on itself. `verify_release.py` checks the release chain on every run; `test_governance.py` checks that the instructions still name the right tracker; `test_termux_support.py` and `test_release_verification.py` check the platform decision behind the Termux fix and that the release chain still refuses what it must; `test_build_release.py` checks that the release builder refuses every release it must not produce. They exist here rather than canonically because this repository is the one that now owns the release, and therefore owns the promise that it is checkable. |
+| `scripts/build_release.py` | The release builder, and the only file here that ever holds a private signing key: in memory, passed as a path from outside every repository, never written or printed. `build` signs the checked-out commit's release and is run by an operator by hand; `reproduce` rebuilds the committed release from its recorded source commit with no key and is run by CI on every change. Local because this repository owns the release. |
 | `constraints-ci.txt` | Pins the toolchain *this* CI resolves. The package's own dependency ranges stay deliberately loose for consumers. |
 | `ruff.toml` | The lint and format settings that apply to this source. The canonical file is monorepo-wide and most of it is exceptions for code that is not here; this reproduces only the part that governs `src/agentnexus_sdk/**`. If the two disagree, the canonical one is right. |
 | `.gitignore` | Keeps build output out of a public repository. A committed wheel here would look like something to install. |
