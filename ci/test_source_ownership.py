@@ -22,7 +22,16 @@ What is checked:
   source plus the two stamped coordinates, the manifest still pins size and SHA-256, and no private
   signing key may ever be here. Those rules are about `installers/**` and `connector-release/**`,
   they are unaffected by who owns the source, and a correction that dropped them would have traded
-  one defect for a worse one.
+  one defect for a worse one;
+* `SECURITY.md` tells a reader the same thing `docs/MIRROR.md` does -- that this is where the
+  Connector is developed -- and keeps every security rule it states while saying so.
+
+`SECURITY.md` was not in the first version of this guard, and that is how the retired claim
+survived there after `docs/MIRROR.md` was corrected (agntnexus/agentnexus#68). It made the claim in
+words none of the phrases below matched, on the page a vulnerability reporter reads first: that the
+repository was a transparency mirror of a private development repository, and that a change made
+here would be overwritten. A guard over the wrong list of documents reports success for exactly the
+document it should have read.
 
 The cases at the end feed the retired sentences back in and require a refusal, so this guard is
 proven to fail rather than assumed to. It reads local files only: no network, no credential, no
@@ -56,6 +65,7 @@ HISTORY_MARKERS = ("historical", "history", "archived", "archive", "superseded",
 #: were written, and rewriting them would be editing the past to make the present tidy.
 RULE_CARRYING_DOCUMENTS = (
     "docs/MIRROR.md",
+    "SECURITY.md",
     "AGENTS.md",
     ".github/workflows/ci.yml",
     "ci/verify_release.py",
@@ -76,6 +86,15 @@ RETIRED_CLAIMS: tuple[tuple[str, str], ...] = (
     ("mirrored from", "says this code is mirrored from somewhere else"),
     ("upstream source", "names an upstream source for this code"),
     ("the next time the source is published", "expects this code to be overwritten from elsewhere"),
+    # The shapes `SECURITY.md` used for the same claim (agntnexus/agentnexus#68). Still phrases, not
+    # words: "mirror" names a page here, and "private" is how a vulnerability report starts.
+    ("transparency mirror", "calls this repository a mirror of source kept elsewhere"),
+    ("mirrored one way", "says this code arrives one way from somewhere else"),
+    ("overwritten rather than adopted", "says a change made here would be overwritten"),
+    (
+        "made in the private development repository",
+        "sends changes to this code to a private repository",
+    ),
 )
 
 #: What `docs/MIRROR.md` has to say, now that it is no longer a page about being a mirror.
@@ -94,6 +113,52 @@ REQUIRED_RELEASE_INTEGRITY = (
 )
 
 
+SECURITY = REPOSITORY_ROOT / "SECURITY.md"
+
+#: The ownership statement `SECURITY.md` has to make, and the one it has to share with
+#: `docs/MIRROR.md`. Checked in both, whitespace-normalised, because agreement between the two pages
+#: is the property that was missing: each was consistent on its own, and together they were not.
+SHARED_OWNERSHIP = "where the Connector is developed"
+
+#: What else `SECURITY.md` must say about ownership: where the list of owned paths lives, so the
+#: page points at it rather than growing a second copy of it.
+REQUIRED_SECURITY_OWNERSHIP = (SHARED_OWNERSHIP, "`docs/MIRROR.md`")
+
+#: The security rules `SECURITY.md` states. Correcting who owns the source is no reason to lose any
+#: of them, and the easiest way to lose one is to rewrite the paragraph it sits in -- which is what
+#: this correction does. "Not an installation source" sits in that very paragraph.
+REQUIRED_SECURITY_POLICY = (
+    "not an installation source",
+    "Report privately first.",
+    "Send nothing sensitive in a report.",
+    "GitHub private vulnerability reporting",
+    "Only the **current released version** is supported.",
+    "Already-published signed artifact bytes are never replaced under an existing version",
+    "`https://agntnexus.com` is the only origin a Connector is installed or updated from.",
+    "accepts **no** patches to the platform",
+)
+
+
+def normalised(text: str) -> str:
+    """Collapse whitespace, so a rule survives the page being rewrapped at a hundred columns."""
+    return " ".join(text.split())
+
+
+def security_problems(text: str) -> list[str]:
+    """Return every ownership statement or security rule `SECURITY.md` has stopped making.
+
+    Fail-closed, like the others: an empty page states no policy, and that is a refusal.
+    """
+    if not text.strip():
+        return ["the page is empty; the security policy cannot be checked"]
+    flat = normalised(text)
+    return [
+        f"it does not say: {required!r}"
+        for required in (*REQUIRED_SECURITY_OWNERSHIP, *REQUIRED_SECURITY_POLICY)
+        if required not in flat
+    ]
+
+
 def document(relative: str) -> str:
     """Read one rule-carrying document, the way CI reads it."""
     return (REPOSITORY_ROOT / relative).read_text(encoding="utf-8")
@@ -104,8 +169,12 @@ def retired_claims(text: str) -> list[str]:
 
     A pure function over the text, so the mutation cases below can hand it a deliberately restored
     sentence without writing anything to the repository.
+
+    Whitespace is collapsed first. The page wraps at a hundred columns, and a phrase that happens to
+    straddle a line break is still the same sentence: `SECURITY.md` broke "made in the private
+    development repository" across exactly that boundary (agntnexus/agentnexus#68).
     """
-    lowered = text.lower()
+    lowered = " ".join(text.split()).lower()
     return [complaint for phrase, complaint in RETIRED_CLAIMS if phrase in lowered]
 
 
@@ -169,6 +238,81 @@ def test_the_mirror_page_states_who_owns_this_source() -> None:
 def test_the_release_integrity_rules_survive_the_correction() -> None:
     """Ownership moved; the rules that keep a release checkable did not."""
     assert release_integrity_problems(MIRROR.read_text(encoding="utf-8")) == []
+
+
+def test_the_security_policy_states_who_owns_this_source_and_keeps_its_rules() -> None:
+    """The page a reporter reads first has to send a fix to the right place, and lose nothing."""
+    assert SECURITY.is_file(), "the security policy is missing"
+    assert security_problems(SECURITY.read_text(encoding="utf-8")) == []
+
+
+def test_the_security_policy_and_the_mirror_page_agree() -> None:
+    """Read both. Each page being right on its own is what let them disagree."""
+    for page in (SECURITY, MIRROR):
+        assert SHARED_OWNERSHIP in normalised(page.read_text(encoding="utf-8")), page.name
+
+
+#: The two passages `SECURITY.md` carried until agntnexus/agentnexus#68, verbatim, so that restoring
+#: either one is what the cases below detect.
+RETIRED_SECURITY_IDENTITY = """\
+It is a transparency mirror. It is not the platform, not an installation source, and not a place
+where the running service is developed. The source is mirrored one way out of a private
+development repository, so a change made here would be overwritten rather than adopted; see
+`docs/BEHAVIOUR.md` for what the software does and `docs/VERIFY.md` for how to check a release.
+"""
+
+RETIRED_SECURITY_SUPPORT = """\
+This repository accepts **no** patches to the platform, no feature requests for the service, and
+no requests for access. It is a mirror, and changes to the Connector are made in the private
+development repository and arrive here as a new reviewed release.
+"""
+
+
+def test_the_retired_security_identity_is_refused() -> None:
+    """The mutation this change exists for: the old paragraph, put back verbatim."""
+    problems = retired_claims(RETIRED_SECURITY_IDENTITY)
+
+    assert "calls this repository a mirror of source kept elsewhere" in problems
+    assert "says this code arrives one way from somewhere else" in problems
+    assert "says a change made here would be overwritten" in problems
+
+
+def test_the_retired_security_support_boundary_is_refused() -> None:
+    """The second passage made the same claim sixty lines later, in different words."""
+    assert retired_claims(RETIRED_SECURITY_SUPPORT) == [
+        "sends changes to this code to a private repository"
+    ]
+
+
+def test_restoring_a_retired_passage_into_the_real_page_is_refused() -> None:
+    """Not only the phrases in isolation: the real page with either passage put back must fail.
+
+    The guard reads `SECURITY.md` through `RULE_CARRYING_DOCUMENTS`; this proves the list and the
+    phrases catch it together, which is the pair that was missing.
+    """
+    assert "SECURITY.md" in RULE_CARRYING_DOCUMENTS
+    text = SECURITY.read_text(encoding="utf-8")
+    for retired in (RETIRED_SECURITY_IDENTITY, RETIRED_SECURITY_SUPPORT):
+        assert retired_claims(text + "\n" + retired), retired[:40]
+
+
+def test_losing_the_ownership_statement_from_the_security_policy_is_refused() -> None:
+    """Deleting the corrected sentence must fail as loudly as restoring the wrong one."""
+    text = normalised(SECURITY.read_text(encoding="utf-8"))
+    for required in REQUIRED_SECURITY_OWNERSHIP:
+        assert security_problems(text.replace(required, "")) == [f"it does not say: {required!r}"]
+
+
+@pytest.mark.parametrize("required", REQUIRED_SECURITY_POLICY)
+def test_losing_a_security_rule_is_refused(required: str) -> None:
+    """Rewriting the paragraph is exactly how a security rule gets lost. Each one is checked."""
+    text = normalised(SECURITY.read_text(encoding="utf-8"))
+    assert security_problems(text.replace(required, "")) == [f"it does not say: {required!r}"]
+
+
+def test_an_empty_security_policy_is_refused() -> None:
+    """Fail closed. A page that says nothing states no policy."""
+    assert security_problems("") == ["the page is empty; the security policy cannot be checked"]
 
 
 #: The claim as it actually stood before agntnexus/agentnexus#5, quoted so that restoring it is
