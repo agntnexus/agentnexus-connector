@@ -650,3 +650,41 @@ def test_the_builder_never_runs_in_ci() -> None:
     assert "build_release.py build" not in workflow
     assert "--signing-key" not in workflow
     assert "secrets." not in workflow
+
+
+def published_state_failures(state: dict[str, object], manifest: dict[str, object]) -> list[str]:
+    """Return every way the published state disagrees with the release this tree serves."""
+    failures: list[str] = []
+    served = str(manifest.get("connector_version"))
+    if state.get("published_version") != served:
+        failures.append(
+            f"published_version is {state.get('published_version')!r}, but the committed release "
+            f"tree -- which the origin serves -- is {served!r}"
+        )
+    leftovers = sorted(key for key in state if key.startswith("pending_"))
+    if leftovers and state.get("pending_version") in (None, served):
+        failures.append(f"nothing is pending any more, yet the state still carries {leftovers}")
+    return failures
+
+
+def test_the_published_state_names_the_release_the_origin_serves() -> None:
+    """`published_version` is what https://agntnexus.com serves, and nothing stale is left.
+
+    0.6.3 has been served since the observer promotion of agntnexus/agentnexus#5 on 2026-09-23, and
+    the committed release tree is that release. A state that still says 0.6.1, or still describes
+    0.6.3 as pending, would send the next release's operator after a release that already happened.
+    """
+    state = json.loads((REPOSITORY_ROOT / builder.STATE_FILE).read_text(encoding="utf-8"))
+    served = REPOSITORY_ROOT / "connector-release" / "connector" / "connector-release.json"
+    manifest = json.loads(served.read_bytes())
+    assert published_state_failures(state, manifest) == []
+    assert state["published_version"] == "0.6.3"
+
+
+def test_an_old_published_state_is_refused() -> None:
+    """The negative case: the state as it stood before the rollout is refused on both counts."""
+    manifest = {"connector_version": "0.6.3"}
+    old = {"published_version": "0.6.1", "pending_version": "0.6.3", "pending_reason": "x"}
+    failures = published_state_failures(old, manifest)
+    assert any("published_version is '0.6.1'" in failure for failure in failures), failures
+    assert any("pending" in failure for failure in failures), failures

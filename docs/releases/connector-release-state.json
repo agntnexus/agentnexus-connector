@@ -1,8 +1,6 @@
 {
   "_comment": "What the installation origin serves, and what is being prepared for it. published_version moves when https://agntnexus.com/connector/connector-release.json serves a new version -- not when a tag, a GitHub release or a merged release tree exists, because none of those is what an installation fetches. reproducible_releases is written by scripts/build_release.py: the commit each release was built from and the SOURCE_DATE_EPOCH it was built with, which is what `scripts/build_release.py reproduce` rebuilds from on every CI run.",
-  "published_version": "0.6.1",
-  "pending_version": "0.6.3",
-  "pending_reason": "0.6.3 is the Termux/Android patch of agntnexus/agentnexus#5, built and signed by scripts/build_release.py from this repository. The origin serves it only once the observer image that carries this release tree is promoted to production. 0.6.2 was published as a GitHub release in this repository and never served by the origin; 0.6.3 supersedes it, and its wheel is not added to connector-release/, whose addresses are the ones the origin has served.",
+  "published_version": "0.6.3",
   "reproducible_releases": {
     "0.6.3": {
       "source_commit": "b5016894f58dcee0d51a3f734347c340019b22bd",
