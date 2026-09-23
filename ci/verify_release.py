@@ -196,9 +196,12 @@ ADOPTED_PAGES: Final = tuple(
     if disposition == "adopted"
 )
 
-#: A line naming the monolith has to say which kind of claim it is making. It is no longer the issue
-#: tracker or the documentation authority, but it *is* still the upstream source of the mirrored
-#: code. Erasing those sentences would make the documentation wrong to make a check pass.
+#: A line naming the monolith has to say which kind of claim it is making. It is no longer the
+#: issue tracker, the documentation authority or a source of anything in this tree -- this
+#: repository owns `src/agentnexus_sdk/**` -- but dated records legitimately cite what it was.
+#: Erasing those sentences would make the documentation wrong to make a check pass, so the
+#: markers below keep admitting them. `ci/test_source_ownership.py` is what holds the active
+#: rules to the stricter line.
 DOCUMENT_MARKERS: Final = (
     "historical",
     "archived",

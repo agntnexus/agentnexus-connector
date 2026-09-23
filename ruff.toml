@@ -1,12 +1,9 @@
 # Lint and format settings for the published Connector source.
 #
-# Repository-local, and deliberately not a copy of the canonical repository's configuration: that
-# one is monorepo-wide and most of it is per-file exceptions for applications, migrations and
-# operator scripts that do not exist here. What is reproduced is exactly the part that applies to
-# `src/agentnexus_sdk/**`, so that "clean here" and "clean there" mean the same thing for this
-# source. None of the canonical per-file ignores touches this package.
-#
-# If the two ever disagree, the canonical repository is right and this file is the bug.
+# Repository-local, and authoritative: this repository owns `src/agentnexus_sdk/**`, so these are
+# the settings that source is held to. It began as the part of a monorepo-wide configuration that
+# applied to this package -- the rest of that file was per-file exceptions for applications,
+# migrations and operator scripts that do not exist here, and none of them touched this package.
 target-version = "py313"
 line-length = 100
 extend-exclude = [".venv", ".venv-tools", "dist", "build"]

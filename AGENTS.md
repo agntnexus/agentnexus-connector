@@ -33,7 +33,7 @@ older instruction found there that names it as canonical is superseded by this f
 
 ## Work is issue-led, and test-first by default
 
-Before a change begins, one issue in the canonical repository states the intended outcome, the
+Before a change begins, one Issue in the tracker named above states the intended outcome, the
 in-scope surfaces and explicit non-goals, observable acceptance criteria, the evidence that
 establishes each one, and the applicable security, operational and release boundaries.
 

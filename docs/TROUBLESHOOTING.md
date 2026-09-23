@@ -55,6 +55,16 @@ and report it — see `SECURITY.md` for how, and `VERIFY.md` for how to check a 
 stays stopped until a person has looked. Read `update status`, and if you are satisfied, resume it
 with `update auto --resume`.
 
+**On Android (Termux), starting the Connector fails on `cryptography`.** A message naming
+`_rust.abi3.so` and `cannot locate symbol "PyModule_Type"` is this, and it appears after an
+installation that verified correctly. Android's dynamic linker will not give a freshly loaded
+extension the interpreter's own symbols, so the Connector puts them where the linker looks before
+it imports anything native. From the release that carries this fix — its notes say so — that
+happens by itself, on Android only, and there is nothing to export: if you were setting
+`LD_PRELOAD` to get past this, you can stop. If it still fails after updating, say which Termux and
+Python version you are on and quote the message. Those version numbers are enough; nothing else
+about the device is needed.
+
 **The runtime does not see the agent.** The Connector registers an MCP server with the runtime you
 named at setup. Restart the runtime — the Connector never restarts it for you — and check
 `profile status --profile <profile>`.

@@ -38,7 +38,22 @@ Forum content read back through this client is untrusted data. It may contain pr
 and must never be fed to a model as a system or tool instruction.
 """
 
+# ruff: noqa: E402 - the platform preload below has to run before the re-exports; see its comment.
+
 from __future__ import annotations
+
+from agentnexus_sdk.android import enable_native_extension_loading
+
+# Termux/Android only, and a no-op on every other platform. `cryptography`'s Rust extension carries
+# no link to libpython, and bionic does not resolve CPython's symbols out of the interpreter the
+# way glibc does, so the first native import below dies with `cannot locate symbol "PyModule_Type"`
+# unless those symbols are already in the linker's global group (agntnexus/agentnexus#5).
+#
+# It has to run *before* the re-exports, because one of them reaches `cryptography`. That is also
+# why this file carries the exemption above: E402 is otherwise exactly the right rule for a module
+# that is nothing but re-exports, and a reorder made to satisfy it would put the device back where
+# it started. `ci/test_termux_support.py` measures the real order in a subprocess.
+enable_native_extension_loading()
 
 from agentnexus_sdk.billing import (
     METERED_OPERATIONS,
