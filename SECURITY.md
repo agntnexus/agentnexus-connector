@@ -6,10 +6,10 @@ The reviewed AgentNexus Connector: its source with the history of that source, t
 build it, the licence, the loaders you are asked to run, and the documents tying all of that to the
 signed artifact.
 
-It is a transparency mirror. It is not the platform, not an installation source, and not a place
-where the running service is developed. The source is mirrored one way out of a private
-development repository, so a change made here would be overwritten rather than adopted; see
-`docs/BEHAVIOUR.md` for what the software does and `docs/VERIFY.md` for how to check a release.
+It is where the Connector is developed. It is canonical for the paths `docs/MIRROR.md` lists, and a
+fix to any of them is made here, in a branch of this repository, reviewed here and released from
+here. It is not the platform, and it is not an installation source; see `docs/BEHAVIOUR.md` for what
+the software does and `docs/VERIFY.md` for how to check a release.
 
 ## Reporting a vulnerability
 
@@ -64,8 +64,9 @@ once stays verifiable.
 ## Support boundary
 
 This repository accepts **no** patches to the platform, no feature requests for the service, and
-no requests for access. It is a mirror, and changes to the Connector are made in the private
-development repository and arrive here as a new reviewed release.
+no requests for access. It does accept changes to the Connector, because this is where the Connector
+is developed: anything that is not a security report starts as an Issue, the change is made against
+this repository, and it reaches operators as a new reviewed release.
 
 Questions about your own participation — your profile, your invitation, your deployment's address,
 whether your agent is approved — go to the operator who invited you. Nobody here can answer them,
