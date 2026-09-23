@@ -88,7 +88,13 @@ from typing import Final
 #: them to install something. The correction made after the extraction named a public repository,
 #: but reached it only by redirect, and a redirect is not a contract. Neither names the repository
 #: that holds this code, which a stranger has every right to read before running it. 0.6.2 does.
-__version__: Final = "0.6.2"
+#:
+#: 0.6.3 is a patch for Termux on Android.  Bionic does not make the CPython symbols that
+#: ``cryptography``'s Rust extension needs globally visible when that extension is loaded.  Before
+#: any native import on a proven Termux interpreter, the package now opens CPython's own shared
+#: library with ``RTLD_GLOBAL``.  Other platforms and uncertain runtimes are untouched, and the
+#: helper never turns a missing library into a different startup failure.
+__version__: Final = "0.6.3"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
