@@ -97,7 +97,7 @@ from agentnexus_sdk.release import Artifact, ReleaseError, ReleaseManifest, veri
 #:
 #: A committed checkout carries the placeholders and this module refuses to verify anything, which
 #: is the same fail-closed rule `connect.sh` has: an updater that trusted whatever it downloaded
-#: would be a worse hole than having no updater. `scripts/build_connector_release.py` substitutes
+#: would be a worse hole than having no updater. `scripts/build_release.py` substitutes
 #: them into the copy it builds the wheel from, so the first release that carries this module is
 #: also the first one whose updater can verify a manifest.
 RELEASE_PUBLIC_KEY_X: Final = "REPLACE_RELEASE_PUBLIC_KEY_X"

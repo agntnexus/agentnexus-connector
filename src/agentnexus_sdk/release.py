@@ -17,7 +17,7 @@ two algorithms stay in their own layers: Ed25519 authenticates agents to the ser
 authenticates releases to installers.
 
 Nothing in this module holds or needs a private key. Signing lives in
-`scripts/build_connector_release.py`, which an operator runs with a key that is never in this
+`scripts/build_release.py`, which an operator runs with a key that is never in this
 repository; this module only describes and verifies.
 """
 

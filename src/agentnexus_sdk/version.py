@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Final
 
-#: The one authoritative connector version. `scripts/build_connector_release.py` defaults to it,
+#: The one authoritative connector version. `scripts/build_release.py` builds exactly this,
 #: so the manifest, the `connector/<version>/` directory, the wheel filename, and the artifact URL
 #: all follow from this line.
 #:
