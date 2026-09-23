@@ -810,11 +810,24 @@ def build(
 
 
 def reproduce(repository: Path) -> list[str]:
-    """Rebuild the committed release from its recorded source, with no key, and check it."""
-    tree = repository / RELEASE_DIRECTORY
+    """Rebuild the committed release from its recorded source, with no key, and check it.
+
+    The release checked is the one HEAD commits, exported the same way its source is, rather than
+    the checkout: a Windows checkout converts line endings, and a tree that differs from its own
+    commit only on disk is not a different release.
+    """
+    with tempfile.TemporaryDirectory(prefix="agentnexus-connector-reproduce-") as scratch_text:
+        scratch = Path(scratch_text)
+        export_commit(repository, "HEAD", scratch / "committed")
+        return reproduce_committed(repository, committed=scratch / "committed", scratch=scratch)
+
+
+def reproduce_committed(repository: Path, *, committed: Path, scratch: Path) -> list[str]:
+    """Reproduce the release in `committed`, an export of HEAD, using `scratch` for the build."""
+    tree = committed / RELEASE_DIRECTORY
     document = json.loads((tree / "connector" / MANIFEST_NAME).read_bytes())
     version = str(document.get("connector_version"))
-    state = json.loads((repository / STATE_FILE).read_text(encoding="utf-8"))
+    state = json.loads((committed / STATE_FILE).read_text(encoding="utf-8"))
     record = state.get("reproducible_releases", {}).get(version)
     if record is None:
         if version in LEGACY_RELEASES:
@@ -843,39 +856,34 @@ def reproduce(repository: Path) -> list[str]:
     if coordinates is None:
         return [*failures, "the released loaders carry no public key"]
 
-    with tempfile.TemporaryDirectory(prefix="agentnexus-connector-reproduce-") as scratch_text:
-        scratch = Path(scratch_text)
-        source = scratch / "source"
-        export_commit(repository, commit, source)
-        try:
-            read_version(source, expected=version)
-        except ReleaseBuildError as error:
-            failures.append(str(error))
-        updater = source / UPDATER
-        updater.write_bytes(
-            stamp(updater.read_text(encoding="utf-8"), coordinates, name=str(UPDATER)).encode()
+    source = scratch / "source"
+    export_commit(repository, commit, source)
+    try:
+        read_version(source, expected=version)
+    except ReleaseBuildError as error:
+        failures.append(str(error))
+    updater = source / UPDATER
+    updater.write_bytes(
+        stamp(updater.read_text(encoding="utf-8"), coordinates, name=str(UPDATER)).encode()
+    )
+    rebuilt = build_wheel(source, epoch=epoch, scratch=scratch)
+    published = (tree / "connector" / version / wheel_name(version)).read_bytes()
+    if rebuilt != published:
+        failures.append(
+            f"the committed {wheel_name(version)} is not what {commit[:12]} builds: "
+            f"{hashlib.sha256(published).hexdigest()} != {hashlib.sha256(rebuilt).hexdigest()}"
         )
-        rebuilt = build_wheel(source, epoch=epoch, scratch=scratch)
-        committed = (tree / "connector" / version / wheel_name(version)).read_bytes()
-        if rebuilt != committed:
-            failures.append(
-                f"the committed {wheel_name(version)} is not what {commit[:12]} builds: "
-                f"{hashlib.sha256(committed).hexdigest()} != {hashlib.sha256(rebuilt).hexdigest()}"
-            )
-        failures += check_release_tree(
-            tree,
-            previous=source / RELEASE_DIRECTORY,
-            installers=source / INSTALLERS_DIRECTORY,
-            version=version,
-            markers=[],
-        )
-        if not failures:
-            print(
-                f"reproduce: connector {version} rebuilt from {commit} "
-                f"with {EPOCH_VARIABLE}={epoch}"
-            )
-            print(f"reproduce: byte-identical, sha256 {hashlib.sha256(rebuilt).hexdigest()}")
-            print("reproduce: the tree is the previous release plus this one, signed by its key")
+    failures += check_release_tree(
+        tree,
+        previous=source / RELEASE_DIRECTORY,
+        installers=source / INSTALLERS_DIRECTORY,
+        version=version,
+        markers=[],
+    )
+    if not failures:
+        print(f"reproduce: connector {version} rebuilt from {commit} with {EPOCH_VARIABLE}={epoch}")
+        print(f"reproduce: byte-identical, sha256 {hashlib.sha256(rebuilt).hexdigest()}")
+        print("reproduce: the tree is the previous release plus this one, signed by its key")
     return failures
 
 

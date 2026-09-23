@@ -279,7 +279,16 @@ def test_normalising_a_wheel_removes_the_line_endings_windows_wrote(tmp_path: Pa
 def test_refuses_a_dirty_tree(tmp_path: Path) -> None:
     """Refuse a tree with an untracked file; it is not its commit."""
     clone = tmp_path / "clone"
-    git(tmp_path, "clone", "--quiet", "--no-hardlinks", str(REPOSITORY_ROOT), str(clone))
+    git(
+        tmp_path,
+        "clone",
+        "--quiet",
+        "--no-hardlinks",
+        "--config",
+        "core.autocrlf=false",
+        str(REPOSITORY_ROOT),
+        str(clone),
+    )
     (clone / "untracked.txt").write_text("not committed\n", encoding="utf-8")
     with pytest.raises(builder.ReleaseBuildError, match="uncommitted or untracked"):
         builder.require_clean_tree(clone)
@@ -322,7 +331,16 @@ def released(tmp_path_factory: pytest.TempPathFactory) -> dict[str, object]:
     root = tmp_path_factory.mktemp("release")
     key_path, key = write_key(root / "custody")
     clone = root / "clone"
-    git(root, "clone", "--quiet", "--no-hardlinks", str(REPOSITORY_ROOT), str(clone))
+    git(
+        root,
+        "clone",
+        "--quiet",
+        "--no-hardlinks",
+        "--config",
+        "core.autocrlf=false",
+        str(REPOSITORY_ROOT),
+        str(clone),
+    )
     git(clone, "config", "user.email", "test@example.invalid")
     git(clone, "config", "user.name", "Release builder test")
     git(clone, "config", "core.autocrlf", "false")
@@ -337,10 +355,26 @@ def released(tmp_path_factory: pytest.TempPathFactory) -> dict[str, object]:
     (release / "connector" / "connector-release.json.sig").write_text(
         builder.sign(key, manifest).hex(), encoding="ascii"
     )
+    # A version nothing has published, so the fixture keeps working after every real release: the
+    # builder refuses to rebuild a version the tree already holds, and it is right to.
+    version = "9.9.9"
+    published = builder.read_version(clone)
+    for relative, before, after in (
+        ("pyproject.toml", f'version = "{published}"', f'version = "{version}"'),
+        (
+            "src/agentnexus_sdk/version.py",
+            f'__version__: Final = "{published}"',
+            f'__version__: Final = "{version}"',
+        ),
+    ):
+        path = clone / relative
+        text = path.read_text(encoding="utf-8")
+        assert text.count(before) == 1, f"{relative} no longer declares {published} as expected"
+        path.write_text(text.replace(before, after), encoding="utf-8", newline="")
     git(clone, "add", "-A")
     git(clone, "commit", "--quiet", "-m", "test: the previous release, under a throwaway key")
     source_commit = git(clone, "rev-parse", "HEAD")
-    version = builder.read_version(clone)
+    assert builder.read_version(clone) == version
 
     status = builder.main(
         [
@@ -439,6 +473,25 @@ def test_the_committed_release_reproduces_without_a_private_key(
     """Rebuild the committed release byte for byte from its source with no key at all."""
     clone = committed(released)
     assert builder.main(["reproduce", "--repository", str(clone)]) == 0
+
+
+def test_reproduction_reads_the_commit_not_the_checkout(released: dict[str, object]) -> None:
+    """Reproduce what is committed, whatever line endings the checkout converted it to.
+
+    A Windows checkout with `core.autocrlf=true` holds `.gitkeep` as CRLF although the commit holds
+    LF. The release is the commit, so that difference must not be read as a changed file.
+    """
+    clone = committed(released)
+    git(clone, "config", "core.autocrlf", "true")
+    try:
+        git(clone, "rm", "--quiet", "--cached", "-r", ".")
+        git(clone, "reset", "--quiet", "--hard")
+        assert (clone / "connector-release" / ".gitkeep").read_bytes() == b"\r\n"
+        assert builder.main(["reproduce", "--repository", str(clone)]) == 0
+    finally:
+        git(clone, "config", "core.autocrlf", "false")
+        git(clone, "rm", "--quiet", "--cached", "-r", ".")
+        git(clone, "reset", "--quiet", "--hard")
 
 
 def test_the_committed_release_passes_the_published_chain_check(
@@ -556,7 +609,23 @@ def test_reproduction_refuses_a_wheel_that_is_not_the_source(
 def test_reproduction_refuses_a_version_with_no_recorded_source(tmp_path: Path) -> None:
     """Refuse to reproduce a post-legacy version with no recorded source commit."""
     clone = tmp_path / "clone"
-    git(tmp_path, "clone", "--quiet", "--no-hardlinks", str(REPOSITORY_ROOT), str(clone))
+    git(
+        tmp_path,
+        "clone",
+        "--quiet",
+        "--no-hardlinks",
+        "--config",
+        "core.autocrlf=false",
+        str(REPOSITORY_ROOT),
+        str(clone),
+    )
+    git(clone, "config", "user.email", "test@example.invalid")
+    git(clone, "config", "user.name", "Release builder test")
+
+    def commit(message: str) -> None:
+        """Commit the edit: `reproduce` reads what HEAD holds, not the checkout."""
+        git(clone, "commit", "--quiet", "-am", message)
+
     state_path = clone / builder.STATE_FILE
     state = json.loads(state_path.read_text(encoding="utf-8"))
     manifest = json.loads(
@@ -565,11 +634,13 @@ def test_reproduction_refuses_a_version_with_no_recorded_source(tmp_path: Path) 
     version = manifest["connector_version"]
     state.get("reproducible_releases", {}).pop(version, None)
     state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    commit("test: forget where the current release came from")
     if version in builder.LEGACY_RELEASES:
         assert builder.main(["reproduce", "--repository", str(clone)]) == 0
         manifest["connector_version"] = "9.9.9"
         path = clone / "connector-release" / "connector" / "connector-release.json"
         path.write_bytes(builder.canonical_bytes(manifest))
+        commit("test: a version after the legacy ones")
     assert builder.main(["reproduce", "--repository", str(clone)]) == 1
 
 
