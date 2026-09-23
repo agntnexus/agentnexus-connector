@@ -24,9 +24,9 @@
 # So this proves the source builds, installs, imports, type-checks and is clean. It does not prove
 # the software behaves correctly — a different claim, which is not made here.
 #
-# It also does not compare these files against the canonical repository they are mirrored from.
-# That comparison has to read a private repository, which would need a cross-repository credential;
-# none exists and none is created. See `docs/MIRROR.md` for what is frozen here and why.
+# There is no second copy of this source elsewhere to compare it against: this repository owns
+# `src/agentnexus_sdk/**`. Nothing here reads another repository, and no cross-repository
+# credential exists or is created. See `docs/MIRROR.md` for what this repository publishes.
 name: CI
 
 on:
@@ -84,6 +84,15 @@ jobs:
       - name: The governance this repository states about itself
         run: python -m pytest ci/test_governance.py -q
 
+      - name: What this repository owns, and where a fix to it belongs
+        # The same kind of rot as the tracker above, one layer down: these documents used to hand
+        # `src/agentnexus_sdk/**` to a private repository nobody may change any more, so a reader
+        # who believed them would take a fix somewhere it could not be made.
+        # Ownership was settled by owner decision under agntnexus/agentnexus#5; this refuses the
+        # sentence coming back, and refuses losing the release-integrity rules while correcting it.
+        # Local files only, so it runs before anything is built.
+        run: python -m pytest ci/test_source_ownership.py -q
+
       - name: Build the distribution
         run: python -m build
 
@@ -104,6 +113,19 @@ jobs:
           print(f"{len(names)} modules imported from the built wheel")
           PY
 
+      - name: Termux/Android support, and a release chain that still refuses
+        # Run against the wheel installed by the step above rather than against the source tree,
+        # because an operator installs a wheel and the platform decision these cases check is made
+        # at import time inside it.
+        #
+        # The first file covers the platform work itself: a Termux device is recognised from what
+        # the interpreter and the device are, no environment variable can claim a platform, every
+        # other platform is left untouched, and the preload runs before the first native import.
+        # The second is the other half of agntnexus/agentnexus#5 -- the fix must not have cost the
+        # release chain anything, so the signature, the manifest, the artifact, the key and the
+        # origin are each mutated in memory and a refusal is required for every one.
+        run: python -m pytest ci/test_termux_support.py ci/test_release_verification.py -q
+
       - name: The published release verifies from published data alone
         # This repository now owns what an installation downloads, so it owns the promise that the
         # download is checkable -- and a promise nobody checks is not one. The public P-256
@@ -123,9 +145,9 @@ jobs:
         run: mypy src/agentnexus_sdk
 
       - name: Static security analysis
-        # Bandit's rules, run through ruff as `S`, which is how the canonical repository enforces
-        # them. Named as its own step rather than left implicit inside `ruff check .`, because a
-        # security gate a reader cannot see is not much of one.
+        # Bandit's rules, run through ruff as `S`, which is how this source enforces them. Named
+        # as its own step rather than left implicit inside `ruff check .`, because a security
+        # gate a reader cannot see is not much of one.
         #
         # Deliberately not standalone bandit as well. This source carries reviewed suppressions —
         # `# noqa: S104` on a set of loopback origins recognised as *data*, `# noqa: S603` on a
@@ -171,8 +193,8 @@ jobs:
           echo "No key armour, token, tailnet host or invitation value in the tree."
 
       - name: Every tracked file is declared
-        # `docs/MIRROR.md` says this repository holds two kinds of file: the mirrored ones, which
-        # are frozen here and changed upstream, and a short declared list that belongs to this
+        # `docs/MIRROR.md` says this repository holds two kinds of file: the published ones, which
+        # an operator installs or reads, and a short declared list that only serves this
         # repository. Anything else is a third kind nobody decided on, and the cheapest moment to
         # notice one is before it is merged.
         run: |

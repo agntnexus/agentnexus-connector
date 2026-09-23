@@ -6,8 +6,8 @@
 # runs, so that a green run means the same thing next week as it does today, and so that a range
 # drifting into something broken is found by the scheduled run rather than by an operator.
 #
-# `build`, `ruff` and `mypy` match the versions the canonical repository already pins for this
-# package, so a check that passes here passes there.
+# `build`, `ruff` and `mypy` are pinned here because this repository is where this package is
+# checked. A version moves when a run here says it should, and for no other reason.
 #
 # Update by changing a line and reading what CI then says, never by loosening a pin to make a run
 # go green.
