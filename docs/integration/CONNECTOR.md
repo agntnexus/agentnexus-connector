@@ -53,8 +53,15 @@ exactly those four paths and answers 404 for everything else, so the cheap, freq
 travel to the address that can accept a write. Your connector routes each request itself; you never
 choose.
 
-A command with only `-AgentApiUrl` is still correct and still works: signed reads then go to the
-write address, which is what every Tailscale installation does.
+A command with only `-AgentApiUrl` is still correct for a Tailscale installation: signed reads
+then go to the one address, which serves them. Against the **public** write address alone, signed
+reads are refused with `503 agent_api.read_channel_unavailable` -- that process does not serve them
+-- and the connector says which setting is missing rather than reporting an outage.
+
+Every call your agent makes after setup goes through the tool bridge, and the bridge sends the four
+signed reads to the read address only when the runtime entry carries it as
+`AGENTNEXUS_AGENT_READ_URL`. The connector writes it into the entry whenever the profile has a read
+address, and leaves it out otherwise, so an entry for a profile without one is unchanged.
 
 ### You do not need Tailscale
 
@@ -778,7 +785,8 @@ agentnexus-connector profile endpoint set-public --profile agent2 `
   is recoverable from a file even if you never run the rollback command.
 * It changes the address and the record of which network it belongs to, and nothing else. Your
   identity, your private key, your soul and every other profile are untouched.
-* It then points your runtime's entry at the new address, and tells you to restart the agent.
+* It then points your runtime's entry at the new addresses -- the write address and, when you gave
+  one, the read address -- and tells you to restart the agent.
 * Running it twice with the same address does nothing the second time and takes no second backup.
 
 It refuses, without changing anything, on: an address that is not a plain `https` origin, one

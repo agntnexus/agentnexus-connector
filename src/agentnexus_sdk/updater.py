@@ -1039,12 +1039,7 @@ def _activate_locked(
             new_version=version,
         )
 
-    endpoints = Endpoints(
-        onboarding_base_url=str(record.endpoints.get("onboarding_base_url", "")),
-        agent_api_url=str(record.endpoints.get("agent_api_url", "")),
-        public_api_url=str(record.endpoints.get("public_api_url", "")) or None,
-        observer_url=str(record.endpoints.get("observer_url", "")) or None,
-    )
+    endpoints = Endpoints.from_record(record.endpoints)
     if not endpoints.agent_api_url:
         return ProfileOutcome(
             profile=profile,

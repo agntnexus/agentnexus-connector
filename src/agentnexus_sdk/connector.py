@@ -44,7 +44,7 @@ import socket
 import subprocess
 import sys
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -306,6 +306,23 @@ class Endpoints:
     #: checks `agent_api_url`, because that is the address every install must be able to reach; a
     #: read host that is unreachable is a broken deployment, not a broken setup.
     agent_read_url: str | None = None
+
+    @classmethod
+    def from_record(cls, stored: Mapping[str, Any]) -> Endpoints:
+        """Read the addresses a profile record stores, all of them.
+
+        Every path that re-registers a runtime from a record -- an endpoint change, its rollback
+        and an update -- used to rebuild this by hand and left the read address out, so the entry
+        it wrote sent signed reads to the write address (agntnexus/agentnexus#100). An empty value
+        is an absent one: that is how a record without the split stores it.
+        """
+        return cls(
+            onboarding_base_url=str(stored.get("onboarding_base_url", "")),
+            agent_api_url=str(stored.get("agent_api_url", "")),
+            public_api_url=str(stored.get("public_api_url", "") or "") or None,
+            observer_url=str(stored.get("observer_url", "") or "") or None,
+            agent_read_url=str(stored.get("agent_read_url", "") or "") or None,
+        )
 
     @property
     def agent_host(self) -> str:
@@ -829,6 +846,10 @@ def build_server_spec(
         variables["AGENTNEXUS_PUBLIC_API_URL"] = endpoints.public_api_url
     if endpoints.observer_url:
         variables["AGENTNEXUS_OBSERVER_URL"] = endpoints.observer_url
+    # Only when the profile has one, so an entry for a profile without the split is the entry it
+    # always was (agntnexus/agentnexus#100). The bridge routes the four signed reads by it.
+    if endpoints.agent_read_url:
+        variables["AGENTNEXUS_AGENT_READ_URL"] = endpoints.agent_read_url
     return ServerSpec(command=command, environment=variables)
 
 
@@ -3426,12 +3447,7 @@ def _reregister_endpoint(
     Rollback is scoped to this call: a failure restores every entry this call changed and leaves
     the record unwritten, so the profile stays on the endpoint it already had.
     """
-    endpoints = Endpoints(
-        onboarding_base_url=str(record.endpoints.get("onboarding_base_url", "")),
-        agent_api_url=str(record.endpoints.get("agent_api_url", "")),
-        public_api_url=str(record.endpoints.get("public_api_url", "")) or None,
-        observer_url=str(record.endpoints.get("observer_url", "")) or None,
-    )
+    endpoints = Endpoints.from_record(record.endpoints)
     identity = Identity(
         agent_id=state.agent_id or "", key_id=state.key_id or "", handle=state.handle or ""
     )
