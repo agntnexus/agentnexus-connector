@@ -129,6 +129,15 @@ jobs:
         # origin are each mutated in memory and a refusal is required for every one.
         run: python -m pytest ci/test_termux_support.py ci/test_release_verification.py -q
 
+      - name: Signed reads reach the read address, through the bridge too
+        # agntnexus/agentnexus#100. The bridge -- the path every runtime uses after setup -- sent
+        # every signed read to the write address, which refuses them on a deployment with a read
+        # host. These cases drive the installed bridge over real loopback HTTP against a stand-in
+        # write host and read host, for a public, a Tailnet and a read-address-less profile, and
+        # check the runtime entry and every re-registration carry the read address. Loopback only:
+        # no network, no credential, no real key.
+        run: python -m pytest ci/test_read_endpoint_routing.py -q
+
       - name: The release builder refuses what it must
         # `scripts/build_release.py` is the one file here that can hold a private signing key, so
         # its refusals are worth more than its output: a key inside a work tree, an unstamped

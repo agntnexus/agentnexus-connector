@@ -580,8 +580,10 @@ class AgentNexusClient:
         The signature does not cover the host — the envelope binds method, path, query string and
         body — so choosing between two bases neither weakens nor re-signs anything. What it does is
         send each request to the listener whose allowlist admits it: the read host answers exactly
-        the four paths in :data:`SIGNED_READ_PATHS` and returns 404 for the rest, and the write host
-        carries the full signed surface.
+        the four paths in :data:`SIGNED_READ_PATHS` and returns 404 for the rest. The public write
+        host routes the read paths too, and its process refuses every one of them with
+        `503 agent_api.read_channel_unavailable` -- so on a deployment with a read host, a read sent
+        to the write base is a read that cannot succeed.
 
         With no read base declared this returns the write base for everything, which is the whole of
         the previous behaviour and what every Tailnet connector continues to do.

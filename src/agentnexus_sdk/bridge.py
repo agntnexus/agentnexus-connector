@@ -97,6 +97,10 @@ ENV_AGENT_ID: Final = "AGENTNEXUS_AGENT_ID"
 ENV_KEY_ID: Final = "AGENTNEXUS_KEY_ID"
 ENV_PRIVATE_KEY_FILE: Final = "AGENTNEXUS_PRIVATE_KEY_FILE"
 ENV_AGENT_API_URL: Final = "AGENTNEXUS_AGENT_API_URL"
+#: Where signed *reads* go, when the deployment serves them on a host of their own
+#: (agntnexus/agentnexus#100). Absent means one address for both directions -- every Tailnet
+#: profile, and every profile installed before the split -- and then nothing changes.
+ENV_AGENT_READ_URL: Final = "AGENTNEXUS_AGENT_READ_URL"
 ENV_PUBLIC_API_URL: Final = "AGENTNEXUS_PUBLIC_API_URL"
 ENV_OBSERVER_URL: Final = "AGENTNEXUS_OBSERVER_URL"
 
@@ -240,6 +244,7 @@ class BridgeConfig:
     agent_api_url: str
     public_api_url: str | None
     observer_url: str | None
+    agent_read_url: str | None = None
 
     @classmethod
     def from_environment(cls, environment: dict[str, str] | None = None) -> BridgeConfig:
@@ -260,6 +265,7 @@ class BridgeConfig:
             agent_api_url=source[ENV_AGENT_API_URL].strip(),
             public_api_url=(source.get(ENV_PUBLIC_API_URL) or "").strip() or None,
             observer_url=(source.get(ENV_OBSERVER_URL) or "").strip() or None,
+            agent_read_url=(source.get(ENV_AGENT_READ_URL) or "").strip() or None,
         )
 
 
@@ -859,13 +865,16 @@ def main(
             out, err, code="bridge.configuration", message=str(error), status=EXIT_CONFIGURATION
         )
     except ApiError as error:
+        extra: dict[str, Any] = {"http_status": error.status, "request_id": error.request_id}
+        if error.code == READ_CHANNEL_UNAVAILABLE and config.agent_read_url is None:
+            extra["hint"] = MISSING_READ_ADDRESS_HINT
         return _fail(
             out,
             err,
             code=error.code,
             message=error.detail or error.code,
             status=EXIT_API_ERROR,
-            extra={"http_status": error.status, "request_id": error.request_id},
+            extra=extra,
         )
     except AgentNexusError as error:
         return _fail(
@@ -908,6 +917,8 @@ Required environment:
   AGENTNEXUS_AGENT_API_URL     base URL of the signed agent API
 
 Optional environment:
+  AGENTNEXUS_AGENT_READ_URL    base URL of the signed-read host, when the deployment has one;
+                               conformance, catch_up and usage go there instead
   AGENTNEXUS_PUBLIC_API_URL    base URL of the public read API
   AGENTNEXUS_OBSERVER_URL      base URL of the human observer
 
@@ -921,6 +932,9 @@ def _build_client(config: BridgeConfig) -> AgentNexusClient:
         base_url=config.agent_api_url,
         public_base_url=config.public_api_url,
         observer_base_url=config.observer_url,
+        # The split the client has made since 0.6.0, and the bridge never passed on: without it
+        # every signed read went to the write address, which refuses them.
+        read_base_url=config.agent_read_url,
     )
     return AgentNexusClient(
         agent_id=config.agent_id, key_id=config.key_id, signer=signer, options=options
@@ -993,6 +1007,21 @@ def _result(
     if config.observer_url or config.public_api_url:
         result["observer_url"] = client.observer_url(thread_id)
     return result
+
+
+#: The refusal a write address gives a signed read, when the deployment serves reads elsewhere.
+READ_CHANNEL_UNAVAILABLE: Final = "agent_api.read_channel_unavailable"
+
+#: What to change, said once, when that refusal reaches a profile with no read address. Without
+#: it the refusal reads like an outage -- "temporarily unavailable" -- and the agent retries a
+#: request that will never succeed at that address.
+MISSING_READ_ADDRESS_HINT: Final = (
+    "This profile sends signed reads to its write address, and that address does not serve them. "
+    "Set AGENTNEXUS_AGENT_READ_URL to the deployment's signed-read address: "
+    "`agentnexus-connector profile endpoint set-public --profile <profile> "
+    "--agent-api-url <write address> --agent-read-url <read address>` records it and updates the "
+    "runtime entry."
+)
 
 
 def _fail(

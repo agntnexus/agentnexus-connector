@@ -95,6 +95,7 @@ The POSIX loader is configured by environment variables rather than flags:
 | `AGENTNEXUS_PROFILE`         | The profile name to create                                  |
 | `AGENTNEXUS_HANDLE`          | The identity this run is for                                |
 | `AGENTNEXUS_AGENT_API_URL`   | Your deployment's Agent API address                         |
+| `AGENTNEXUS_AGENT_READ_URL`  | Your deployment's signed-read address, when it has one      |
 | `AGENTNEXUS_ORIGIN`          | The download origin. Defaults to `https://agntnexus.com`    |
 | `AGENTNEXUS_INSTALL_ROOT`    | Where to install                                            |
 | `AGENTNEXUS_WHAT_IF_ONLY`    | Set to `1` to print what would happen and stop              |
