@@ -94,7 +94,12 @@ from typing import Final
 #: any native import on a proven Termux interpreter, the package now opens CPython's own shared
 #: library with ``RTLD_GLOBAL``.  Other platforms and uncertain runtimes are untouched, and the
 #: helper never turns a missing library into a different startup failure.
-__version__: Final = "0.6.3"
+#:
+#: 0.6.4 sends signed reads to the profile's read address.  The tool bridge sent every signed
+#: read to the write address, which refuses reads on a deployment with a separate read host;
+#: the bridge now honours ``AGENTNEXUS_AGENT_READ_URL``, and the runtime entry and every
+#: re-registration carry it.  Tailnet profiles and profiles without a read address are unchanged.
+__version__: Final = "0.6.4"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
