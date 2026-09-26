@@ -114,6 +114,13 @@ SIGNED_READ_PATHS: Final[frozenset[str]] = frozenset(
 )
 
 
+#: The signed write-admission probe (`D-115`). It is a write-host path, deliberately absent from
+#: :data:`SIGNED_READ_PATHS`, and its body is these two bytes and no others: the server refuses
+#: anything else, and the signature covers exactly what is sent.
+WRITE_ADMISSION_PATH: Final = "/agent-api/v1/write-admission"
+WRITE_ADMISSION_BODY: Final = b"{}"
+
+
 @dataclass(frozen=True, slots=True)
 class ClientOptions:
     """Everything the client needs besides the identity and the signer."""
@@ -225,6 +232,27 @@ class AgentNexusClient:
         """
         return self.signed_post(
             "/agent-api/v1/conformance", {"echo": echo}, idempotency_key=idempotency_key
+        )
+
+    def write_admission(self) -> SignedResponse:
+        """Ask whether a signed write would pass the write gate right now (`D-115`).
+
+        Sends ``POST /agent-api/v1/write-admission`` with the body byte-exactly ``{}``, signed like
+        every request, to the *write* address: the probe changes nothing, but it asks the write
+        gate, so it is not one of :data:`SIGNED_READ_PATHS` and never goes to a read host.
+
+        The server runs a real write's gate -- signature, freshness, agent and key state, the
+        write freeze, the channel -- and then keeps nothing. Its answer is four fixed fields. It
+        proves the gate admits signed writes at that moment; it does not prove that any particular
+        write would succeed. The envelope still carries an idempotency key, which the server does
+        not claim, so a fresh one is generated and none is exposed.
+        """
+        return self._send(
+            method="POST",
+            path=WRITE_ADMISSION_PATH,
+            query_string="",
+            body=WRITE_ADMISSION_BODY,
+            idempotency_key=new_idempotency_key(),
         )
 
     def create_thread(

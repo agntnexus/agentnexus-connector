@@ -34,6 +34,7 @@ from typing import Any
 import pytest
 
 from agentnexus_sdk import bridge, connector, updater
+from agentnexus_sdk.client import SIGNED_READ_PATHS
 from agentnexus_sdk.signing import generate_key_pair, write_private_key_file
 
 AGENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -51,6 +52,7 @@ class Listener:
     def __init__(self, *, refuse_reads: bool = False) -> None:
         """Start listening on a free loopback port, recording every request it receives."""
         self.requests: list[tuple[str, str]] = []
+        self.bodies: list[bytes] = []
         self.refuse_reads = refuse_reads
         listener = self
 
@@ -64,8 +66,7 @@ class Listener:
                 path = self.path.split("?", 1)[0]
                 listener.requests.append((self.command, path))
                 length = int(self.headers.get("content-length") or 0)
-                if length:
-                    self.rfile.read(length)
+                listener.bodies.append(self.rfile.read(length) if length else b"")
                 if listener.refuse_reads and path in READ_PATHS:
                     status = 503
                     body = {
@@ -165,6 +166,11 @@ def call(command: dict[str, Any], variables: dict[str, str]) -> tuple[int, dict[
     return code, json.loads(out.getvalue())
 
 
+#: The signed write-admission probe (`D-115`, agntnexus/agentnexus#117). It changes nothing, but it
+#: asks the *write* gate, so it belongs to the write host on every kind of profile.
+ADMISSION = {"operation": "write_admission"}
+ADMISSION_PATH = "/agent-api/v1/write-admission"
+
 READS = (
     {"operation": "conformance", "echo": "probe"},
     {"operation": "usage"},
@@ -200,6 +206,15 @@ class TestAPublicProfile:
         assert "/agent-api/v1/threads" in write_host.paths()
         assert read_host.requests == []
 
+    def test_the_write_admission_probe_goes_to_the_write_host(
+        self, key_file: Path, write_host: Listener, read_host: Listener
+    ) -> None:
+        """It changes nothing, and still never reaches the read host: it asks the write gate."""
+        call(ADMISSION, environment(key_file, write_host.url, read_host.url))
+        assert write_host.requests == [("POST", ADMISSION_PATH)]
+        assert write_host.bodies == [b"{}"]
+        assert read_host.requests == []
+
     def test_the_wallet_is_not_a_read_host_path(
         self, key_file: Path, write_host: Listener, read_host: Listener
     ) -> None:
@@ -219,6 +234,15 @@ class TestATailnetProfile:
         """Every signed read goes to the one address a Tailnet profile has."""
         call(command, environment(key_file, write_host.url, None))
         assert write_host.requests, "the one address received nothing"
+        assert read_host.requests == []
+
+    def test_the_write_admission_probe_goes_to_its_one_address(
+        self, key_file: Path, write_host: Listener, read_host: Listener
+    ) -> None:
+        """One address, and the probe goes to it like every other request."""
+        call(ADMISSION, environment(key_file, write_host.url, None))
+        assert write_host.requests == [("POST", ADMISSION_PATH)]
+        assert write_host.bodies == [b"{}"]
         assert read_host.requests == []
 
     def test_an_empty_read_address_is_no_read_address(
@@ -255,6 +279,21 @@ class TestAPublicProfileWithoutAReadAddress:
             refusing.close()
         assert result["error_code"] == "agent_api.read_channel_unavailable"
         assert "hint" not in result
+
+
+def test_the_read_host_paths_are_exactly_the_four() -> None:
+    """`D-115` leaves the read paths as they were: the probe is not among them."""
+    assert (
+        frozenset(
+            {
+                "/agent-api/v1/conformance",
+                "/agent-api/v1/activity/catch-up",
+                "/agent-api/v1/usage",
+                "/agent-api/v1/personality-draft",
+            }
+        )
+        == SIGNED_READ_PATHS
+    )
 
 
 def _spec(read: str | None, tmp_path: Path) -> dict[str, str]:
