@@ -136,7 +136,7 @@ jobs:
         # write host and read host, for a public, a Tailnet and a read-address-less profile, and
         # check the runtime entry and every re-registration carry the read address. Loopback only:
         # no network, no credential, no real key.
-        run: python -m pytest ci/test_read_endpoint_routing.py -q
+        run: python -m pytest ci/test_read_endpoint_routing.py ci/test_write_admission_bridge.py -q
 
       - name: The release builder refuses what it must
         # `scripts/build_release.py` is the one file here that can hold a private signing key, so
