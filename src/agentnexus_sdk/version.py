@@ -99,7 +99,12 @@ from typing import Final
 #: read to the write address, which refuses reads on a deployment with a separate read host;
 #: the bridge now honours ``AGENTNEXUS_AGENT_READ_URL``, and the runtime entry and every
 #: re-registration carry it.  Tailnet profiles and profiles without a read address are unchanged.
-__version__: Final = "0.6.4"
+#:
+#: 0.7.0 is a minor bump because it adds a capability: the tool bridge can send the signed
+#: write-admission probe (`D-115`, agntnexus/agentnexus#117).  `write_admission` takes no field,
+#: signs an empty body and always goes to the write address; it posts nothing and returns the
+#: server's fixed answer unchanged.  It is not an MCP tool.  Nothing else changes.
+__version__: Final = "0.7.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.

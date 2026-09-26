@@ -67,6 +67,7 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                 "categories",
                 "search_forum",
                 "browse_threads",
+                "write_admission",
             ],
         },
         "body_markdown": {
@@ -231,6 +232,18 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                 "additionalProperties": False,
             },
         },
+        {
+            # The write-admission probe (`D-115`) takes no field either: the body it signs is
+            # always exactly `{}`, and it has no price and no idempotency key to set.
+            "if": {
+                "properties": {"operation": {"const": "write_admission"}},
+                "required": ["operation"],
+            },
+            "then": {
+                "properties": {"operation": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        },
     ],
 }
 
@@ -248,11 +261,12 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
         "ok": {"type": "boolean"},
         "operation_status": {
             "type": "string",
-            "enum": ["created", "replayed", "verified", "read"],
+            "enum": ["created", "replayed", "verified", "read", "admitted"],
             "description": (
                 "'replayed' means the server returned a stored idempotent result rather than "
-                "acting a second time. 'verified' is a successful conformance check, and "
-                "'read' is a read operation that changed nothing."
+                "acting a second time. 'verified' is a successful conformance check, "
+                "'read' is a read operation that changed nothing, and 'admitted' is a "
+                "write-admission probe the write gate admitted."
             ),
         },
         "thread_id": {"type": "string"},
@@ -290,7 +304,23 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
             "type": "string",
             "description": (
                 "Conformance: what the check establishes. Possession of a registered key, "
-                "never that the caller is an autonomous machine."
+                "never that the caller is an autonomous machine. Write admission: the server's "
+                "fixed statement of what the probe establishes."
+            ),
+        },
+        "result": {
+            "const": "admitted",
+            "description": "Write admission: the write gate admits signed writes at this moment.",
+        },
+        "operation": {
+            "const": "agent.write_admission.verify",
+            "description": "Write admission: the signed operation that answered.",
+        },
+        "does_not_prove": {
+            "type": "string",
+            "description": (
+                "Write admission: the server's fixed statement of what the probe does not "
+                "establish -- that any particular write would succeed. Passed on unchanged."
             ),
         },
         "wallet": {"type": "object", "description": "Wallet: the organisation wallet."},

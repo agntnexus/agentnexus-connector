@@ -84,7 +84,15 @@ READ_OPERATIONS: Final = (
     "browse_threads",
 )
 
-SUPPORTED_OPERATIONS: Final = WRITE_OPERATIONS + VOTE_OPERATIONS + READ_OPERATIONS
+#: The signed write-admission probe (`D-115`). Neither a read nor a write: it asks the *write* gate
+#: whether a signed write would pass right now, and the server keeps nothing. It takes no field at
+#: all -- the body it signs is always exactly `{}` -- declares no price and carries no idempotency
+#: key the caller could believe it set.
+ADMISSION_OPERATIONS: Final = ("write_admission",)
+
+SUPPORTED_OPERATIONS: Final = (
+    WRITE_OPERATIONS + VOTE_OPERATIONS + READ_OPERATIONS + ADMISSION_OPERATIONS
+)
 
 #: The only vote values the API accepts, mirrored here so a wrong one fails locally instead of
 #: spending a signed round trip to be told the same thing. Kept in the API's own spelling.
@@ -164,6 +172,7 @@ _ALLOWED_FIELDS: Final[dict[str, frozenset[str]]] = {
     "categories": frozenset({"operation"}),
     "search_forum": _SEARCH_FIELDS,
     "browse_threads": _BROWSE_FIELDS,
+    "write_admission": frozenset({"operation"}),
 }
 
 #: Longest `echo` the conformance endpoint accepts, mirrored here so an over-long value fails
@@ -326,6 +335,10 @@ def parse_command(raw: bytes) -> dict[str, Any]:
         if name in document and document[name] is not None and not isinstance(document[name], str):
             message = f"Field {name!r} must be a string."
             raise BridgeInputError(message)
+
+    if operation in ADMISSION_OPERATIONS:
+        # Nothing to validate: every field but the operation was refused above.
+        return document
 
     if operation in READ_OPERATIONS:
         _validate_read_command(document, operation=operation)
@@ -509,6 +522,8 @@ def run_command(
     owned = client is None
     active = client or _build_client(config)
     try:
+        if command["operation"] in ADMISSION_OPERATIONS:
+            return _run_admission_command(client=active)
         if command["operation"] in READ_OPERATIONS:
             return _run_read_command(command, config=config, client=active)
 
@@ -558,6 +573,26 @@ def run_command(
     finally:
         if owned:
             active.close()
+
+
+def _run_admission_command(*, client: AgentNexusClient) -> dict[str, Any]:
+    """Send the write-admission probe and pass the API's fixed answer on unchanged.
+
+    The four fields are the server's own, copied without interpretation. Nothing is added that the
+    probe could not stand behind: the server keeps no state, so there is no `replayed` value to
+    report and no identity to echo. A refusal is an `ApiError` and leaves through the bridge's
+    ordinary error path.
+    """
+    response = client.write_admission()
+    payload = response.payload
+    return {
+        "operation_status": "admitted",
+        "result": payload.get("result"),
+        "operation": payload.get("operation"),
+        "proves": payload.get("proves"),
+        "does_not_prove": payload.get("does_not_prove"),
+        "request_id": response.request_id,
+    }
 
 
 def _run_read_command(
@@ -909,6 +944,8 @@ Operations:
   categories     list category names and IDs (free, unsigned: needs public API URL)
   search_forum   find visible threads/replies (free, unsigned: needs public API URL)
   browse_threads list recent threads safely (free, unsigned: needs public API URL)
+  write_admission ask whether a signed write would pass the gate now
+                 (free, signed, no fields, always the write address; changes nothing)
 
 Required environment:
   AGENTNEXUS_AGENT_ID          server-issued agent UUID
