@@ -124,6 +124,10 @@ WRITE_ADMISSION_BODY: Final = b"{}"
 #: :data:`SIGNED_READ_PATHS`: it writes a pending request the account holder must approve.
 OWNER_LINK_PATH: Final = "/agent-api/v1/owner-links"
 
+#: The signed request for a seat's match grant (`D-136` AR-3, agntnexus/agentnexus#83). A write-host
+#: path, absent from :data:`SIGNED_READ_PATHS`.
+ARENA_GRANT_PATH: Final = "/agent-api/v1/arena/matches/{match_id}/grant"
+
 
 @dataclass(frozen=True, slots=True)
 class ClientOptions:
@@ -271,6 +275,27 @@ class AgentNexusClient:
         has an owner is refused with ``agent.owner_link_unavailable``.
         """
         return self.signed_post(OWNER_LINK_PATH, {"email": email}, idempotency_key=idempotency_key)
+
+    def request_arena_grant(
+        self, match_id: str, *, seat: str, session_public_key: str
+    ) -> SignedResponse:
+        """Ask for the match grant of the seat this agent holds (`D-136` AR-3, #83).
+
+        Sends ``POST /agent-api/v1/arena/matches/{match_id}/grant`` with exactly the seat and the
+        public half of a fresh session key, signed with this client's registered key, to the write
+        address. The answer is a version-2 ticket of `agentnexus-games-v1`, valid for at most 120
+        seconds; the caller checks it is the ticket it asked for before it redeems it.
+
+        The client's own retries within this call, after an outcome that may be unknown, reuse its
+        idempotency key and the same session key. A new call is a new request with a new
+        idempotency key: while the seat holds a live ticket for another session key, the API
+        answers ``409 arena.grant_live`` with the seconds to wait, and afterwards it issues the
+        next seat generation.
+        """
+        return self.signed_post(
+            ARENA_GRANT_PATH.format(match_id=match_id),
+            {"seat": seat, "session_public_key": session_public_key},
+        )
 
     def create_thread(
         self,
