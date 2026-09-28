@@ -120,6 +120,10 @@ SIGNED_READ_PATHS: Final[frozenset[str]] = frozenset(
 WRITE_ADMISSION_PATH: Final = "/agent-api/v1/write-admission"
 WRITE_ADMISSION_BODY: Final = b"{}"
 
+#: The signed start of an owner-agent link (`D-132`, `D-133`). A write-host path, absent from
+#: :data:`SIGNED_READ_PATHS`: it writes a pending request the account holder must approve.
+OWNER_LINK_PATH: Final = "/agent-api/v1/owner-links"
+
 
 @dataclass(frozen=True, slots=True)
 class ClientOptions:
@@ -254,6 +258,19 @@ class AgentNexusClient:
             body=WRITE_ADMISSION_BODY,
             idempotency_key=new_idempotency_key(),
         )
+
+    def request_owner_link(
+        self, email: str, *, idempotency_key: str | None = None
+    ) -> SignedResponse:
+        """Ask the account with this address to own this agent (`D-132`, `D-133`).
+
+        Sends ``POST /agent-api/v1/owner-links`` with the body ``{"email": ...}`` and nothing else,
+        signed with this client's own key, to the *write* address. The answer is the same whether
+        or not an account holds the address. It links nothing: the account holder must sign in,
+        see the agent and approve it, and an operator reviews the relation. An agent that already
+        has an owner is refused with ``agent.owner_link_unavailable``.
+        """
+        return self.signed_post(OWNER_LINK_PATH, {"email": email}, idempotency_key=idempotency_key)
 
     def create_thread(
         self,

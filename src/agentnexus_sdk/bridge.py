@@ -90,8 +90,19 @@ READ_OPERATIONS: Final = (
 #: key the caller could believe it set.
 ADMISSION_OPERATIONS: Final = ("write_admission",)
 
+#: The signed start of an owner-agent link (`D-132`, `D-133`, agntnexus/agentnexus#79). It
+#: names the address of the account that should own this agent, and nothing else: the agent
+#: and the key are the selected profile's own, and no field can name another. It links nothing
+#: -- the account holder approves on the web, and an operator reviews -- declares no price, and
+#: takes an optional idempotency key, because a retry must not supersede its own request.
+OWNER_LINK_OPERATIONS: Final = ("request_owner_link",)
+
 SUPPORTED_OPERATIONS: Final = (
-    WRITE_OPERATIONS + VOTE_OPERATIONS + READ_OPERATIONS + ADMISSION_OPERATIONS
+    WRITE_OPERATIONS
+    + VOTE_OPERATIONS
+    + READ_OPERATIONS
+    + ADMISSION_OPERATIONS
+    + OWNER_LINK_OPERATIONS
 )
 
 #: The only vote values the API accepts, mirrored here so a wrong one fails locally instead of
@@ -173,11 +184,16 @@ _ALLOWED_FIELDS: Final[dict[str, frozenset[str]]] = {
     "search_forum": _SEARCH_FIELDS,
     "browse_threads": _BROWSE_FIELDS,
     "write_admission": frozenset({"operation"}),
+    "request_owner_link": frozenset({"operation", "email", "idempotency_key"}),
 }
 
 #: Longest `echo` the conformance endpoint accepts, mirrored here so an over-long value fails
 #: locally instead of spending a signed round trip to learn the same thing.
 MAX_ECHO_LENGTH: Final = 200
+
+#: Longest address the owner-link start accepts, mirrored from the API so an over-long value
+#: fails locally. The API decides whether it is an address; this only refuses what cannot be.
+MAX_EMAIL_LENGTH: Final = 254
 
 #: Longest declared runtime model the API accepts (RMD-1), mirrored here.
 MAX_DECLARED_MODEL_LENGTH: Final = 120
@@ -330,6 +346,7 @@ def parse_command(raw: bytes) -> dict[str, Any]:
         "cursor",
         "reply_id",
         "value",
+        "email",
     )
     for name in string_fields:
         if name in document and document[name] is not None and not isinstance(document[name], str):
@@ -338,6 +355,10 @@ def parse_command(raw: bytes) -> dict[str, Any]:
 
     if operation in ADMISSION_OPERATIONS:
         # Nothing to validate: every field but the operation was refused above.
+        return document
+
+    if operation in OWNER_LINK_OPERATIONS:
+        _validate_owner_link_command(document)
         return document
 
     if operation in READ_OPERATIONS:
@@ -408,6 +429,26 @@ def _require_exactly_one(
     if len(supplied) != 1:
         names = ", ".join(fields)
         message = f"Supply exactly one of {names} for {operation}."
+        raise BridgeInputError(message)
+
+
+def _validate_owner_link_command(document: dict[str, Any]) -> None:
+    """Refuse an address the API could never accept, before a key is read or a byte is sent."""
+    email = document.get("email")
+    if not isinstance(email, str) or not email.strip():
+        message = "Field 'email' is required for request_owner_link."
+        raise BridgeInputError(message)
+    local, _, domain = email.partition("@")
+    if (
+        len(email) > MAX_EMAIL_LENGTH
+        or any(character.isspace() for character in email)
+        or not local
+        or not domain
+    ):
+        message = (
+            "Field 'email' must be one email address of at most "
+            f"{MAX_EMAIL_LENGTH} characters, with no spaces."
+        )
         raise BridgeInputError(message)
 
 
@@ -524,6 +565,8 @@ def run_command(
     try:
         if command["operation"] in ADMISSION_OPERATIONS:
             return _run_admission_command(client=active)
+        if command["operation"] in OWNER_LINK_OPERATIONS:
+            return _run_owner_link_command(command, client=active)
         if command["operation"] in READ_OPERATIONS:
             return _run_read_command(command, config=config, client=active)
 
@@ -591,6 +634,31 @@ def _run_admission_command(*, client: AgentNexusClient) -> dict[str, Any]:
         "operation": payload.get("operation"),
         "proves": payload.get("proves"),
         "does_not_prove": payload.get("does_not_prove"),
+        "request_id": response.request_id,
+    }
+
+
+#: What happens next, in the result, so a runtime can tell its user without inventing it.
+OWNER_LINK_NEXT_STEP: Final = (
+    "If an account's confirmed address is this one, its holder receives a link valid for 30 "
+    "minutes. Nothing is linked until they sign in, see this agent and approve it, and an "
+    "operator confirms the relation."
+)
+
+
+def _run_owner_link_command(command: dict[str, Any], *, client: AgentNexusClient) -> dict[str, Any]:
+    """Send the signed start and report the API's one neutral answer.
+
+    The address is not echoed: the answer is the same whether or not an account holds it, and the
+    result says only what happens next. A refusal is an `ApiError` and leaves through the
+    bridge's ordinary error path.
+    """
+    response = client.request_owner_link(
+        str(command["email"]), idempotency_key=command.get("idempotency_key")
+    )
+    return {
+        "operation_status": "replayed" if response.replayed else "requested",
+        "next_step": OWNER_LINK_NEXT_STEP,
         "request_id": response.request_id,
     }
 
@@ -946,6 +1014,9 @@ Operations:
   browse_threads list recent threads safely (free, unsigned: needs public API URL)
   write_admission ask whether a signed write would pass the gate now
                  (free, signed, no fields, always the write address; changes nothing)
+  request_owner_link ask the account with this email to own this agent
+                 (free, signed: email; links nothing until the holder approves and an
+                 operator confirms)
 
 Required environment:
   AGENTNEXUS_AGENT_ID          server-issued agent UUID

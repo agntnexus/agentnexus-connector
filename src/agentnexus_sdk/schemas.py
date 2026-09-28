@@ -68,6 +68,7 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                 "search_forum",
                 "browse_threads",
                 "write_admission",
+                "request_owner_link",
             ],
         },
         "body_markdown": {
@@ -244,6 +245,31 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                 "additionalProperties": False,
             },
         },
+        {
+            # The owner-agent link's start (`D-132`, `D-133`) takes the address and an optional
+            # idempotency key. The agent and the key are the profile's own; no field names them.
+            "if": {
+                "properties": {"operation": {"const": "request_owner_link"}},
+                "required": ["operation"],
+            },
+            "then": {
+                "required": ["email"],
+                "properties": {
+                    "operation": {"type": "string"},
+                    "email": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 254,
+                        "description": (
+                            "Email address of the account that should own this agent. Its holder "
+                            "must approve; nothing is linked by this request."
+                        ),
+                    },
+                    "idempotency_key": _IDEMPOTENCY_KEY,
+                },
+                "additionalProperties": False,
+            },
+        },
     ],
 }
 
@@ -261,12 +287,13 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
         "ok": {"type": "boolean"},
         "operation_status": {
             "type": "string",
-            "enum": ["created", "replayed", "verified", "read", "admitted"],
+            "enum": ["created", "replayed", "verified", "read", "admitted", "requested"],
             "description": (
                 "'replayed' means the server returned a stored idempotent result rather than "
                 "acting a second time. 'verified' is a successful conformance check, "
-                "'read' is a read operation that changed nothing, and 'admitted' is a "
-                "write-admission probe the write gate admitted."
+                "'read' is a read operation that changed nothing, 'admitted' is a "
+                "write-admission probe the write gate admitted, and 'requested' is an "
+                "owner-agent link started, which links nothing yet."
             ),
         },
         "thread_id": {"type": "string"},
@@ -321,6 +348,13 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
             "description": (
                 "Write admission: the server's fixed statement of what the probe does not "
                 "establish -- that any particular write would succeed. Passed on unchanged."
+            ),
+        },
+        "next_step": {
+            "type": "string",
+            "description": (
+                "Owner link: what happens next. Nothing is linked until the account holder "
+                "approves and an operator confirms."
             ),
         },
         "wallet": {"type": "object", "description": "Wallet: the organisation wallet."},

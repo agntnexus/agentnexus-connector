@@ -104,7 +104,14 @@ from typing import Final
 #: write-admission probe (`D-115`, agntnexus/agentnexus#117).  `write_admission` takes no field,
 #: signs an empty body and always goes to the write address; it posts nothing and returns the
 #: server's fixed answer unchanged.  It is not an MCP tool.  Nothing else changes.
-__version__: Final = "0.7.0"
+#:
+#: 0.8.0 is a minor bump because it adds a capability: the tool bridge and the MCP tool
+#: `request_owner_link` start an owner-agent link (`D-132`, `D-133`, agntnexus/agentnexus#79).
+#: It takes an email address and an optional idempotency key, is signed with the selected
+#: profile's own key, always goes to the write address and links nothing by itself: the account
+#: holder approves on the web and an operator reviews.  It carries everything 0.7.0 added; 0.7.0
+#: was signed but never served by the origin.
+__version__: Final = "0.8.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.

@@ -664,6 +664,10 @@ def published_state_failures(
     image carrying it is promoted. Either way the manifest, its signature, the artifact's size and
     digest and the wheel's own version must be exactly the release the state says the tree holds.
 
+    A newer signed candidate may supersede a pending one the origin never served (0.8.0 over
+    0.7.0, agntnexus/agentnexus#79). The superseded wheel stays in the tree byte-identical -- a
+    release tree only ever grows -- but it is no longer pending, and the manifest never names it.
+
     No offline rule can see the origin itself: moving `published_version` to a candidate stays the
     operator's step after the promotion, as the state's own comment says.
     """
@@ -792,6 +796,48 @@ def test_a_pending_candidate_that_is_not_its_release_is_refused(
         wheel.unlink()
     failures = candidate_failures(candidate, state)
     assert any(reason in failure for failure in failures), failures
+
+
+def test_a_superseded_candidate_stays_beneath_a_newer_pending_one(
+    candidate: dict[str, object],
+) -> None:
+    """Accept a newer candidate as pending over the one the committed manifest names.
+
+    The committed tree may already hold a signed candidate the origin never served. A build adds
+    the newer one on top; the state then names the release the origin serves as published and the
+    newer candidate as pending, and the older one stays in the tree as it was.
+    """
+    tree = candidate["tree"]
+    assert isinstance(tree, Path)
+    committed = json.loads((REPOSITORY_ROOT / builder.STATE_FILE).read_text(encoding="utf-8"))
+    superseded = str(candidate["served"])
+    state = {"published_version": committed["published_version"], "pending_version": CANDIDATE}
+
+    assert candidate_failures(candidate, state) == []
+    assert (tree / "connector" / superseded / builder.wheel_name(superseded)).is_file()
+    manifest = json.loads((tree / "connector" / builder.MANIFEST_NAME).read_bytes())
+    assert manifest["connector_version"] == CANDIDATE
+
+
+def test_a_superseded_candidate_can_never_change(candidate: dict[str, object]) -> None:
+    """Refuse a newer release whose tree changed the bytes of the candidate it superseded."""
+    tree = candidate["tree"]
+    assert isinstance(tree, Path)
+    superseded = str(candidate["served"])
+    wheel = f"connector/{superseded}/{builder.wheel_name(superseded)}"
+
+    def changed(failures: list[str]) -> list[str]:
+        return [failure for failure in failures if wheel in failure and "has changed" in failure]
+
+    arguments = {
+        "previous": REPOSITORY_ROOT / "connector-release",
+        "installers": INSTALLERS,
+        "version": CANDIDATE,
+        "markers": [],
+    }
+    assert changed(builder.check_release_tree(tree, **arguments)) == []
+    (tree / wheel).write_bytes((tree / wheel).read_bytes() + b"\0")
+    assert changed(builder.check_release_tree(tree, **arguments)), "a changed wheel was accepted"
 
 
 def test_a_built_candidate_is_not_published_by_being_committed(
