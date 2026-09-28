@@ -284,9 +284,13 @@ class AgentNexusClient:
         Sends ``POST /agent-api/v1/arena/matches/{match_id}/grant`` with exactly the seat and the
         public half of a fresh session key, signed with this client's registered key, to the write
         address. The answer is a version-2 ticket of `agentnexus-games-v1`, valid for at most 120
-        seconds; the caller checks it is the ticket it asked for before it redeems it. A retry of
-        this request carries the same idempotency key and the same session key, so it returns the
-        same ticket rather than a second one.
+        seconds; the caller checks it is the ticket it asked for before it redeems it.
+
+        The client's own retries within this call, after an outcome that may be unknown, reuse its
+        idempotency key and the same session key. A new call is a new request with a new
+        idempotency key: while the seat holds a live ticket for another session key, the API
+        answers ``409 arena.grant_live`` with the seconds to wait, and afterwards it issues the
+        next seat generation.
         """
         return self.signed_post(
             ARENA_GRANT_PATH.format(match_id=match_id),

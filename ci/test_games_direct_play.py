@@ -433,6 +433,18 @@ class TestSeparation:
         expect_refusal(lambda: players(second).move(MATCH, SEAT, 3), "games.session_foreign")
         assert len(provider.requests) == before
 
+    def test_a_session_follows_its_own_providers_origin_only(
+        self, players: Any, provider: Provider, first: Profile
+    ) -> None:
+        """Swapped origins: the stored origin now belongs to another provider; nothing is sent."""
+        elsewhere = "https://elsewhere.test.invalid"
+        players(first, {PROVIDER_ID: ORIGIN, "other-provider": elsewhere}).join(MATCH, SEAT)
+        before = len(provider.requests)
+        swapped = players(first, {PROVIDER_ID: elsewhere, "other-provider": ORIGIN})
+        expect_refusal(lambda: swapped.move(MATCH, SEAT, 3), "games.session_provider")
+        expect_refusal(lambda: swapped.state(MATCH, SEAT), "games.session_provider")
+        assert len(provider.requests) == before
+
     def test_another_match_or_seat_has_no_session(
         self, players: Any, provider: Provider, first: Profile
     ) -> None:
@@ -556,6 +568,39 @@ class TestBoundedAnswers:
         player.join(MATCH, SEAT)
         provider.fault = fault
         expect_refusal(lambda: player.move(MATCH, SEAT, 3), "games.provider_fault")
+
+    @pytest.mark.parametrize("fault", ["gzip", "gzip_bomb"])
+    def test_a_compressed_answer_is_not_decoded(
+        self, players: Any, provider: Provider, first: Profile, fault: str
+    ) -> None:
+        """An encoded answer is a provider fault, even one that would decode to a valid answer."""
+        player = players(first)
+        player.join(MATCH, SEAT)
+        provider.fault = fault
+        expect_refusal(lambda: player.move(MATCH, SEAT, 3), "games.provider_fault")
+        assert provider.requests[-1].headers.get("accept-encoding") == "identity"
+
+    def test_a_declared_length_over_the_bound_is_refused_before_reading(
+        self, players: Any, provider: Provider, first: Profile
+    ) -> None:
+        """An answer that declares more than 3072 bytes is refused before a byte of it is read."""
+        player = players(first)
+        player.join(MATCH, SEAT)
+        provider.fault = "declared_huge"
+        expect_refusal(lambda: player.move(MATCH, SEAT, 3), "games.provider_fault")
+        assert provider.stream is not None
+        assert provider.stream.pulled == 0
+
+    def test_an_undeclared_length_stops_just_past_the_bound(
+        self, players: Any, provider: Provider, first: Profile
+    ) -> None:
+        """Without a declared length, reading stops at the first chunk past 3072 bytes."""
+        player = players(first)
+        player.join(MATCH, SEAT)
+        provider.fault = "undeclared_huge"
+        expect_refusal(lambda: player.move(MATCH, SEAT, 3), "games.provider_fault")
+        assert provider.stream is not None
+        assert provider.stream.pulled <= games.ANSWER_LIMIT + 4096
 
     def test_after_a_fault_the_retry_returns_the_real_answer(
         self, players: Any, provider: Provider, first: Profile

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import gzip
 import hashlib
 import json
 import re
@@ -112,6 +113,21 @@ class Clock:
     def advance(self, seconds: float) -> None:
         """Move time forward."""
         self.now += dt.timedelta(seconds=seconds)
+
+
+class CountingStream(httpx.SyncByteStream):
+    """An answer body that counts how many of its bytes the reader pulled."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        """Serve `chunks` in order."""
+        self.chunks = chunks
+        self.pulled = 0
+
+    def __iter__(self) -> Any:
+        """Yield the chunks, counting each one as it is taken."""
+        for chunk in self.chunks:
+            self.pulled += len(chunk)
+            yield chunk
 
 
 @dataclass
@@ -293,6 +309,7 @@ class Provider:
         self.games: dict[str, Game] = {}
         self.fault: str | None = None
         self.applied_moves = 0
+        self.stream: CountingStream | None = None
 
     # -- answers ------------------------------------------------------------------------------
 
@@ -337,6 +354,20 @@ class Provider:
             return httpx.Response(200, content=json.dumps(document).encode())
         if fault == "refusal_with_text":
             return httpx.Response(409, content=b'{"error":{"code":"move_not_legal"},"note":"x"}')
+        if fault == "gzip":
+            # A valid answer, compressed: a reader that decodes it has decoded untrusted input.
+            return httpx.Response(
+                status, content=gzip.compress(content), headers={"content-encoding": "gzip"}
+            )
+        if fault == "gzip_bomb":
+            bomb = gzip.compress(b" " * 8_000_000)
+            return httpx.Response(200, content=bomb, headers={"content-encoding": "gzip"})
+        if fault == "declared_huge":
+            self.stream = CountingStream([b" " * 1_000_000])
+            return httpx.Response(200, stream=self.stream, headers={"content-length": "1000000"})
+        if fault == "undeclared_huge":
+            self.stream = CountingStream([b" " * 4096] * 256)
+            return httpx.Response(200, stream=self.stream)
         return httpx.Response(status, content=content)
 
     def _serve(self, request: httpx.Request, body: bytes) -> tuple[int, bytes]:

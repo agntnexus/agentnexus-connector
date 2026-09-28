@@ -23,14 +23,15 @@ What it holds to:
 * **The destination is not the model's to choose.** A provider's origin comes only from the
   profile's configuration (`AGENTNEXUS_GAMES_PROVIDERS`): exact `https` origins with a host name,
   no IP address, path, query, fragment or credentials. The ticket names the provider; no tool
-  argument names a destination.
+  argument names a destination, and a stored session goes only to the origin the profile names
+  for that session's own provider.
 * **A retry never makes a second move.** A message is stored before it is sent. When its outcome is
   unknown -- a lost answer, a refused connection, a malformed answer -- the next call for the same
   intent resends the identical signed bytes, which the provider answers with its stored answer. A
   different move waits until the unresolved one is resolved.
 * **Answers are bounded and checked.** A seat answer is read up to 3072 bytes and a refusal up to
-  1024, and each must match its schema exactly, the observation `connect-four-1`'s. Anything else is
-  a provider fault, reported as one, never turned into play.
+  1024, never decompressed, and each must match its schema exactly, the observation
+  `connect-four-1`'s. Anything else is a provider fault, reported as one, never turned into play.
 * **Nothing secret leaves.** The registered key signs only the grant request to AgentNexus. The
   session key signs only messages to the provider and never leaves this machine. The ticket goes
   only to the provider, and no result, log line or error carries a key or a ticket.
@@ -622,6 +623,7 @@ class GamePlayer:
                     SIGNATURE_HEADER: pending["signature"],
                     "content-type": "application/json",
                     "accept": "application/json",
+                    "accept-encoding": "identity",
                 },
             ) as response:
                 status = response.status_code
@@ -726,11 +728,20 @@ class GamePlayer:
             or state.get("key_id") != self._key_id
             or state.get("match_id") != match_id
             or state.get("seat") != seat
-            or state.get("origin") not in self._origins.values()
         ):
             raise GameRefusedError(
                 "games.session_foreign",
                 "This session belongs to another profile; nothing was sent.",
+            )
+        # The origin must be the one the profile names for this session's own provider now. An
+        # origin that only another provider uses is not enough: it would send this seat's signed
+        # messages to a provider the ticket never named.
+        provider = state.get("provider_id")
+        if not isinstance(provider, str) or self._origins.get(provider) != state.get("origin"):
+            raise GameRefusedError(
+                "games.session_provider",
+                "The profile no longer names this session's origin for its provider; nothing was "
+                "sent. Restore the provider's origin, or join again.",
             )
 
     def _open(self, match_id: str, seat: str) -> tuple[dict[str, Any], Ed25519Signer]:
@@ -758,9 +769,20 @@ def _check_names(match_id: str, seat: str) -> None:
 
 
 def _read_bounded(response: httpx.Response, limit: int) -> bytes | None:
-    """Read at most `limit` bytes; `None` when the answer is longer. The reader stops there."""
+    """Read at most `limit` bytes of an unencoded answer; `None` for anything longer or encoded.
+
+    Nothing is decompressed: the request asks for `identity`, and an encoded answer is refused
+    unread, because decompressing untrusted input can produce any size. A declared length over the
+    limit is refused before a byte is read; without one, reading stops at the first chunk that
+    passes the limit, and each chunk handed on is at most `limit + 1` bytes long.
+    """
+    if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+        return None
+    declared = response.headers.get("content-length")
+    if declared is not None and (not declared.isdigit() or int(declared) > limit):
+        return None
     collected = bytearray()
-    for chunk in response.iter_bytes():
+    for chunk in response.iter_bytes(chunk_size=limit + 1):
         collected.extend(chunk)
         if len(collected) > limit:
             return None

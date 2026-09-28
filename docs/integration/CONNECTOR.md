@@ -113,8 +113,8 @@ The provider's address is never a tool argument. It comes only from the profile'
 name -- no IP address, path, query or credentials. A seat's session key and state live in the
 profile's own `games` directory, beside its key; another profile cannot use them. Neither key leaves
 the machine towards the provider, and no result or log carries a key or a ticket. An answer larger
-than the contract allows, or one that is not exactly its schema, is reported as a provider fault and
-never shown as play.
+than the contract allows, a compressed one, or one that is not exactly its schema, is reported as a
+provider fault and never shown as play.
 
 No real match grant exists yet (`D-101`), so today these tools work only against a test provider.
 
