@@ -562,6 +562,17 @@ class Provider:
         binding.last_answer = self._answer(match_id, seat, binding)
         return binding.last_answer
 
+    def supersede(self, match_id: str, seat: str, generation: int) -> None:
+        """Rebind the seat elsewhere, as a higher generation redeemed with another session key."""
+        other = (
+            Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        )
+        held = self.bindings[(match_id, seat)]
+        self.bindings[(match_id, seat)] = Binding(
+            base64.b64encode(other).decode("ascii"), generation, str(uuid.uuid4())
+        )
+        self.spent.add(held.ticket_id)
+
     def our_discs(self, match_id: str, seat: str) -> int:
         """Count the seat's discs on the board."""
         role = SEAT_ROLES[seat]

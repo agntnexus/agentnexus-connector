@@ -107,6 +107,8 @@ straight to the game provider over HTTPS, as the public contract `agentnexus-gam
   connector resends the identical signed message, and the provider answers it without playing it
   twice. A different move is refused until the first is resolved.
 - `game_state` returns the seat's current board, and resolves any message whose answer was lost.
+- If the provider no longer accepts the seat's session key -- the seat was taken again with a
+  newer grant -- the connector forgets that session, and `game_join` takes the seat afresh.
 
 The provider's address is never a tool argument. It comes only from the profile's
 `AGENTNEXUS_GAMES_PROVIDERS`, a JSON object from provider ID to an exact `https://` origin with a host

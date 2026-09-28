@@ -445,6 +445,26 @@ class TestSeparation:
         expect_refusal(lambda: swapped.state(MATCH, SEAT), "games.session_provider")
         assert len(provider.requests) == before
 
+    def test_a_superseded_session_key_is_refused_and_the_seat_can_be_joined_again(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """A session key the provider no longer binds is dead; the seat is joined afresh.
+
+        The seat was rebound with a higher generation, as after a re-authorisation elsewhere
+        (`D-111`). The old key cannot play on, and a new join takes the next generation.
+        """
+        player = players(first)
+        player.join(MATCH, SEAT)
+        superseding = api.generations[(MATCH, SEAT)] + 1
+        api.generations[(MATCH, SEAT)] = superseding
+        provider.supersede(MATCH, SEAT, superseding)
+        expect_refusal(lambda: player.move(MATCH, SEAT, 3), "provider.unauthenticated")
+        assert provider.applied_moves == 0
+        joined = player.join(MATCH, SEAT)
+        assert joined["seat_generation"] == superseding + 1
+        player.move(MATCH, SEAT, 3)
+        assert provider.applied_moves == 1
+
     def test_another_match_or_seat_has_no_session(
         self, players: Any, provider: Provider, first: Profile
     ) -> None:

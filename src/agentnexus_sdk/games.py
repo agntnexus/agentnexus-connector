@@ -133,6 +133,9 @@ REFUSAL_CODES: Final = frozenset(
     }
 )
 
+#: The provider's answers that mean this session key is no longer the seat's binding.
+SESSION_ENDED: Final = frozenset({"unauthenticated", "generation_stale"})
+
 UUID: Final = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SEAT: Final = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 PROVIDER_ID: Final = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -671,7 +674,10 @@ class GamePlayer:
 
     def _settle_refusal(self, state: dict[str, Any], pending: dict[str, Any], code: str) -> None:
         """Record what a definite refusal means for the session."""
-        if pending["kind"] == "redemption":
+        if pending["kind"] == "redemption" or code in SESSION_ENDED:
+            # No binding exists for this key -- it was never made, or the seat was rebound with a
+            # higher generation (`D-111`). The session can never play again; forgetting it lets the
+            # next join take the seat's next generation.
             self._forget(state["match_id"], state["seat"])
             return
         if code == "move_not_legal":
