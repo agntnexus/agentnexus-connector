@@ -143,13 +143,23 @@ class Recorded:
     body: bytes
 
 
-def _problem(status: int, code: str, *, retry_after: int | str | None = None) -> httpx.Response:
+#: The #82 API's own wording, where a case depends on it (`arena_grants.py`).
+GRANT_LIVE_DETAIL = "This seat holds a live ticket; ask again when its window has passed."
+
+
+def _problem(
+    status: int,
+    code: str,
+    *,
+    retry_after: int | str | None = None,
+    detail: str = "Refused by the fixture.",
+) -> httpx.Response:
     body = {
         "type": f"https://agntnexus.com/problems/{code}",
         "title": code,
         "status": status,
         "code": code,
-        "detail": "Refused by the fixture.",
+        "detail": detail,
     }
     headers = {"content-type": "application/problem+json"}
     if retry_after is not None:
@@ -247,7 +257,9 @@ class ArenaApi:
                 header: int | str | None = min(max(wait, 1), 150)
                 if self.grant_live_retry_after is not None:
                     header = self.grant_live_retry_after or None
-                return _problem(409, "arena.grant_live", retry_after=header)
+                return _problem(
+                    409, "arena.grant_live", retry_after=header, detail=GRANT_LIVE_DETAIL
+                )
         generation = self.generations.get((match_id, seat), 0) + 1
         self.generations[(match_id, seat)] = generation
         now = self.clock().replace(microsecond=0)

@@ -1033,7 +1033,11 @@ class TestTheWaitReachesTheRuntime:
     def test_the_wait_arrives_in_mcp_structured_content_without_ticket_or_key(
         self, api: ArenaApi, first: Profile, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The MCP tool result carries the same document; no ticket or key is in it."""
+        """The MCP tool result carries the same document; no ticket or key value is in it.
+
+        The word "ticket" is not a secret: the #82 API's own refusal says the seat "holds a live
+        ticket". What must not appear is the ticket itself -- its ID and signature -- or a key.
+        """
         _, document, stderr = self.bridge_join(api, first, monkeypatch)
         monkeypatch.setattr(mcp_server, "run_bridge", lambda _command: document)
         answer = mcp_server.handle_request(
@@ -1042,13 +1046,14 @@ class TestTheWaitReachesTheRuntime:
         )
         assert answer["isError"] is True
         assert answer["structuredContent"]["retry_after_seconds"] == 150
-        shown = json.dumps(answer) + stderr
-        issued = next(json.loads(r.body) for r in api.requests)
+        shown = json.dumps(answer) + json.dumps(document) + stderr
+        live = api.issued[(MATCH, SEAT)]
+        session_keys = [json.loads(r.body)["session_public_key"] for r in api.requests]
+        assert len(session_keys) == 2, "the live ticket's key and the refused join's key"
         for secret in (
-            "ticket",
-            "signature",
-            "session_public_key",
-            issued["session_public_key"],
+            live["ticket_id"],
+            live["signature"],
+            *session_keys,
             base64.b64encode(first.private_bytes).decode(),
             first.private_bytes.hex(),
         ):
