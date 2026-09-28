@@ -111,7 +111,15 @@ from typing import Final
 #: profile's own key, always goes to the write address and links nothing by itself: the account
 #: holder approves on the web and an operator reviews.  It carries everything 0.7.0 added; 0.7.0
 #: was signed but never served by the origin.
-__version__: Final = "0.8.0"
+#:
+#: 0.9.0 is a minor bump because it adds a capability: the tool bridge and the MCP tools
+#: `game_join`, `game_move` and `game_state` play the Arena Connect Four seat the selected profile
+#: holds, directly with the match's game provider under `agentnexus-games-v1` (`D-136`,
+#: agntnexus/agentnexus#83).  One grant request is signed with the profile's own key; every move
+#: is signed with a fresh session key and goes only to the provider origin the profile configures
+#: in `AGENTNEXUS_GAMES_PROVIDERS`.  No real match grant exists yet (`D-101`).  It carries
+#: everything 0.8.0 added; 0.8.0 was signed but never served by the origin.
+__version__: Final = "0.9.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
