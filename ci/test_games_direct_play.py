@@ -532,16 +532,23 @@ class TestSeparation:
         assert len(provider.requests) == before
 
     def test_a_session_follows_its_own_providers_origin_only(
-        self, players: Any, provider: Provider, first: Profile
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
     ) -> None:
-        """Swapped origins: the stored origin now belongs to another provider; nothing is sent."""
+        """Swapped origins: the stored origin now belongs to another provider; nothing is sent.
+
+        The refusal advises restoring the origin, never a new join, which is refused the same way.
+        """
         elsewhere = "https://elsewhere.test.invalid"
         players(first, {PROVIDER_ID: ORIGIN, "other-provider": elsewhere}).join(MATCH, SEAT)
-        before = len(provider.requests)
+        before, asked = len(provider.requests), len(api.requests)
         swapped = players(first, {PROVIDER_ID: elsewhere, "other-provider": ORIGIN})
-        expect_refusal(lambda: swapped.move(MATCH, SEAT, 3), "games.session_provider")
+        refusal = expect_refusal(lambda: swapped.move(MATCH, SEAT, 3), "games.session_provider")
         expect_refusal(lambda: swapped.state(MATCH, SEAT), "games.session_provider")
+        expect_refusal(lambda: swapped.join(MATCH, SEAT), "games.session_provider")
+        assert "Restore the provider's origin" in str(refusal)
+        assert "join" not in str(refusal)
         assert len(provider.requests) == before
+        assert len(api.requests) == asked
 
     def test_a_superseded_session_key_is_refused_and_the_seat_can_be_joined_again(
         self, players: Any, api: ArenaApi, provider: Provider, first: Profile, clock: Clock

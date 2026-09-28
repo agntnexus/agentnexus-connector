@@ -752,7 +752,7 @@ class GamePlayer:
             raise GameRefusedError(
                 "games.session_provider",
                 "The profile no longer names this session's origin for its provider; nothing was "
-                "sent. Restore the provider's origin, or join again.",
+                "sent. Restore the provider's origin.",
             )
 
     def _open(self, match_id: str, seat: str) -> tuple[dict[str, Any], Ed25519Signer]:
