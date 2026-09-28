@@ -54,6 +54,7 @@ from games_fixtures import (
 
 from agentnexus_sdk import bridge, games, mcp_server
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions
+from agentnexus_sdk.errors import ApiError
 from agentnexus_sdk.signing import (
     Ed25519Signer,
     export_private_key_bytes,
@@ -221,6 +222,47 @@ class TestTheTicketIsTheOneAskedFor:
             player.join(MATCH, SEAT)
         assert getattr(caught.value, "code", None) == "arena.seat_refused"
         assert provider.requests == []
+
+
+class TestTheApiDecidesWhoMayPlay:
+    """AgentNexus refuses the grant; the Connector then redeems nothing and keeps nothing.
+
+    Whether an agent is enrolled with its owner's approval, and whether its registered key is still
+    active, is the API's decision (#82, `D-136`). The stand-in answers as the API does -- `403
+    arena.seat_refused` and `403 auth.key_not_active` -- and what these cases hold is the
+    Connector's part: the refusal is passed on, no provider hears anything, and no session exists.
+    """
+
+    @staticmethod
+    def refused_before_play(player: Any, provider: Provider, profile: Profile, code: str) -> None:
+        """Require the API's `code`, no provider request and no stored session."""
+        with pytest.raises(ApiError) as caught:
+            player.join(MATCH, SEAT)
+        assert (caught.value.status, caught.value.code) == (403, code)
+        assert provider.requests == []
+        assert not profile.sessions.exists() or not any(profile.sessions.iterdir())
+
+    def test_an_agent_without_an_approved_enrollment_gets_no_grant(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """An agent whose seat is not approved by its owner is refused at the grant request."""
+        api.withdraw_enrollment(first.agent_id)
+        self.refused_before_play(players(first), provider, first, "arena.seat_refused")
+        assert len(api.requests) == 1
+
+    def test_a_revoked_registered_key_gets_no_new_grant(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """After its registered key is revoked, the agent gets no new grant for another match."""
+        player = players(first)
+        player.join(MATCH, SEAT)
+        api.revoke_key(first.agent_id)
+        with pytest.raises(ApiError) as caught:
+            player.join(OTHER_MATCH, SEAT)
+        assert (caught.value.status, caught.value.code) == (403, "auth.key_not_active")
+        assert [r.path.rsplit("/", 1)[1] for r in provider.requests] == ["redemption"]
+        assert not (first.sessions / f"{OTHER_MATCH}.{SEAT}.json").exists()
+        assert not (first.sessions / f"{OTHER_MATCH}.{SEAT}.key").exists()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -448,10 +490,10 @@ class TestSeparation:
     def test_a_superseded_session_key_is_refused_and_the_seat_can_be_joined_again(
         self, players: Any, api: ArenaApi, provider: Provider, first: Profile
     ) -> None:
-        """A session key the provider no longer binds is dead; the seat is joined afresh.
+        """After the provider refuses the session key, the seat can be joined afresh.
 
-        The seat was rebound with a higher generation, as after a re-authorisation elsewhere
-        (`D-111`). The old key cannot play on, and a new join takes the next generation.
+        The fixture rebinds the seat to another key. What the Connector observes is only the
+        refusal `unauthenticated`; it forgets the session, and a new join is granted and plays.
         """
         player = players(first)
         player.join(MATCH, SEAT)

@@ -163,6 +163,18 @@ class ArenaApi:
         self.requests: list[Recorded] = []
         self.mode = "honest"
         self.generations: dict[tuple[str, str], int] = {}
+        #: Agents whose seat their owner approved; every registered agent until withdrawn.
+        self.enrolled: set[str] = set(registered)
+        #: Agents whose registered key was revoked.
+        self.revoked: set[str] = set()
+
+    def withdraw_enrollment(self, agent_id: str) -> None:
+        """Answer as the API does for an agent that holds no owner-approved seat."""
+        self.enrolled.discard(agent_id)
+
+    def revoke_key(self, agent_id: str) -> None:
+        """Answer as the API does for a signature by a key that is no longer active."""
+        self.revoked.add(agent_id)
 
     def _verifies(self, request: httpx.Request, body: bytes) -> bool:
         headers = {name.lower(): value for name, value in request.headers.items()}
@@ -203,6 +215,11 @@ class ArenaApi:
             return _problem(404, "not_found")
         if not self._verifies(request, body):
             return _problem(401, "auth.signature_invalid")
+        agent_id = request.headers["x-agent-id"]
+        if agent_id in self.revoked:
+            return _problem(403, "auth.key_not_active")
+        if agent_id not in self.enrolled:
+            return _problem(403, "arena.seat_refused")
         if self.mode == "refuse":
             return _problem(403, "arena.seat_refused")
         document = json.loads(body)

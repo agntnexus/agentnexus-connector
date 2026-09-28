@@ -133,7 +133,8 @@ REFUSAL_CODES: Final = frozenset(
     }
 )
 
-#: The provider's answers that mean this session key is no longer the seat's binding.
+#: The provider's refusals of this session key for an action or a resumption. They say the key is
+#: refused, not why; the Connector cannot play on with it.
 SESSION_ENDED: Final = frozenset({"unauthenticated", "generation_stale"})
 
 UUID: Final = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -675,9 +676,10 @@ class GamePlayer:
     def _settle_refusal(self, state: dict[str, Any], pending: dict[str, Any], code: str) -> None:
         """Record what a definite refusal means for the session."""
         if pending["kind"] == "redemption" or code in SESSION_ENDED:
-            # No binding exists for this key -- it was never made, or the seat was rebound with a
-            # higher generation (`D-111`). The session can never play again; forgetting it lets the
-            # next join take the seat's next generation.
+            # The provider refused this session key: its redemption, or an action or a
+            # resumption with `unauthenticated` or `generation_stale`. The answer does not say
+            # why, and the Connector cannot play on with the key; forgetting the session lets a
+            # new join ask for a new grant.
             self._forget(state["match_id"], state["seat"])
             return
         if code == "move_not_legal":
