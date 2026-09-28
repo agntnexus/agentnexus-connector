@@ -59,7 +59,8 @@ GRANT_PUBLIC_KEY = base64.b64encode(
 TICKET_LIFETIME = dt.timedelta(seconds=120)
 TICKET_SKEW = dt.timedelta(seconds=30)
 LIMITS = {"redemption": 4096, "resumption": 1024, "actions": 1024 + 4096}
-SEAT_ROLES = {"seat-a": "first", "seat-b": "second"}
+#: The vectors name seats `seat-a` and `seat-b`; the #82 API issues `first` and `second`.
+SEAT_ROLES = {"seat-a": "first", "seat-b": "second", "first": "first", "second": "second"}
 ROWS, COLUMNS = 6, 7
 
 GRANT_PATH = re.compile(r"^/agent-api/v1/arena/matches/([0-9a-f-]{36})/grant$")

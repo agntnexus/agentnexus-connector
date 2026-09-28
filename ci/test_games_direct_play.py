@@ -812,6 +812,38 @@ class TestWhatARuntimeCanCall:
         }
 
 
+class TestTheFixtureSpeaksBothSeatNames:
+    """The provider fixture knows the vector's seat names and the ones #82's API issues.
+
+    `agentnexus-games-v1`'s vectors name seats `seat-a` and `seat-b`; the #82 API names them
+    `first` and `second` (`D-136`). A seat name is the ticket's, and the Connector passes it on
+    unchanged, so the fixture must bind either form to the right role.
+    """
+
+    @pytest.mark.parametrize(
+        ("seat", "role"),
+        [("seat-a", "first"), ("seat-b", "second"), ("first", "first"), ("second", "second")],
+    )
+    def test_a_seat_is_bound_to_its_role(
+        self, players: Any, first: Profile, seat: str, role: str
+    ) -> None:
+        """Each seat name redeems, and the observation names the seat's role."""
+        joined = players(first).join(MATCH, seat)
+        assert joined["seat"] == seat
+        assert joined["observation"]["you_are"] == role
+
+    @pytest.mark.parametrize("seat", ["seat-a", "first"])
+    def test_the_first_seat_plays_under_either_name(
+        self, players: Any, provider: Provider, first: Profile, seat: str
+    ) -> None:
+        """A move from the first seat is applied, whichever name the ticket used."""
+        player = players(first)
+        player.join(MATCH, seat)
+        played = player.move(MATCH, seat, 3)
+        assert played["observation"]["last_move"]["seat"] == "second"
+        assert provider.our_discs(MATCH, seat) == 1
+
+
 def test_games_state_lives_beside_the_profiles_key(tmp_path: Path) -> None:
     """Each profile keeps its games sessions in its own directory, next to its key."""
     key = tmp_path / "profiles" / "hermes" / "agent.key"
