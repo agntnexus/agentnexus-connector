@@ -223,6 +223,42 @@ class TestTheTicketIsTheOneAskedFor:
         assert getattr(caught.value, "code", None) == "arena.seat_refused"
         assert provider.requests == []
 
+    def test_a_spent_ticket_is_reported_and_leaves_no_playable_session(
+        self,
+        players: Any,
+        api: ArenaApi,
+        provider: Provider,
+        first: Profile,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The provider answers the redemption `409 ticket_spent`; nothing is left to play with.
+
+        The ticket was already redeemed elsewhere, so the provider refuses it. The Connector passes
+        the refusal on, keeps no session and no session key, and a later move or resumption sends
+        nothing.
+        """
+        grant = api.handle
+
+        def granted_but_already_spent(request: httpx.Request) -> httpx.Response:
+            """Issue the ticket, and let the provider hold it as redeemed already."""
+            response = grant(request)
+            if response.status_code == 201:
+                provider.spent.add(json.loads(response.content)["ticket_id"])
+            return response
+
+        monkeypatch.setattr(api, "handle", granted_but_already_spent)
+        player = players(first)
+        refusal = expect_refusal(lambda: player.join(MATCH, SEAT), "provider.ticket_spent")
+        assert "ticket_spent" in str(refusal)
+        assert [r.path.rsplit("/", 1)[1] for r in provider.requests] == ["redemption"]
+        assert provider.bindings == {}
+        assert not first.sessions.exists() or not any(first.sessions.iterdir())
+
+        expect_refusal(lambda: player.move(MATCH, SEAT, 3), "games.no_session")
+        expect_refusal(lambda: player.state(MATCH, SEAT), "games.no_session")
+        assert len(provider.requests) == 1
+        assert provider.applied_moves == 0
+
 
 class TestTheApiDecidesWhoMayPlay:
     """AgentNexus refuses the grant; the Connector then redeems nothing and keeps nothing.
@@ -263,6 +299,39 @@ class TestTheApiDecidesWhoMayPlay:
         assert [r.path.rsplit("/", 1)[1] for r in provider.requests] == ["redemption"]
         assert not (first.sessions / f"{OTHER_MATCH}.{SEAT}.json").exists()
         assert not (first.sessions / f"{OTHER_MATCH}.{SEAT}.key").exists()
+
+    def test_a_bound_session_moves_on_after_the_registered_key_is_revoked(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """Revocation refuses a new grant; the session already bound still plays (`D-100`).
+
+        A move is signed with the session key and goes to the provider only, so revoking the
+        registered key does not end it; stopping a running match is C-9's. A new grant needs the
+        registered key and is refused, and that refusal leaves nothing behind.
+        """
+        player = players(first)
+        player.join(MATCH, SEAT)
+        api.revoke_key(first.agent_id)
+        asked = len(api.requests)
+
+        played = player.move(MATCH, SEAT, 3)
+        assert played["observation"]["last_move"] is not None
+        assert provider.applied_moves == 1
+        assert len(api.requests) == asked, "a move asked AgentNexus"
+
+        with pytest.raises(ApiError) as caught:
+            player.join(OTHER_MATCH, SEAT)
+        assert (caught.value.status, caught.value.code) == (403, "auth.key_not_active")
+        assert not (first.sessions / f"{OTHER_MATCH}.{SEAT}.json").exists()
+        assert not (first.sessions / f"{OTHER_MATCH}.{SEAT}.key").exists()
+
+        player.move(MATCH, SEAT, 4)
+        assert provider.applied_moves == 2
+        assert [r.path.rsplit("/", 1)[1] for r in provider.requests] == [
+            "redemption",
+            "actions",
+            "actions",
+        ]
 
 
 class TestTheStandInNeverReplacesALiveTicket:
