@@ -28,6 +28,7 @@ import datetime as dt
 import gzip
 import hashlib
 import json
+import math
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -142,7 +143,7 @@ class Recorded:
     body: bytes
 
 
-def _problem(status: int, code: str) -> httpx.Response:
+def _problem(status: int, code: str, *, retry_after: int | None = None) -> httpx.Response:
     body = {
         "type": f"https://agntnexus.com/problems/{code}",
         "title": code,
@@ -150,7 +151,10 @@ def _problem(status: int, code: str) -> httpx.Response:
         "code": code,
         "detail": "Refused by the fixture.",
     }
-    return httpx.Response(status, json=body, headers={"content-type": "application/problem+json"})
+    headers = {"content-type": "application/problem+json"}
+    if retry_after is not None:
+        headers["retry-after"] = str(retry_after)
+    return httpx.Response(status, json=body, headers=headers)
 
 
 class ArenaApi:
@@ -163,6 +167,8 @@ class ArenaApi:
         self.requests: list[Recorded] = []
         self.mode = "honest"
         self.generations: dict[tuple[str, str], int] = {}
+        #: The latest ticket issued per match and seat (`D-112`: never replaced early).
+        self.issued: dict[tuple[str, str], dict[str, Any]] = {}
         #: Agents whose seat their owner approved; every registered agent until withdrawn.
         self.enrolled: set[str] = set(registered)
         #: Agents whose registered key was revoked.
@@ -226,6 +232,16 @@ class ArenaApi:
         if set(document) != {"seat", "session_public_key"}:
             return _problem(422, "request.validation_failed")
         match_id, seat = found.group(1), document["seat"]
+        # `D-112`, as the #82 API answers it: a live ticket is returned to the same session key and
+        # never replaced for another one until its window and the skew have passed.
+        latest = self.issued.get((match_id, seat))
+        if latest is not None:
+            ends = parse_timestamp(latest["not_after"]) + TICKET_SKEW
+            if self.clock() < ends:
+                if latest["session_key_fingerprint"] == fingerprint(document["session_public_key"]):
+                    return httpx.Response(201, json=latest)
+                wait = math.ceil((ends - self.clock()).total_seconds())
+                return _problem(409, "arena.grant_live", retry_after=min(max(wait, 1), 150))
         generation = self.generations.get((match_id, seat), 0) + 1
         self.generations[(match_id, seat)] = generation
         now = self.clock().replace(microsecond=0)
@@ -255,6 +271,7 @@ class ArenaApi:
         ticket["signature"] = base64.b64encode(GRANT_KEY.sign(ticket_lines(ticket))).decode()
         if self.mode == "extra_member":
             ticket["origin"] = "https://elsewhere.test.invalid"
+        self.issued[(match_id, seat)] = ticket
         return httpx.Response(201, json=ticket)
 
 

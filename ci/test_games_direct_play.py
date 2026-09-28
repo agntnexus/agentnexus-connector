@@ -265,6 +265,62 @@ class TestTheApiDecidesWhoMayPlay:
         assert not (first.sessions / f"{OTHER_MATCH}.{SEAT}.key").exists()
 
 
+class TestTheStandInNeverReplacesALiveTicket:
+    """The stand-in grant route follows `D-112` as the #82 API does.
+
+    A retry with the same session key returns the live ticket; another session key gets `409
+    arena.grant_live` with the seconds to wait, at most 150; only once the ticket's window and skew
+    have passed is the seat's next generation issued.
+    """
+
+    @staticmethod
+    def client(api: ArenaApi, profile: Profile) -> AgentNexusClient:
+        """Return the profile's API client against the stand-in."""
+        return AgentNexusClient(
+            agent_id=profile.agent_id,
+            key_id=profile.key_id,
+            signer=load_private_key_file(profile.key_file),
+            options=ClientOptions(base_url=API_BASE),
+            transport=httpx.MockTransport(api.handle),
+        )
+
+    def test_the_same_session_key_gets_the_same_live_ticket(
+        self, api: ArenaApi, first: Profile
+    ) -> None:
+        """A second request with the same session key returns the ticket already issued."""
+        client = self.client(api, first)
+        key = generate_key_pair().public_key_base64
+        issued = client.request_arena_grant(MATCH, seat=SEAT, session_public_key=key).payload
+        again = client.request_arena_grant(MATCH, seat=SEAT, session_public_key=key).payload
+        assert again == issued
+
+    def test_another_session_key_waits_for_the_live_ticket(
+        self, api: ArenaApi, first: Profile, clock: Clock
+    ) -> None:
+        """Another key gets 409 arena.grant_live until the window and skew have passed."""
+        client = self.client(api, first)
+        issued = client.request_arena_grant(
+            MATCH, seat=SEAT, session_public_key=generate_key_pair().public_key_base64
+        ).payload
+        with pytest.raises(ApiError) as caught:
+            client.request_arena_grant(
+                MATCH, seat=SEAT, session_public_key=generate_key_pair().public_key_base64
+            )
+        assert (caught.value.status, caught.value.code) == (409, "arena.grant_live")
+        wait = caught.value.retry_after_seconds
+        assert wait is not None and 1 <= wait <= 150
+        clock.advance(wait - 1)
+        with pytest.raises(ApiError):
+            client.request_arena_grant(
+                MATCH, seat=SEAT, session_public_key=generate_key_pair().public_key_base64
+            )
+        clock.advance(1)
+        following = client.request_arena_grant(
+            MATCH, seat=SEAT, session_public_key=generate_key_pair().public_key_base64
+        ).payload
+        assert following["seat_generation"] == issued["seat_generation"] + 1
+
+
 # ---------------------------------------------------------------------------------------------
 # The wire is the published contract
 # ---------------------------------------------------------------------------------------------
@@ -488,12 +544,14 @@ class TestSeparation:
         assert len(provider.requests) == before
 
     def test_a_superseded_session_key_is_refused_and_the_seat_can_be_joined_again(
-        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile, clock: Clock
     ) -> None:
-        """After the provider refuses the session key, the seat can be joined afresh.
+        """After the provider refuses the session key, the seat can be joined afresh, in time.
 
         The fixture rebinds the seat to another key. What the Connector observes is only the
-        refusal `unauthenticated`; it forgets the session, and a new join is granted and plays.
+        refusal `unauthenticated`; it forgets the session. A new join first meets the live ticket
+        (`D-112`: never replaced early) and redeems nothing; once the ticket's window and skew have
+        passed, a new join is granted and plays.
         """
         player = players(first)
         player.join(MATCH, SEAT)
@@ -502,6 +560,16 @@ class TestSeparation:
         provider.supersede(MATCH, SEAT, superseding)
         expect_refusal(lambda: player.move(MATCH, SEAT, 3), "provider.unauthenticated")
         assert provider.applied_moves == 0
+        redeemed = len(provider.requests)
+
+        with pytest.raises(ApiError) as caught:
+            player.join(MATCH, SEAT)
+        assert (caught.value.status, caught.value.code) == (409, "arena.grant_live")
+        assert caught.value.retry_after_seconds is not None
+        assert len(provider.requests) == redeemed
+        assert not first.sessions.exists() or not any(first.sessions.iterdir())
+
+        clock.advance(caught.value.retry_after_seconds)
         joined = player.join(MATCH, SEAT)
         assert joined["seat_generation"] == superseding + 1
         player.move(MATCH, SEAT, 3)
