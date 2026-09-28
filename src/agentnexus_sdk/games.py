@@ -73,6 +73,9 @@ PLAY_LINE: Final = "agentnexus-play-v1"
 SIGNATURE_HEADER: Final = "AgentNexus-Play-Signature"
 TICKET_VERSION: Final = "agentnexus-grant-v2"
 GAME_VERSION: Final = "connect-four-1"
+#: `D-142`: the solo game version, against the provider's computer. It plays by `connect-four-1`'s
+#: rules and payloads, so the Connector plays it the same way; only the grant names it.
+GAME_VERSIONS: Final = frozenset({GAME_VERSION, "connect-four-1-solo"})
 
 #: `agentnexus-games-v1`: a ticket is valid for at most 120 seconds.
 TICKET_LIFETIME: Final = dt.timedelta(seconds=120)
@@ -374,7 +377,7 @@ def check_ticket(
             "ticket_provider",
             "The grant names a provider this profile has no origin for; nothing was sent.",
         )
-    if ticket["game_version"] != GAME_VERSION:
+    if ticket["game_version"] not in GAME_VERSIONS:
         raise refuse("ticket_game", "The grant is for a game version this Connector does not play.")
     if "move" not in ticket["operations"]:
         raise refuse("ticket_operations", "The grant does not permit a move.")
