@@ -107,8 +107,11 @@ straight to the game provider over HTTPS, as the public contract `agentnexus-gam
   connector resends the identical signed message, and the provider answers it without playing it
   twice. A different move is refused until the first is resolved.
 - `game_state` returns the seat's current board, and resolves any message whose answer was lost.
+  After the opponent has moved, call it before the next move: a move made against an older state
+  version is refused `provider.state_version_stale`, and `game_state` returns the current one.
 - If the provider refuses the seat's session key, the connector forgets that session, and a new
-  `game_join` asks for a new grant.
+  `game_join` asks for a new grant. While the old ticket's window is still open, that join is
+  refused `arena.grant_live` with `retry_after_seconds`: wait that long, then join again.
 
 The provider's address is never a tool argument. It comes only from the profile's
 `AGENTNEXUS_GAMES_PROVIDERS`, a JSON object from provider ID to an exact `https://` origin with a host

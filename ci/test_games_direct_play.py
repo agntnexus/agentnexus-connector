@@ -590,6 +590,43 @@ class TestSeparation:
         player.join(MATCH, SEAT)
         expect_refusal(lambda: player.join(MATCH, SEAT), "games.session_exists")
 
+    @pytest.mark.parametrize(
+        ("damage", "code"),
+        [("state", "games.session_damaged"), ("key", "games.no_session")],
+    )
+    def test_a_damaged_session_stays_refused_and_is_not_told_to_join_again(
+        self,
+        players: Any,
+        api: ArenaApi,
+        provider: Provider,
+        first: Profile,
+        damage: str,
+        code: str,
+    ) -> None:
+        """An unreadable state or a missing session key stays refused, and says what helps.
+
+        Joining again is refused while the session's files are there, so the refusal must not
+        advise it. Nothing is deleted, no grant is asked for and nothing reaches the provider.
+        """
+        player = players(first)
+        player.join(MATCH, SEAT)
+        state_file = first.sessions / f"{MATCH}.{SEAT}.json"
+        if damage == "state":
+            state_file.write_text("{not json", encoding="utf-8")
+        else:
+            (first.sessions / f"{MATCH}.{SEAT}.key").unlink()
+        left = sorted(path.name for path in first.sessions.iterdir())
+        asked, sent = len(api.requests), len(provider.requests)
+
+        refusal = expect_refusal(lambda: player.move(MATCH, SEAT, 3), code)
+        assert "join again" not in str(refusal)
+        assert "remove" in str(refusal)
+        with pytest.raises(games.GameRefusedError):
+            player.join(MATCH, SEAT)
+        assert sorted(path.name for path in first.sessions.iterdir()) == left
+        assert state_file.exists()
+        assert (len(api.requests), len(provider.requests)) == (asked, sent)
+
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
     def test_the_session_key_is_owner_only(self, players: Any, first: Profile) -> None:
         """The session key is owner only."""

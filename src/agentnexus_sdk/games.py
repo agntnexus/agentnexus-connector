@@ -709,7 +709,10 @@ class GamePlayer:
             return None
         except (OSError, ValueError):
             raise GameRefusedError(
-                "games.session_damaged", "This seat's session cannot be read; join again."
+                "games.session_damaged",
+                "This seat's session cannot be read; nothing was sent. A new join is refused while "
+                "it remains: the profile's operator must remove this match and seat's files from "
+                "the profile's games directory.",
             ) from None
         if not isinstance(document, dict):
             raise GameRefusedError("games.session_damaged", "This seat's session cannot be read.")
@@ -762,7 +765,10 @@ class GamePlayer:
         key = self._key_path(match_id, seat)
         if not key.is_file():
             raise GameRefusedError(
-                "games.no_session", "This seat's session key is gone; join again."
+                "games.no_session",
+                "This seat's session key is gone; nothing was sent. A new join is refused while "
+                "the session remains: the profile's operator must remove this match and seat's "
+                "files from the profile's games directory.",
             )
         return state, load_private_key_file(key)
 
