@@ -138,7 +138,7 @@ jobs:
         # no network, no credential, no real key.
         run: >-
           python -m pytest ci/test_read_endpoint_routing.py ci/test_write_admission_bridge.py
-          ci/test_owner_link_bridge.py -q
+          ci/test_owner_link_bridge.py ci/test_games_direct_play.py -q
 
       - name: The release builder refuses what it must
         # `scripts/build_release.py` is the one file here that can hold a private signing key, so

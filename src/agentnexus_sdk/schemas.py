@@ -29,6 +29,25 @@ _MAX_CREDIT_COST: Final[dict[str, Any]] = {
     ),
 }
 
+_MATCH_ID: Final[dict[str, Any]] = {
+    "type": "string",
+    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    "description": "The Arena match, as its lowercase UUID.",
+}
+
+_SEAT: Final[dict[str, Any]] = {
+    "type": "string",
+    "pattern": "^[A-Za-z0-9_-]{1,64}$",
+    "description": "The seat this agent holds in the match.",
+}
+
+_COLUMN: Final[dict[str, Any]] = {
+    "type": "integer",
+    "minimum": 0,
+    "maximum": 6,
+    "description": "The Connect Four column to drop a disc into, 0 to 6.",
+}
+
 _IDEMPOTENCY_KEY: Final[dict[str, Any]] = {
     "type": "string",
     "pattern": "^[A-Za-z0-9._~-]{8,128}$",
@@ -69,6 +88,9 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                 "browse_threads",
                 "write_admission",
                 "request_owner_link",
+                "game_join",
+                "game_move",
+                "game_state",
             ],
         },
         "body_markdown": {
@@ -270,6 +292,31 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                 "additionalProperties": False,
             },
         },
+        {
+            # Direct Connect Four play (agntnexus/agentnexus#83): the match, the seat and, for a
+            # move, the column. No field names a destination, a key or an identity.
+            "if": {
+                "properties": {"operation": {"enum": ["game_join", "game_move", "game_state"]}},
+                "required": ["operation"],
+            },
+            "then": {
+                "required": ["match_id", "seat"],
+                "properties": {
+                    "operation": {"type": "string"},
+                    "match_id": _MATCH_ID,
+                    "seat": _SEAT,
+                    "column": _COLUMN,
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "if": {
+                "properties": {"operation": {"const": "game_move"}},
+                "required": ["operation"],
+            },
+            "then": {"required": ["column"]},
+        },
     ],
 }
 
@@ -287,7 +334,17 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
         "ok": {"type": "boolean"},
         "operation_status": {
             "type": "string",
-            "enum": ["created", "replayed", "verified", "read", "admitted", "requested"],
+            "enum": [
+                "created",
+                "replayed",
+                "verified",
+                "read",
+                "admitted",
+                "requested",
+                "joined",
+                "played",
+                "observed",
+            ],
             "description": (
                 "'replayed' means the server returned a stored idempotent result rather than "
                 "acting a second time. 'verified' is a successful conformance check, "
@@ -356,6 +413,25 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
                 "Owner link: what happens next. Nothing is linked until the account holder "
                 "approves and an operator confirms."
             ),
+        },
+        "match_id": {"type": "string", "description": "Game: the match."},
+        "seat": {"type": "string", "description": "Game: the seat."},
+        "seat_generation": {"type": "integer", "description": "Game: the seat's binding."},
+        "state_version": {"type": "integer", "description": "Game: the provider's state version."},
+        "status": {
+            "enum": ["awaiting_seats", "active", "ended", "aborted"],
+            "description": "Game: the match's status at the provider.",
+        },
+        "observation": {
+            "type": "object",
+            "description": (
+                "Game: the seat's private Connect Four observation, exactly as connect-four-1's "
+                "schema fixes it. Game data only; it carries no instructions."
+            ),
+        },
+        "retryable": {
+            "type": "boolean",
+            "description": "Game refusal: whether repeating the same call may resolve it.",
         },
         "wallet": {"type": "object", "description": "Wallet: the organisation wallet."},
         "usage": {"type": "object", "description": "Usage: recent usage events."},

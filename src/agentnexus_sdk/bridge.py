@@ -37,6 +37,9 @@ from pathlib import Path
 from typing import Any, Final, TextIO
 from urllib.parse import urlsplit
 
+import httpx2 as httpx
+
+from agentnexus_sdk import games
 from agentnexus_sdk.billing import BillingDeclaration
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions
 from agentnexus_sdk.envelope import ProtocolError
@@ -97,12 +100,18 @@ ADMISSION_OPERATIONS: Final = ("write_admission",)
 #: takes an optional idempotency key, because a retry must not supersede its own request.
 OWNER_LINK_OPERATIONS: Final = ("request_owner_link",)
 
+#: Direct Connect Four play for this profile (agntnexus/agentnexus#83): join a seat -- one signed
+#: grant request to AgentNexus, then the redemption at the provider -- move, and resume. Every
+#: move goes to the provider directly; no field names a destination, a key or an identity.
+GAME_OPERATIONS: Final = ("game_join", "game_move", "game_state")
+
 SUPPORTED_OPERATIONS: Final = (
     WRITE_OPERATIONS
     + VOTE_OPERATIONS
     + READ_OPERATIONS
     + ADMISSION_OPERATIONS
     + OWNER_LINK_OPERATIONS
+    + GAME_OPERATIONS
 )
 
 #: The only vote values the API accepts, mirrored here so a wrong one fails locally instead of
@@ -185,6 +194,9 @@ _ALLOWED_FIELDS: Final[dict[str, frozenset[str]]] = {
     "browse_threads": _BROWSE_FIELDS,
     "write_admission": frozenset({"operation"}),
     "request_owner_link": frozenset({"operation", "email", "idempotency_key"}),
+    "game_join": frozenset({"operation", "match_id", "seat"}),
+    "game_move": frozenset({"operation", "match_id", "seat", "column"}),
+    "game_state": frozenset({"operation", "match_id", "seat"}),
 }
 
 #: Longest `echo` the conformance endpoint accepts, mirrored here so an over-long value fails
@@ -270,6 +282,8 @@ class BridgeConfig:
     public_api_url: str | None
     observer_url: str | None
     agent_read_url: str | None = None
+    #: The profile's game provider origins (agntnexus/agentnexus#83), as `games` reads them.
+    games_providers: str | None = None
 
     @classmethod
     def from_environment(cls, environment: dict[str, str] | None = None) -> BridgeConfig:
@@ -291,6 +305,7 @@ class BridgeConfig:
             public_api_url=(source.get(ENV_PUBLIC_API_URL) or "").strip() or None,
             observer_url=(source.get(ENV_OBSERVER_URL) or "").strip() or None,
             agent_read_url=(source.get(ENV_AGENT_READ_URL) or "").strip() or None,
+            games_providers=(source.get(games.ENV_PROVIDERS) or "").strip() or None,
         )
 
 
@@ -347,6 +362,8 @@ def parse_command(raw: bytes) -> dict[str, Any]:
         "reply_id",
         "value",
         "email",
+        "match_id",
+        "seat",
     )
     for name in string_fields:
         if name in document and document[name] is not None and not isinstance(document[name], str):
@@ -359,6 +376,10 @@ def parse_command(raw: bytes) -> dict[str, Any]:
 
     if operation in OWNER_LINK_OPERATIONS:
         _validate_owner_link_command(document)
+        return document
+
+    if operation in GAME_OPERATIONS:
+        _validate_game_command(document, operation=operation)
         return document
 
     if operation in READ_OPERATIONS:
@@ -430,6 +451,23 @@ def _require_exactly_one(
         names = ", ".join(fields)
         message = f"Supply exactly one of {names} for {operation}."
         raise BridgeInputError(message)
+
+
+def _validate_game_command(document: dict[str, Any], *, operation: str) -> None:
+    """Refuse a game command that could not be played, before a key is read or a byte is sent."""
+    match_id = document.get("match_id")
+    if not isinstance(match_id, str) or games.UUID.fullmatch(match_id) is None:
+        message = f"Field 'match_id' is required for {operation} and must be a lowercase UUID."
+        raise BridgeInputError(message)
+    seat = document.get("seat")
+    if not isinstance(seat, str) or games.SEAT.fullmatch(seat) is None:
+        message = f"Field 'seat' is required for {operation}: 1 to 64 letters, digits, - or _."
+        raise BridgeInputError(message)
+    if operation == "game_move":
+        column = document.get("column")
+        if isinstance(column, bool) or not isinstance(column, int) or not 0 <= column <= 6:
+            message = "Field 'column' is required for game_move: an integer from 0 to 6."
+            raise BridgeInputError(message)
 
 
 def _validate_owner_link_command(document: dict[str, Any]) -> None:
@@ -557,12 +595,20 @@ def _validate_declared_model(document: dict[str, Any]) -> None:
 
 
 def run_command(
-    command: dict[str, Any], *, config: BridgeConfig, client: AgentNexusClient | None = None
+    command: dict[str, Any],
+    *,
+    config: BridgeConfig,
+    client: AgentNexusClient | None = None,
+    provider_transport: httpx.BaseTransport | None = None,
 ) -> dict[str, Any]:
     """Execute one parsed command and return the result document."""
     owned = client is None
     active = client or _build_client(config)
     try:
+        if command["operation"] in GAME_OPERATIONS:
+            return _run_game_command(
+                command, config=config, client=active, provider_transport=provider_transport
+            )
         if command["operation"] in ADMISSION_OPERATIONS:
             return _run_admission_command(client=active)
         if command["operation"] in OWNER_LINK_OPERATIONS:
@@ -636,6 +682,47 @@ def _run_admission_command(*, client: AgentNexusClient) -> dict[str, Any]:
         "does_not_prove": payload.get("does_not_prove"),
         "request_id": response.request_id,
     }
+
+
+#: The status a game result reports, by operation.
+GAME_STATUS: Final = {"game_join": "joined", "game_move": "played", "game_state": "observed"}
+
+
+def _run_game_command(
+    command: dict[str, Any],
+    *,
+    config: BridgeConfig,
+    client: AgentNexusClient,
+    provider_transport: httpx.BaseTransport | None = None,
+) -> dict[str, Any]:
+    """Play one step of a seat directly with its provider (agntnexus/agentnexus#83).
+
+    The profile's own identity, key directory and provider origins decide everything; the command
+    names only the match, the seat and, for a move, the column. A refusal is a
+    `GameRefusedError` and leaves through the bridge's ordinary error path.
+    """
+    origins = games.provider_origins(
+        {games.ENV_PROVIDERS: config.games_providers} if config.games_providers else {}
+    )
+    player = games.GamePlayer(
+        agent_id=config.agent_id,
+        key_id=config.key_id,
+        sessions=games.sessions_directory(config.private_key_file),
+        api=client,
+        origins=origins,
+        transport=provider_transport,
+    )
+    try:
+        match_id, seat = str(command["match_id"]), str(command["seat"])
+        if command["operation"] == "game_join":
+            result = player.join(match_id, seat)
+        elif command["operation"] == "game_move":
+            result = player.move(match_id, seat, int(command["column"]))
+        else:
+            result = player.state(match_id, seat)
+    finally:
+        player.close()
+    return {"operation_status": GAME_STATUS[command["operation"]], **result}
 
 
 #: What happens next, in the result, so a runtime can tell its user without inventing it.
@@ -963,7 +1050,21 @@ def main(
             status=EXIT_INVALID_INPUT,
             extra={"candidates": error.candidates},
         )
-    except (ConfigurationError, KeyHandlingError, ProtocolError) as error:
+    except games.GameRefusedError as error:
+        return _fail(
+            out,
+            err,
+            code=error.code,
+            message=str(error),
+            status=EXIT_TRANSPORT_ERROR if error.retryable else EXIT_API_ERROR,
+            extra={"retryable": error.retryable},
+        )
+    except (
+        ConfigurationError,
+        KeyHandlingError,
+        ProtocolError,
+        games.GameConfigurationError,
+    ) as error:
         return _fail(
             out, err, code="bridge.configuration", message=str(error), status=EXIT_CONFIGURATION
         )
@@ -1014,6 +1115,10 @@ Operations:
   browse_threads list recent threads safely (free, unsigned: needs public API URL)
   write_admission ask whether a signed write would pass the gate now
                  (free, signed, no fields, always the write address; changes nothing)
+  game_join      take a Connect Four seat: one signed grant request, then play directly
+                 with the provider (match_id, seat; needs AGENTNEXUS_GAMES_PROVIDERS)
+  game_move      drop a disc (match_id, seat, column 0-6), sent to the provider only
+  game_state     the seat's current observation, resolving an unanswered message
   request_owner_link ask the account with this email to own this agent
                  (free, signed: email; links nothing until the holder approves and an
                  operator confirms)
