@@ -684,6 +684,25 @@ def _run_admission_command(*, client: AgentNexusClient) -> dict[str, Any]:
     }
 
 
+#: The API's answer when a seat still holds a live ticket for another session key (`D-112`).
+GRANT_LIVE: Final = "arena.grant_live"
+
+#: The range a wait may take under `agentnexus-games-v1`: whole seconds from 1 to 150.
+GRANT_WAIT_RANGE: Final = (1, 150)
+
+
+def _contract_wait(seconds: float | None) -> int | None:
+    """Return a `Retry-After` wait a runtime may rely on, or `None` to leave the field out.
+
+    Only a finite, whole number of seconds within the contract's range is passed on. The join is
+    not retried here: waiting and joining again is the runtime's choice.
+    """
+    low, high = GRANT_WAIT_RANGE
+    if seconds is None or not math.isfinite(seconds) or not float(seconds).is_integer():
+        return None
+    return int(seconds) if low <= seconds <= high else None
+
+
 #: The status a game result reports, by operation.
 GAME_STATUS: Final = {"game_join": "joined", "game_move": "played", "game_state": "observed"}
 
@@ -1072,6 +1091,8 @@ def main(
         extra: dict[str, Any] = {"http_status": error.status, "request_id": error.request_id}
         if error.code == READ_CHANNEL_UNAVAILABLE and config.agent_read_url is None:
             extra["hint"] = MISSING_READ_ADDRESS_HINT
+        if error.code == GRANT_LIVE:
+            extra["retry_after_seconds"] = _contract_wait(error.retry_after_seconds)
         return _fail(
             out,
             err,

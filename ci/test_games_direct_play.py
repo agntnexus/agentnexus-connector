@@ -942,6 +942,119 @@ class TestWhatARuntimeCanCall:
         }
 
 
+class TestTheWaitReachesTheRuntime:
+    """`arena.grant_live` tells a runtime how long to wait, through the bridge and MCP alike.
+
+    The API answers a join that meets a live ticket with 409 and `Retry-After`. The bridge passes
+    the wait on as `retry_after_seconds` only when it is a whole number of seconds from 1 to 150,
+    the contract's range; otherwise the field is absent. The join is not retried on its own, and
+    the refusal carries no ticket and no key.
+    """
+
+    @staticmethod
+    def bridge_join(
+        api: ArenaApi, profile: Profile, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[int, dict[str, Any], str]:
+        """Meet a live ticket through `bridge.main`: return the exit code, document and stderr."""
+        import io
+
+        client = AgentNexusClient(
+            agent_id=profile.agent_id,
+            key_id=profile.key_id,
+            signer=load_private_key_file(profile.key_file),
+            options=ClientOptions(base_url=API_BASE),
+            transport=httpx.MockTransport(api.handle),
+        )
+        # A live ticket for another session key, issued before the join.
+        client.request_arena_grant(
+            MATCH, seat=SEAT, session_public_key=generate_key_pair().public_key_base64
+        )
+        monkeypatch.setattr(bridge, "_build_client", lambda _config: client)
+        out, err = io.StringIO(), io.StringIO()
+        code = bridge.main(
+            [],
+            stdin=io.StringIO(
+                json.dumps({"operation": "game_join", "match_id": MATCH, "seat": SEAT})
+            ),
+            stdout=out,
+            stderr=err,
+            environment={
+                bridge.ENV_AGENT_ID: profile.agent_id,
+                bridge.ENV_KEY_ID: profile.key_id,
+                bridge.ENV_PRIVATE_KEY_FILE: str(profile.key_file),
+                bridge.ENV_AGENT_API_URL: API_BASE,
+                games.ENV_PROVIDERS: json.dumps({PROVIDER_ID: ORIGIN}),
+            },
+        )
+        return code, json.loads(out.getvalue()), err.getvalue()
+
+    def test_the_wait_is_in_the_error_document_and_nothing_is_retried(
+        self, api: ArenaApi, provider: Provider, first: Profile, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """409 arena.grant_live reaches the runtime with its wait; one request, no play."""
+        code, document, _ = self.bridge_join(api, first, monkeypatch)
+        assert code == bridge.EXIT_API_ERROR
+        assert document["error_code"] == "arena.grant_live"
+        assert document["http_status"] == 409
+        assert document["retry_after_seconds"] == 150
+        assert len(api.requests) == 2, "the join was retried on its own"
+        assert provider.requests == []
+
+    @pytest.mark.parametrize(
+        ("header", "passed_on"),
+        [
+            ("1", 1),
+            ("150", 150),
+            ("0", None),
+            ("151", None),
+            ("1.5", None),
+            ("inf", None),
+            ("nan", None),
+            ("soon", None),
+            ("", None),
+        ],
+    )
+    def test_only_a_wait_in_the_contracts_range_is_passed_on(
+        self,
+        api: ArenaApi,
+        first: Profile,
+        monkeypatch: pytest.MonkeyPatch,
+        header: str,
+        passed_on: int | None,
+    ) -> None:
+        """A missing, fractional, infinite or out-of-range wait leaves the field out."""
+        api.grant_live_retry_after = header
+        _, document, _ = self.bridge_join(api, first, monkeypatch)
+        assert document["error_code"] == "arena.grant_live"
+        assert document.get("retry_after_seconds") == passed_on
+        if passed_on is None:
+            assert "retry_after_seconds" not in document
+
+    def test_the_wait_arrives_in_mcp_structured_content_without_ticket_or_key(
+        self, api: ArenaApi, first: Profile, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The MCP tool result carries the same document; no ticket or key is in it."""
+        _, document, stderr = self.bridge_join(api, first, monkeypatch)
+        monkeypatch.setattr(mcp_server, "run_bridge", lambda _command: document)
+        answer = mcp_server.handle_request(
+            "tools/call",
+            {"name": "game_join", "arguments": {"match_id": MATCH, "seat": SEAT}},
+        )
+        assert answer["isError"] is True
+        assert answer["structuredContent"]["retry_after_seconds"] == 150
+        shown = json.dumps(answer) + stderr
+        issued = next(json.loads(r.body) for r in api.requests)
+        for secret in (
+            "ticket",
+            "signature",
+            "session_public_key",
+            issued["session_public_key"],
+            base64.b64encode(first.private_bytes).decode(),
+            first.private_bytes.hex(),
+        ):
+            assert secret not in shown
+
+
 class TestTheFixtureSpeaksBothSeatNames:
     """The provider fixture knows the vector's seat names and the ones #82's API issues.
 

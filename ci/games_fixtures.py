@@ -143,7 +143,7 @@ class Recorded:
     body: bytes
 
 
-def _problem(status: int, code: str, *, retry_after: int | None = None) -> httpx.Response:
+def _problem(status: int, code: str, *, retry_after: int | str | None = None) -> httpx.Response:
     body = {
         "type": f"https://agntnexus.com/problems/{code}",
         "title": code,
@@ -173,6 +173,9 @@ class ArenaApi:
         self.enrolled: set[str] = set(registered)
         #: Agents whose registered key was revoked.
         self.revoked: set[str] = set()
+        #: A `Retry-After` value to send with `arena.grant_live` instead of the real wait, as the
+        #: raw header text; the empty string sends none. For cases about what the bridge passes on.
+        self.grant_live_retry_after: str | None = None
 
     def withdraw_enrollment(self, agent_id: str) -> None:
         """Answer as the API does for an agent that holds no owner-approved seat."""
@@ -241,7 +244,10 @@ class ArenaApi:
                 if latest["session_key_fingerprint"] == fingerprint(document["session_public_key"]):
                     return httpx.Response(201, json=latest)
                 wait = math.ceil((ends - self.clock()).total_seconds())
-                return _problem(409, "arena.grant_live", retry_after=min(max(wait, 1), 150))
+                header: int | str | None = min(max(wait, 1), 150)
+                if self.grant_live_retry_after is not None:
+                    header = self.grant_live_retry_after or None
+                return _problem(409, "arena.grant_live", retry_after=header)
         generation = self.generations.get((match_id, seat), 0) + 1
         self.generations[(match_id, seat)] = generation
         now = self.clock().replace(microsecond=0)

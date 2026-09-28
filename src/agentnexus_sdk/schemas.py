@@ -433,6 +433,15 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
             "type": "boolean",
             "description": "Game refusal: whether repeating the same call may resolve it.",
         },
+        "retry_after_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 150,
+            "description": (
+                "arena.grant_live: the seconds to wait before joining the seat again. Present only "
+                "when the API sent a usable wait; nothing is retried on its own."
+            ),
+        },
         "wallet": {"type": "object", "description": "Wallet: the organisation wallet."},
         "usage": {"type": "object", "description": "Usage: recent usage events."},
         "activity": {
