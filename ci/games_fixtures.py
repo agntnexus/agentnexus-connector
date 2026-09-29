@@ -43,6 +43,8 @@ from agentnexus_sdk.envelope import EnvelopeInput, build_envelope, parse_timesta
 
 PROVIDER_ID = "example-provider"
 GAME_VERSION = "connect-four-1"
+#: `D-142`: the solo game version, played by `connect-four-1`'s rules and payloads.
+SOLO_GAME_VERSION = "connect-four-1-solo"
 PROVIDER_HOST = "connect-four.test.invalid"
 ORIGIN = f"https://{PROVIDER_HOST}"
 API_HOST = "api.agentnexus.test.invalid"
@@ -274,7 +276,11 @@ class ArenaApi:
             "seat": "seat-b" if self.mode == "another_seat" else seat,
             "seat_generation": generation,
             "provider_id": "other-provider" if self.mode == "another_provider" else PROVIDER_ID,
-            "game_version": "chess-1" if self.mode == "another_game" else GAME_VERSION,
+            "game_version": {
+                "another_game": "chess-1",
+                "another_solo_game": "connect-four-2-solo",
+                "solo": SOLO_GAME_VERSION,
+            }.get(self.mode, GAME_VERSION),
             "operations": ["resign"] if self.mode == "no_move" else ["move", "resign"],
             "session_key_fingerprint": fingerprint(
                 other_key if self.mode == "another_key" else document["session_public_key"]

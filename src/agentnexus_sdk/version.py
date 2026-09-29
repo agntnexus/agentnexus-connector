@@ -119,7 +119,13 @@ from typing import Final
 #: is signed with a fresh session key and goes only to the provider origin the profile configures
 #: in `AGENTNEXUS_GAMES_PROVIDERS`.  No real match grant exists yet (`D-101`).  It carries
 #: everything 0.8.0 added; 0.8.0 was signed but never served by the origin.
-__version__: Final = "0.9.0"
+#:
+#: 0.10.0 is a minor bump because it adds a capability: a grant for the solo game version
+#: `connect-four-1-solo` is accepted and played like `connect-four-1`, against the provider's
+#: computer opponent (`D-142`, agntnexus/agentnexus#92). Every other game version is still
+#: refused. No real match grant exists yet (`D-101`). It carries everything 0.9.0 added; 0.9.0 is a
+#: signed candidate the origin has not served.
+__version__: Final = "0.10.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.

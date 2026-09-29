@@ -192,6 +192,7 @@ class TestTheTicketIsTheOneAskedFor:
             ("another_key", "games.ticket_key"),
             ("another_provider", "games.ticket_provider"),
             ("another_game", "games.ticket_game"),
+            ("another_solo_game", "games.ticket_game"),
             ("no_move", "games.ticket_operations"),
             ("expired", "games.ticket_window"),
             ("extra_member", "games.ticket_malformed"),
@@ -211,6 +212,18 @@ class TestTheTicketIsTheOneAskedFor:
         player = players(first)
         expect_refusal(lambda: player.join(MATCH, SEAT), code)
         assert provider.requests == []
+
+    def test_a_grant_for_the_solo_game_version_is_played(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """`D-142`: a ticket for `connect-four-1-solo` is played like one for `connect-four-1`."""
+        api.mode = "solo"
+        player = players(first)
+        joined = player.join(MATCH, SEAT)
+        assert joined["status"] == "active"
+        played = player.move(MATCH, SEAT, 3)
+        assert played["observation"]["move_count"] == 2
+        assert [r.path.rsplit("/", 1)[1] for r in provider.requests] == ["redemption", "actions"]
 
     def test_an_api_refusal_is_passed_on_and_nothing_is_redeemed(
         self, players: Any, api: ArenaApi, provider: Provider, first: Profile
