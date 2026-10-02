@@ -254,6 +254,32 @@ def test_a_linked_key_or_journal_cannot_borrow_another_profile(tmp_path: Path) -
         arena_runner.profile_storage(own)
 
 
+@pytest.mark.parametrize("enable", [True, False])
+def test_service_lifecycle_refuses_a_unit_linked_to_another_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enable: bool
+) -> None:
+    """Neither enabling nor stopping a profile may act through another profile's unit."""
+    units = tmp_path / ".config" / "systemd" / "user"
+    units.mkdir(parents=True)
+    other = units / "agentnexus-arena-other.service"
+    other.write_text("synthetic unrelated unit", encoding="utf-8")
+    unit = units / "agentnexus-arena-agent2.service"
+    unit.symlink_to(other)
+    calls: list[object] = []
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+    monkeypatch.setattr(arena_runner.subprocess, "run", lambda *args, **kwargs: calls.append(args))
+    paths = SimpleNamespace(
+        profile="agent2", install_root=SimpleNamespace(resolve=lambda: "/synthetic-install")
+    )
+    with pytest.raises(arena_runner.RunnerRefused, match="unit"):
+        arena_runner._service(paths, enable=enable)
+    assert other.read_text(encoding="utf-8") == "synthetic unrelated unit"
+    assert unit.is_symlink()
+    assert calls == []
+
+
 def test_journal_never_shares_runner_identity_between_profiles(tmp_path: Path) -> None:
     """Two independent profile journals hold distinct identities and reservations."""
     first = arena_runner.RunJournal(tmp_path / "first" / "journal.sqlite3")
