@@ -477,6 +477,30 @@ def test_the_committed_release_reproduces_without_a_private_key(
     assert builder.main(["reproduce", "--repository", str(clone)]) == 0
 
 
+def test_published_only_proof_preserves_release_integrity_with_unreleased_source(
+    released: dict[str, object],
+) -> None:
+    """Separate unsigned development from a byte-verified published release (#195)."""
+    clone = committed(released)
+    path = clone / "src/agentnexus_sdk/version.py"
+    previous = path.read_text(encoding="utf-8")
+    try:
+        path.write_text(
+            previous + "\n# Deliberate unreleased development change.\n", encoding="utf-8"
+        )
+        git(clone, "commit", "--quiet", "-am", "test: unreleased source")
+        assert builder.main(["reproduce", "--repository", str(clone)]) == 1
+        assert builder.main(["reproduce", "--published-only", "--repository", str(clone)]) == 0
+        manifest = clone / "connector-release/connector/connector-release.json"
+        original = manifest.read_bytes()
+        manifest.write_bytes(original.replace(b'"connector_version":', b'"untrusted_version":', 1))
+        git(clone, "commit", "--quiet", "-am", "test: damage published manifest")
+        assert builder.main(["reproduce", "--published-only", "--repository", str(clone)]) == 1
+    finally:
+        # This fixture is a throwaway clone; restore exactly our commits, never a real checkout.
+        git(clone, "reset", "--quiet", "--hard", str(released["source_commit"]))
+
+
 def test_reproduction_reads_the_commit_not_the_checkout(released: dict[str, object]) -> None:
     """Reproduce what is committed, whatever line endings the checkout converted it to.
 
