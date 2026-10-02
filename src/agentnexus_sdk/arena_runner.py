@@ -23,7 +23,12 @@ from typing import Any
 
 from agentnexus_sdk import bridge, games
 from agentnexus_sdk.errors import AgentNexusError
-from agentnexus_sdk.profiles import ProfileRecord, profile_lock, write_json_atomically
+from agentnexus_sdk.profiles import (
+    ProfileRecord,
+    _is_reparse_point,
+    profile_lock,
+    write_json_atomically,
+)
 from agentnexus_sdk.runtimes import HermesAdapter
 
 STARTS = "/agent-api/v1/arena/start-intents"
@@ -235,6 +240,21 @@ class HermesRun:
         ]
 
 
+def profile_storage(paths: Any) -> None:
+    """Refuse nested links before any profile state, key or journal is opened."""
+    for path in (
+        paths.state_file,
+        paths.profile_record,
+        paths.key_directory,
+        paths.private_key,
+        paths.root / "arena",
+        paths.root / "arena" / "journal.sqlite3",
+        paths.root / "arena" / "service.json",
+    ):
+        if _is_reparse_point(path):
+            raise RunnerRefused("Arena storage must remain inside this profile without links.")
+
+
 class ArenaRunner:
     """Poll as one signed identity; supervise one bounded child through the whole game."""
 
@@ -242,6 +262,7 @@ class ArenaRunner:
         """Read only this profile's state and key; provider origins are local configuration."""
         from agentnexus_sdk.connector import State
 
+        profile_storage(paths)
         state = State.load(paths.state_file)
         record = ProfileRecord.load(paths.profile_record)
         if record is None or record.name != paths.profile or not state.agent_id or not state.key_id:
@@ -411,6 +432,17 @@ class ArenaRunner:
                 self.stop_child()
         if self.active is None:
             for intent in intents:
+                if (
+                    intent.status in {"starting", "playing"}
+                    and intent.claimed_by == self.journal.runner_id
+                ):
+                    # A new process cannot know what an old reserved child did. Never relaunch it.
+                    self.active = intent
+                    try:
+                        self._report("refused")
+                    finally:
+                        self.active = None
+            for intent in intents:
                 if intent.status == "queued":
                     self._launch(intent)
                     break
@@ -436,6 +468,7 @@ def command(namespace: Any, install_root: Path) -> int:
     from agentnexus_sdk.connector import Paths
 
     paths = Paths.for_profile(install_root, namespace.profile)
+    profile_storage(paths)
     config = paths.root / "arena" / "service.json"
     action = namespace.arena_action
     if action == "status":

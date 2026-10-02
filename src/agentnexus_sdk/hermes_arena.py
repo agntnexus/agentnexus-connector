@@ -249,7 +249,7 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception:
+    except Exception as error:
         # Do not expose provider errors, credentials, config or model output in service logs.
-        print("Bounded Arena execution refused.", file=sys.stderr)
+        print(f"Bounded Arena execution refused ({type(error).__name__}).", file=sys.stderr)
         raise SystemExit(3) from None
