@@ -507,6 +507,8 @@ def _service(paths: Any, *, enable: bool) -> None:
     name = f"agentnexus-arena-{paths.profile}.service"
     units = Path.home() / ".config" / "systemd" / "user"
     unit = units / name
+    if _is_reparse_point(unit):
+        raise RunnerRefused("This profile's service unit must not link to another unit.")
     if enable:
         # systemd has its own expansion syntax; refuse it instead of interpolating unsafe paths.
         arguments = [
