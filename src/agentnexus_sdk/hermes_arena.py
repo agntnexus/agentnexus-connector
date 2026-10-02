@@ -233,13 +233,16 @@ def main() -> int:
             agent._persist_disabled = True
             assert_tools(agent.tools)
             try:
-                agent.run_conversation(
+                result = agent.run_conversation(
                     PROMPT
                     + " Your seat is "
                     + request["seat"]
                     + ". Current game data: "
                     + json.dumps(state)
                 )
+                if not isinstance(result, dict) or result.get("failed") or result.get("error"):
+                    # The runtime already classified the failure. Never restart its retry budget.
+                    return 3
             finally:
                 agent.close()
             state = tool("game_state", {})
