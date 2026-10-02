@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import importlib.util
+import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
-from agentnexus_sdk import arena_runner
+from agentnexus_sdk import arena_runner, hermes_arena
 
 
 def intent(agent_id: str) -> dict[str, object]:
@@ -88,3 +90,76 @@ def test_expired_or_unbounded_intent_is_refused() -> None:
     ):
         with pytest.raises(arena_runner.RunnerRefused):
             arena_runner.StartIntent.parse({**document, field: value}, agent_id=agent)
+
+
+def test_model_cannot_name_another_match_or_tool() -> None:
+    """Refuse unknown tools, foreign match fields and a boolean masquerading as a column."""
+    assert hermes_arena.bounded_request("game_move", {"column": 3}) == {
+        "operation": "game_move",
+        "column": 3,
+    }
+    for operation, arguments in (
+        ("terminal", {"command": "untrusted"}),
+        ("game_join", {"match_id": str(uuid.uuid4())}),
+        ("game_state", {"profile": "other"}),
+        ("game_move", {"column": True}),
+    ):
+        with pytest.raises(ValueError):
+            hermes_arena.bounded_request(operation, arguments)
+    definitions = [{"function": {"name": name}} for name in sorted(hermes_arena.TOOLS)]
+    hermes_arena.assert_tools(definitions)
+    for altered in (
+        [*definitions, {"function": {"name": "terminal"}}],
+        definitions[:2],
+        [definitions[0]] * 3,
+    ):
+        with pytest.raises(ValueError):
+            hermes_arena.assert_tools(altered)
+
+
+def test_journal_never_shares_runner_identity_between_profiles(tmp_path: Path) -> None:
+    """Two independent profile journals hold distinct identities and reservations."""
+    first = arena_runner.RunJournal(tmp_path / "first" / "journal.sqlite3")
+    second = arena_runner.RunJournal(tmp_path / "second" / "journal.sqlite3")
+    assert first.runner_id != second.runner_id
+    runner_id = first.runner_id
+    first.close()
+    reopened = arena_runner.RunJournal(tmp_path / "first" / "journal.sqlite3")
+    assert reopened.runner_id == runner_id
+    reopened.close()
+    second.close()
+
+
+@pytest.mark.parametrize("mutation", ["profile", "reservation"])
+def test_authority_oracles_kill_deliberately_weakened_guards(tmp_path: Path, mutation: str) -> None:
+    """Run the same authority assertion against restored source and a deliberately weakened copy."""
+    source = Path(arena_runner.__file__).read_text(encoding="utf-8")
+    if mutation == "profile":
+        original = "identity != _uuid(agent_id)"
+        replacement = "False"
+    else:
+        original = "return cursor.rowcount == 1"
+        replacement = "return True"
+    assert source.count(original) == 1
+    path = tmp_path / "mutant.py"
+    path.write_text(source.replace(original, replacement), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("arena_mutant", path)
+    assert spec is not None and spec.loader is not None
+    mutant = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mutant
+    try:
+        spec.loader.exec_module(mutant)
+        if mutation == "profile":
+            document = intent(str(uuid.uuid4()))
+            with pytest.raises(AssertionError):
+                accepted = mutant.StartIntent.parse(document, agent_id=str(uuid.uuid4()))
+                assert accepted.agent_id != document["agent_id"]
+        else:
+            journal = mutant.RunJournal(tmp_path / "mutant.sqlite3")
+            identifier = str(uuid.uuid4())
+            assert journal.reserve(identifier)
+            with pytest.raises(AssertionError):
+                assert not journal.reserve(identifier)
+            journal.close()
+    finally:
+        del sys.modules[spec.name]
