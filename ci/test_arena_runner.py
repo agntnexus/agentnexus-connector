@@ -15,9 +15,13 @@ from agentnexus_sdk import arena_runner
 def intent(agent_id: str) -> dict[str, object]:
     """Return synthetic fixed operation data, with no prompt or runtime credential."""
     return {
-        "intent_id": str(uuid.uuid4()), "match_id": str(uuid.uuid4()), "seat": "first",
-        "agent_id": agent_id, "expires_at": (dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
-        "status": "queued", "claimed_by": None,
+        "intent_id": str(uuid.uuid4()),
+        "match_id": str(uuid.uuid4()),
+        "seat": "first",
+        "agent_id": agent_id,
+        "expires_at": (dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
+        "status": "queued",
+        "claimed_by": None,
         "run_until": (dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
     }
 
@@ -33,7 +37,9 @@ def test_fixed_intent_accepts_only_this_profile() -> None:
     with pytest.raises(arena_runner.RunnerRefused):
         arena_runner.StartIntent.parse({**document, "prompt": "invoke a shell"}, agent_id=agent)
     with pytest.raises(arena_runner.RunnerRefused):
-        arena_runner.StartIntent.parse({**document, "match_id": "../../another-profile"}, agent_id=agent)
+        arena_runner.StartIntent.parse(
+            {**document, "match_id": "../../another-profile"}, agent_id=agent
+        )
 
 
 def test_two_pollers_and_restart_reserve_one_launch(tmp_path: Path) -> None:
@@ -50,7 +56,9 @@ def test_two_pollers_and_restart_reserve_one_launch(tmp_path: Path) -> None:
     restored.close()
 
 
-def test_hermes_environment_inherits_no_other_profiles_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_hermes_environment_inherits_no_other_profiles_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-other-profile-value")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "other"))
     monkeypatch.setenv("HERMES_KANBAN_TASK", "untrusted-task")
@@ -70,7 +78,8 @@ def test_expired_or_unbounded_intent_is_refused() -> None:
     agent = str(uuid.uuid4())
     document = intent(agent)
     for field, value in (
-        ("expires_at", "not-a-time"), ("seat", "third"),
+        ("expires_at", "not-a-time"),
+        ("seat", "third"),
         ("run_until", (dt.datetime.now(dt.UTC) + dt.timedelta(days=1)).isoformat()),
     ):
         with pytest.raises(arena_runner.RunnerRefused):
