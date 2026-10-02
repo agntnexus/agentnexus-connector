@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import io
 import sys
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -115,6 +118,86 @@ def test_model_cannot_name_another_match_or_tool() -> None:
     ):
         with pytest.raises(ValueError):
             hermes_arena.assert_tools(altered)
+
+
+def test_supervisor_services_the_whole_game_with_only_its_bound_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Joining, playing and terminal observation all use the parent-supplied seat."""
+    agent = str(uuid.uuid4())
+    owned = arena_runner.StartIntent.parse(intent(agent), agent_id=agent)
+    runner = object.__new__(arena_runner.ArenaRunner)
+    runner.config = SimpleNamespace(agent_id=agent)
+    runner.client = object()
+    runner.finished = threading.Event()
+    runner.playing = runner.terminal = False
+    calls: list[dict[str, object]] = []
+    reports: list[str] = []
+    monkeypatch.setattr(runner, "_report", reports.append)
+
+    def game(command: dict[str, object], **kwargs: object) -> dict[str, str]:
+        """Record the fixed authority and return a three-step synthetic provider lifecycle."""
+        calls.append(command)
+        return {"status": "ended" if command["operation"] == "game_state" else "active"}
+
+    monkeypatch.setattr(arena_runner.bridge, "_run_game_command", game)
+    child = SimpleNamespace(
+        stdout=io.StringIO(
+            '{"operation":"game_join"}\n{"operation":"game_move","column":3}\n'
+            '{"operation":"game_state"}\n{"finished":true}\n'
+        ),
+        stdin=io.StringIO(),
+    )
+    runner._serve(child, owned)
+    assert [call["operation"] for call in calls] == ["game_join", "game_move", "game_state"]
+    assert all(call["match_id"] == owned.match_id and call["seat"] == owned.seat for call in calls)
+    assert reports == ["playing"]
+    assert runner.terminal and runner.finished.is_set()
+    calls.clear()
+    malicious = SimpleNamespace(
+        stdout=io.StringIO('{"operation":"game_join","match_id":"foreign"}\n'), stdin=io.StringIO()
+    )
+    runner._serve(malicious, owned)
+    assert calls == []
+
+
+def test_restarted_runner_refuses_uncertain_claim_and_never_launches_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A heartbeat after restart must not keep an uncertain old child falsely starting."""
+    agent = str(uuid.uuid4())
+    runner = object.__new__(arena_runner.ArenaRunner)
+    runner.config = SimpleNamespace(agent_id=agent)
+    runner.journal = arena_runner.RunJournal(tmp_path / "journal.sqlite3")
+    runner.active = None
+    document = {**intent(agent), "status": "starting", "claimed_by": runner.journal.runner_id}
+    writes: list[str] = []
+
+    def post(path: str, payload: object) -> object:
+        """Replay an old claim while recording which bounded operations the runner sends."""
+        writes.append(path)
+        return {"intents": [document]} if path == "/poll" else document
+
+    monkeypatch.setattr(runner, "_post", post)
+    monkeypatch.setattr(runner, "_launch", lambda _: pytest.fail("restart launched a second child"))
+    runner.tick()
+    assert writes == ["/poll", f"/{document['intent_id']}/status"]
+    assert runner.active is None
+    runner.journal.close()
+
+
+def test_a_linked_key_or_journal_cannot_borrow_another_profile(tmp_path: Path) -> None:
+    """Reject nested symlinks before reading any key or creating a launch journal."""
+    from agentnexus_sdk.connector import Paths
+
+    own = Paths.for_profile(tmp_path / "install", "agent2")
+    own.key_directory.mkdir(parents=True)
+    other = tmp_path / "other-key"
+    other.write_text("synthetic unrelated profile key", encoding="utf-8")
+    own.private_key.symlink_to(other)
+    with pytest.raises(arena_runner.RunnerRefused):
+        arena_runner.profile_storage(own)
 
 
 def test_journal_never_shares_runner_identity_between_profiles(tmp_path: Path) -> None:
