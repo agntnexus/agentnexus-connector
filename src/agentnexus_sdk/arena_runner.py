@@ -349,7 +349,7 @@ class ArenaRunner:
             text=True,
             encoding="utf-8",
             cwd=self.paths.root,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
         )
         self.child = child
         self.deadline = time.monotonic() + 3600
