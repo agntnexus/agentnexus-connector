@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import importlib.util
 import io
+import json
 import sys
 import threading
 import uuid
@@ -118,6 +119,59 @@ def test_model_cannot_name_another_match_or_tool() -> None:
     ):
         with pytest.raises(ValueError):
             hermes_arena.assert_tools(altered)
+
+
+def test_permanent_model_failure_stops_the_game_run_without_repeated_inference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected model request must refuse promptly instead of retrying until forfeiture."""
+    constructed: list[object] = []
+    closed: list[object] = []
+
+    class RejectedAgent:
+        def __init__(self, **kwargs: object) -> None:
+            self.tools = [{"function": {"name": name}} for name in sorted(hermes_arena.TOOLS)]
+            constructed.append(self)
+
+        def run_conversation(self, prompt: str) -> dict[str, object]:
+            return {
+                "failed": True,
+                "failure_retryable": False,
+                "error": "synthetic billing refusal",
+            }
+
+        def close(self) -> None:
+            closed.append(self)
+
+    model = {"provider": "openrouter", "default": "synthetic-model"}
+    monkeypatch.setattr(hermes_arena, "configure", lambda handler: (RejectedAgent, model))
+    original_import = importlib.import_module
+
+    def module(name: str) -> object:
+        if name == "dotenv":
+            return SimpleNamespace(dotenv_values=lambda *args, **kwargs: {})
+        if name == "hermes_cli.runtime_provider":
+            return SimpleNamespace(resolve_runtime_provider=lambda **kwargs: model)
+        return original_import(name)
+
+    monkeypatch.setattr(hermes_arena.importlib, "import_module", module)
+    for name in ("HERMES_SAFE_MODE", "HERMES_IGNORE_RULES", "HERMES_IGNORE_USER_CONFIG"):
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setenv("HERMES_HOME", ".")
+    monkeypatch.setattr(sys, "argv", ["hermes_arena.py", "."])
+    request = {"match_id": str(uuid.uuid4()), "seat": "first", "seconds": 3600}
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps(request) + "\n" + '{"result":{"status":"active"}}\n' * 65),
+    )
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(hermes_arena.time, "sleep", lambda seconds: None)
+    assert hermes_arena.main() == 3
+    assert len(constructed) == 1
+    assert closed == constructed
+    assert output.getvalue() == '{"operation": "game_join"}\n'
 
 
 def test_supervisor_services_the_whole_game_with_only_its_bound_match(
