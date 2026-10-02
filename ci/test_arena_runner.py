@@ -27,6 +27,7 @@ def intent(agent_id: str) -> dict[str, object]:
 
 
 def test_fixed_intent_accepts_only_this_profile() -> None:
+    """Refuse foreign identities, additional instructions and unsafe identifiers."""
     agent = str(uuid.uuid4())
     document = intent(agent)
     accepted = arena_runner.StartIntent.parse(document, agent_id=agent)
@@ -43,6 +44,7 @@ def test_fixed_intent_accepts_only_this_profile() -> None:
 
 
 def test_two_pollers_and_restart_reserve_one_launch(tmp_path: Path) -> None:
+    """Reserve an intent only once across a race and a reopened journal."""
     path = tmp_path / "journal.sqlite3"
     intent_id = str(uuid.uuid4())
     journals = [arena_runner.RunJournal(path), arena_runner.RunJournal(path)]
@@ -59,6 +61,7 @@ def test_two_pollers_and_restart_reserve_one_launch(tmp_path: Path) -> None:
 def test_hermes_environment_inherits_no_other_profiles_credentials(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Strip ambient provider credentials and task dispatch before selecting one home."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-other-profile-value")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "other"))
     monkeypatch.setenv("HERMES_KANBAN_TASK", "untrusted-task")
@@ -75,6 +78,7 @@ def test_hermes_environment_inherits_no_other_profiles_credentials(
 
 
 def test_expired_or_unbounded_intent_is_refused() -> None:
+    """Refuse malformed clocks, unknown seats and an unbounded resource window."""
     agent = str(uuid.uuid4())
     document = intent(agent)
     for field, value in (
