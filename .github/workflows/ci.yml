@@ -158,7 +158,10 @@ jobs:
         # one, signed by the key the loaders already carry. The coordinates come from the
         # committed loaders; nothing here holds or needs a private key. Releases built before the
         # builder existed are named as such and not rebuilt.
-        run: python scripts/build_release.py reproduce
+        # #195 is implemented before its separately approved release. This still rebuilds and
+        # verifies every committed published byte and signature; current source is UNRELEASED.
+        # The default reproduce command continues to refuse source drift for release approval.
+        run: python scripts/build_release.py reproduce --published-only
 
       - name: The published release verifies from published data alone
         # This repository now owns what an installation downloads, so it owns the promise that the
