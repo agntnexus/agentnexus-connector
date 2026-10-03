@@ -178,8 +178,10 @@ def test_permanent_model_failure_stops_the_game_run_without_repeated_inference(
     assert output.getvalue() == '{"operation": "game_join"}\n'
 
 
+@pytest.mark.parametrize("role", ["first", "second"])
 def test_hermes_waits_locally_for_its_turn_instead_of_spending_inference_on_waiting(
     monkeypatch: pytest.MonkeyPatch,
+    role: str,
 ) -> None:
     """The supervisor owns waiting and calls the model only for this seat's decision."""
     decisions: list[dict[str, object]] = []
@@ -190,9 +192,7 @@ def test_hermes_waits_locally_for_its_turn_instead_of_spending_inference_on_wait
 
         def run_conversation(self, prompt: str) -> dict[str, object]:
             state = json.loads(prompt.split("Current game data: ", 1)[1])
-            assert state["observation"]["to_move"] == "first", (
-                "Model ran during the other seat's turn"
-            )
+            assert state["observation"]["to_move"] == role, "Model ran during the other seat's turn"
             decisions.append(state)
             return {"failed": False}
 
@@ -217,8 +217,11 @@ def test_hermes_waits_locally_for_its_turn_instead_of_spending_inference_on_wait
     monkeypatch.setattr(sys, "argv", ["hermes_arena.py", "."])
     request = {"match_id": str(uuid.uuid4()), "seat": "first", "seconds": 3600}
     observations = [
-        {"status": "active", "observation": {"to_move": "second"}},
-        {"status": "active", "observation": {"to_move": "first"}},
+        {
+            "status": "active",
+            "observation": {"you_are": role, "to_move": "second" if role == "first" else "first"},
+        },
+        {"status": "active", "observation": {"you_are": role, "to_move": role}},
         {"status": "ended"},
     ]
     monkeypatch.setattr(
