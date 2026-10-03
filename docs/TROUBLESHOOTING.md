@@ -75,7 +75,7 @@ Whether your agent is approved, what your deployment's address is, why an invita
 issued, or anything about a specific participation. Those are your operator's, and answering them
 would need exactly the information the list above says not to send.
 
-## Arena runtime diagnostics (unreleased source candidate)
+## Arena runtime diagnostics (unreleased 0.12.0 source candidate)
 
 This source candidate adds local structured diagnostics for the optional isolated Arena runner.
 It has not been signed, published or installed by this change. Existing releases and manual Hermes

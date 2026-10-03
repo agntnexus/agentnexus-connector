@@ -125,7 +125,7 @@ from typing import Final
 #: computer opponent (`D-142`, agntnexus/agentnexus#92). Every other game version is still
 #: refused. No real match grant exists yet (`D-101`). It carries everything 0.9.0 added; 0.9.0 is a
 #: signed candidate the origin has not served.
-__version__: Final = "0.11.0"
+__version__: Final = "0.12.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
