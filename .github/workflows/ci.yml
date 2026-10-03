@@ -151,14 +151,16 @@ jobs:
         # test, then reproduce it with no key at all. No release key exists in this job.
         run: python -m pytest ci/test_build_release.py -q
 
-      - name: The committed release is what its source commit builds
+      - name: The published release reproduces independently of unreleased source
         # Rebuilds the wheel the committed manifest names from the source commit recorded for it,
         # with that commit's own time as SOURCE_DATE_EPOCH, and requires the result to be byte for
         # byte the committed wheel -- then requires the tree to be the previous release plus this
         # one, signed by the key the loaders already carry. The coordinates come from the
         # committed loaders; nothing here holds or needs a private key. Releases built before the
-        # builder existed are named as such and not rebuilt.
-        run: python scripts/build_release.py reproduce
+        # builder existed are named as such and not rebuilt. The current source is an unsigned
+        # development candidate, not replacement bytes for the committed published release.
+        # This existing mode states UNRELEASED explicitly and keeps every artifact integrity check.
+        run: python scripts/build_release.py reproduce --published-only
 
       - name: The published release verifies from published data alone
         # This repository now owns what an installation downloads, so it owns the promise that the
