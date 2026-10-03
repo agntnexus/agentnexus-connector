@@ -241,6 +241,84 @@ def test_restarted_runner_refuses_uncertain_claim_and_never_launches_again(
     runner.journal.close()
 
 
+def test_terminal_runner_waits_for_the_signed_result_without_refusing_or_relaunching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A completed local game must retain its claim while outcome delivery is delayed."""
+    agent = str(uuid.uuid4())
+    runner = object.__new__(arena_runner.ArenaRunner)
+    runner.config = SimpleNamespace(agent_id=agent)
+    runner.journal = arena_runner.RunJournal(tmp_path / "journal.sqlite3")
+    document = {**intent(agent), "status": "playing", "claimed_by": runner.journal.runner_id}
+    runner.active = arena_runner.StartIntent.parse(document, agent_id=agent)
+    runner.deadline = float("inf")
+    runner.finished = threading.Event()
+    runner.finished.set()
+    runner.playing = runner.terminal = True
+    runner.child = SimpleNamespace(poll=lambda: 0)
+    reports: list[str] = []
+    stopped: list[bool] = []
+
+    def post(path: str, payload: dict[str, object]) -> object:
+        if path == "/poll":
+            return {"intents": [document]}
+        reports.append(str(payload["status"]))
+        if payload["status"] == "completed":
+            raise arena_runner.RunnerRefused("Synthetic signed result has not arrived.")
+        pytest.fail("A terminal game was incorrectly changed to refused.")
+
+    def stop() -> None:
+        stopped.append(True)
+        runner.active = None
+
+    monkeypatch.setattr(runner, "_post", post)
+    monkeypatch.setattr(runner, "stop_child", stop)
+    monkeypatch.setattr(runner, "_launch", lambda _: pytest.fail("A terminal game was relaunched."))
+    runner.tick()
+    assert reports == ["completed"]
+    assert runner.active is not None and stopped == []
+    document["status"] = "completed"
+    runner.tick()
+    assert stopped == [True] and runner.active is None
+    runner.journal.close()
+
+
+def test_shutdown_closes_both_pipes_after_a_dead_child_even_when_flush_refuses() -> None:
+    """Windows can refuse flushing a closed pipe; the stopped child must still be released."""
+    runner = object.__new__(arena_runner.ArenaRunner)
+
+    class DeadPipe(io.StringIO):
+        def close(self) -> None:
+            super().close()
+            raise OSError(22, "Synthetic dead Windows pipe")
+
+    output = io.StringIO()
+    runner.child = SimpleNamespace(
+        poll=lambda: 0, wait=lambda **kwargs: None, stdin=DeadPipe(), stdout=output
+    )
+    runner.worker = None
+    runner.active = object()
+    runner.stop_child()
+    assert output.closed
+    assert runner.child is None and runner.active is None
+    runner.stop_child()
+
+
+def test_shutdown_refuses_to_release_a_worker_that_has_not_stopped() -> None:
+    """A live operation retains its profile/claim even after the model child exits."""
+    runner = object.__new__(arena_runner.ArenaRunner)
+    source, output = io.StringIO(), io.StringIO()
+    runner.child = SimpleNamespace(
+        poll=lambda: 0, wait=lambda **kwargs: None, stdin=source, stdout=output
+    )
+    runner.worker = SimpleNamespace(join=lambda **kwargs: None, is_alive=lambda: True)
+    active = runner.active = object()
+    with pytest.raises(arena_runner.RunnerRefused, match="has not stopped"):
+        runner.stop_child()
+    assert not source.closed and not output.closed
+    assert runner.active is active and runner.child is not None
+
+
 def test_a_linked_key_or_journal_cannot_borrow_another_profile(tmp_path: Path) -> None:
     """Reject nested symlinks before reading any key or creating a launch journal."""
     from agentnexus_sdk.connector import Paths
