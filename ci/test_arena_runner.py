@@ -477,3 +477,253 @@ def test_authority_oracles_kill_deliberately_weakened_guards(tmp_path: Path, mut
             journal.close()
     finally:
         del sys.modules[spec.name]
+
+
+@pytest.mark.parametrize("outcome", ["no-move", "failed", "invalid", "exception"])
+def test_model_phase_diagnostics_never_copy_runtime_output(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    """Distinguish a pending call, returned failure and no move without copying private output."""
+    closed: list[bool] = []
+    calls: list[str] = []
+
+    class SyntheticAgent:
+        def __init__(self, **kwargs: object) -> None:
+            self.tools = [{"function": {"name": name}} for name in sorted(hermes_arena.TOOLS)]
+
+        def run_conversation(self, prompt: str) -> object:
+            calls.append(prompt)
+            print("synthetic-private-runtime-output")
+            if outcome == "exception":
+                raise RuntimeError("synthetic-private-exception")
+            if outcome == "failed":
+                return {"failed": True, "error": "synthetic-private-provider-output"}
+            if outcome == "invalid":
+                return "synthetic-private-model-output"
+            return {"failed": False, "answer": "synthetic-private-model-output"}
+
+        def close(self) -> None:
+            closed.append(True)
+
+    model = {"provider": "openrouter", "default": "synthetic-model"}
+    monkeypatch.setattr(hermes_arena, "configure", lambda handler: (SyntheticAgent, model))
+    original_import = importlib.import_module
+
+    def module(name: str) -> object:
+        if name == "dotenv":
+            return SimpleNamespace(dotenv_values=lambda *args, **kwargs: {})
+        if name == "hermes_cli.runtime_provider":
+            return SimpleNamespace(resolve_runtime_provider=lambda **kwargs: model)
+        return original_import(name)
+
+    monkeypatch.setattr(hermes_arena.importlib, "import_module", module)
+    for name in ("HERMES_SAFE_MODE", "HERMES_IGNORE_RULES", "HERMES_IGNORE_USER_CONFIG"):
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setenv("HERMES_HOME", ".")
+    monkeypatch.setattr(sys, "argv", ["hermes_arena.py", "."])
+    request = {"match_id": str(uuid.uuid4()), "seat": "first", "seconds": 3600}
+    states = [
+        {"status": "active", "observation": {"you_are": "first", "to_move": "first"}},
+        {"status": "ended"},
+    ]
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(request)
+            + "\n"
+            + "".join(json.dumps({"result": state}) + "\n" for state in states)
+        ),
+    )
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    if outcome == "exception":
+        with pytest.raises(RuntimeError):
+            hermes_arena.main()
+    else:
+        assert hermes_arena.main() == (0 if outcome == "no-move" else 3)
+    messages = [json.loads(line) for line in output.getvalue().splitlines()]
+    diagnostics = [message for message in messages if "diagnostic" in message]
+    expected = {
+        "no-move": ["model_call_started", "model_call_returned", "decision_without_move"],
+        "failed": ["model_call_started", "model_call_returned", "model_call_failed"],
+        "invalid": ["model_call_started", "model_call_returned", "model_return_invalid"],
+        "exception": ["model_call_started", "model_call_exception"],
+    }
+    assert [message["diagnostic"] for message in diagnostics] == expected[outcome]
+    assert all(set(message) == {"diagnostic", "duration_ms"} for message in diagnostics)
+    assert all(
+        type(message["duration_ms"]) is int and message["duration_ms"] >= 0
+        for message in diagnostics
+    )
+    assert "synthetic-private" not in output.getvalue()
+    assert len(calls) == 1 and closed == [True]
+
+
+def diagnostic_supervisor() -> tuple[arena_runner.ArenaRunner, arena_runner.StartIntent]:
+    """Construct a synthetic supervisor without opening a profile, key, process or connection."""
+    agent = str(uuid.uuid4())
+    owned = arena_runner.StartIntent.parse(intent(agent), agent_id=agent)
+    runner = object.__new__(arena_runner.ArenaRunner)
+    runner.config = SimpleNamespace(agent_id=agent)
+    runner.client = object()
+    runner.finished = threading.Event()
+    runner.playing = runner.terminal = False
+    runner._report = lambda status: None
+    return runner, owned
+
+
+def test_parent_correlates_only_closed_diagnostics_and_game_phases(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Log parent-owned identifiers and timings, never model, provider or request content."""
+    runner, owned = diagnostic_supervisor()
+    calls: list[dict[str, object]] = []
+
+    def game(command: dict[str, object], **kwargs: object) -> dict[str, object]:
+        calls.append(command)
+        return {"status": "active", "private": "synthetic-private-provider-output"}
+
+    monkeypatch.setattr(arena_runner.bridge, "_run_game_command", game)
+    child = SimpleNamespace(
+        stdout=io.StringIO(
+            '{"diagnostic":"model_call_started","duration_ms":0}\n'
+            '{"operation":"game_join"}\n'
+            '{"operation":"game_move","column":3}\n'
+            '{"diagnostic":"model_call_returned","duration_ms":123}\n'
+            '{"finished":true}\n'
+        ),
+        stdin=io.StringIO(),
+    )
+    runner._serve(child, owned)
+    raw = capsys.readouterr().out
+    records = [json.loads(line) for line in raw.splitlines()]
+    assert [record["event"] for record in records] == [
+        "model_call_started",
+        "game_join_started",
+        "game_join_returned",
+        "game_move_started",
+        "game_move_returned",
+        "model_call_returned",
+    ]
+    assert all(
+        set(record) == {"kind", "event", "match_id", "intent_id", "seat", "duration_ms"}
+        and record["kind"] == "arena_runtime"
+        and record["match_id"] == owned.match_id
+        and record["intent_id"] == owned.intent_id
+        and record["seat"] == owned.seat
+        and type(record["duration_ms"]) is int
+        and record["duration_ms"] >= 0
+        for record in records
+    )
+    assert records[-1]["duration_ms"] == 123
+    assert "synthetic-private" not in raw
+    assert len(calls) == 2 and runner.finished.is_set()
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"diagnostic": "model_call_started", "duration_ms": 0, "prompt": "synthetic-private"},
+        {"diagnostic": "synthetic-private", "duration_ms": 0},
+        {"diagnostic": ["model_call_started"], "duration_ms": 0},
+        {"diagnostic": "model_call_started", "duration_ms": True},
+        {"diagnostic": "model_call_started", "duration_ms": -1},
+        {"diagnostic": "model_call_started", "duration_ms": 3600001},
+        {"diagnostic": "model_call_started", "duration_ms": "synthetic-private"},
+        {"diagnostic": "model_call_started"},
+    ],
+)
+def test_invalid_diagnostic_refuses_before_another_game_operation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    document: dict[str, object],
+) -> None:
+    """Unknown events, extra fields and invalid durations fail closed without being copied."""
+    runner, owned = diagnostic_supervisor()
+    calls: list[object] = []
+    monkeypatch.setattr(arena_runner.bridge, "_run_game_command", lambda *a, **k: calls.append(a))
+    child = SimpleNamespace(
+        stdout=io.StringIO(json.dumps(document) + '\n{"operation":"game_join"}\n'),
+        stdin=io.StringIO(),
+    )
+    runner._serve(child, owned)
+    raw = capsys.readouterr().out
+    records = [json.loads(line) for line in raw.splitlines()]
+    assert calls == [] and runner.finished.is_set()
+    assert [record["event"] for record in records] == ["protocol_refused"]
+    assert "synthetic-private" not in raw and "prompt" not in raw
+
+
+def test_diagnostic_flood_is_bounded_before_another_game_operation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A child cannot flood the service journal with otherwise valid phase messages."""
+    runner, owned = diagnostic_supervisor()
+    calls: list[object] = []
+    monkeypatch.setattr(arena_runner.bridge, "_run_game_command", lambda *a, **k: calls.append(a))
+    child = SimpleNamespace(
+        stdout=io.StringIO(
+            '{"diagnostic":"model_call_started","duration_ms":0}\n' * 257
+            + '{"operation":"game_join"}\n'
+        ),
+        stdin=io.StringIO(),
+    )
+    runner._serve(child, owned)
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert calls == [] and runner.finished.is_set()
+    assert len(records) == 257 and records[-1]["event"] == "protocol_refused"
+
+
+@pytest.mark.parametrize("failure", ["refused", "io"])
+def test_parent_failure_codes_never_log_exception_text(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failure: str
+) -> None:
+    """Classify tool refusal and I/O failure with fixed events, not exception or provider text."""
+    runner, owned = diagnostic_supervisor()
+
+    def game(*args: object, **kwargs: object) -> object:
+        if failure == "refused":
+            raise arena_runner.games.GameRefusedError(
+                "provider.move_not_legal", "synthetic-private-provider-output"
+            )
+        raise OSError("synthetic-private-io-output")
+
+    monkeypatch.setattr(arena_runner.bridge, "_run_game_command", game)
+    child = SimpleNamespace(
+        stdout=io.StringIO('{"operation":"game_move","column":3}\n'), stdin=io.StringIO()
+    )
+    runner._serve(child, owned)
+    raw = capsys.readouterr().out
+    records = [json.loads(line) for line in raw.splitlines()]
+    assert [record["event"] for record in records] == [
+        "game_move_started",
+        "game_move_refused" if failure == "refused" else "io_failed",
+    ]
+    assert "synthetic-private" not in raw
+
+
+def test_new_phase_channel_keeps_raw_child_stderr_discarded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Structured diagnostics must not enable unfiltered Hermes or provider stderr."""
+    runner, owned = diagnostic_supervisor()
+    runner_id = str(uuid.uuid4())
+    runner.journal = SimpleNamespace(runner_id=runner_id, reserve=lambda identifier: True)
+    runner.paths = SimpleNamespace(root=tmp_path)
+    runner.runtime = arena_runner.HermesRun(tmp_path, tmp_path, tmp_path)
+    document = {**intent(owned.agent_id), "status": "starting", "claimed_by": runner_id}
+    runner._post = lambda suffix, payload: document
+    spawned: list[dict[str, object]] = []
+
+    def spawn(*args: object, **kwargs: object) -> object:
+        spawned.append(kwargs)
+        return SimpleNamespace(stdin=io.StringIO(), stdout=io.StringIO())
+
+    monkeypatch.setattr(arena_runner.subprocess, "Popen", spawn)
+    monkeypatch.setattr(
+        arena_runner.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None)
+    )
+    runner._launch(owned)
+    assert len(spawned) == 1
+    assert spawned[0]["stderr"] == arena_runner.subprocess.DEVNULL
