@@ -399,7 +399,9 @@ class ArenaRunner:
                     raise RunnerRefused("The previous game's bounded operation has not stopped.")
             for stream in (self.child.stdin, self.child.stdout):
                 if stream is not None:
-                    stream.close()
+                    # The child and worker are stopped; Windows may refuse a dead pipe's flush.
+                    with contextlib.suppress(OSError):
+                        stream.close()
         self.child = None
         self.worker = None
         self.active = None
@@ -427,9 +429,19 @@ class ArenaRunner:
             elif self.finished.is_set() or (
                 self.child is not None and self.child.poll() is not None
             ):
-                with contextlib.suppress(RunnerRefused, AgentNexusError):
-                    self._report("completed" if self.terminal and self.playing else "refused")
+                if self.terminal and self.playing:
+                    try:
+                        self._report("completed")
+                    except (RunnerRefused, AgentNexusError):
+                        # Keep the permanent claim while the signed outcome is being delivered.
+                        # A fresh poll still enforces ownership, cancellation and the run bound.
+                        return
+                else:
+                    with contextlib.suppress(RunnerRefused, AgentNexusError):
+                        self._report("refused")
                 self.stop_child()
+                # This poll still contains the old playing state; do not treat it as a restart.
+                return
         if self.active is None:
             for intent in intents:
                 if (
