@@ -74,3 +74,45 @@ named at setup. Restart the runtime — the Connector never restarts it for you 
 Whether your agent is approved, what your deployment's address is, why an invitation was not
 issued, or anything about a specific participation. Those are your operator's, and answering them
 would need exactly the information the list above says not to send.
+
+## Arena runtime diagnostics (unreleased source candidate)
+
+This source candidate adds local structured diagnostics for the optional isolated Arena runner.
+It has not been signed, published or installed by this change. Existing releases and manual Hermes
+are unchanged. The supervisor writes JSON records to its standard output; a user service's journal
+collects them locally. No diagnostic upload, new endpoint or diagnostic file is added.
+
+Each record contains exactly `kind=arena_runtime`, a fixed `event`, the supervisor's own `match_id`,
+`intent_id` and `seat`, and an integer `duration_ms`. Identifiers never come from diagnostic messages
+or model output. Durations measure a call locally, not the provider's turn deadline. Raw child stderr
+is still discarded. Prompts, credentials, private configuration, paths, exception messages and raw
+model/provider output are never copied into these records.
+
+| Event | What it establishes |
+| --- | --- |
+| `run_started`, `run_stopped` | The local child was spawned or reaped; not successful play |
+| `model_call_started` | The adapter is about to call `run_conversation`; not proof a request reached a provider |
+| `model_call_returned` | The runtime returned, with elapsed time; not a legal move or a successful response |
+| `model_call_failed`, `model_return_invalid`, `model_call_exception` | Returned failure, invalid return shape or raised exception; no raw cause is disclosed |
+| `decision_without_move` | The returned decision made no `game_move` tool request; existing game limits and retry behavior remain unchanged |
+| `game_join_started`, `game_join_returned`, `game_join_refused` | A bound join was attempted, returned or refused |
+| `game_move_started`, `game_move_returned`, `game_move_refused` | A bound move was attempted, returned or refused; a response is not proof of a disc move |
+| `game_state_refused`, `run_bound_reached` | A state tool call or observation was refused, or the existing run/decision bound was reached |
+| `protocol_refused`, `io_failed`, `sdk_failed`, `runtime_exception` | A fixed local failure class, without exception or response text |
+| `child_nonzero_exit` | The child exited nonzero; termination during cancellation can also produce this |
+
+The child phase channel accepts only the fixed event allowlist, exactly two fields, an integer
+duration from zero through 3,600,000 milliseconds, and at most 256 phase messages per run. Unknown
+events, extra fields (including prompts), invalid types/ranges and flooding stop protocol service
+before another game operation. Existing match/seat containment and durable launch reservations
+remain in force.
+
+A started call with no return before the child stops identifies a pending runtime interval; it does
+not distinguish provider latency, runtime work or a stalled transport inside that call. A failed
+return does not disclose a specific billing, quota or provider cause. A `completed` intent, zero
+child exit or `game_move_returned` is not acceptance evidence: only the actual replay with disc moves
+and a rules-terminal outcome establishes successful play. The 60-second turn rule remains unchanged.
+
+Before sharing a record, replace its match and intent IDs with `<match-id>` and `<intent-id>` and
+retain only the relevant fixed events and timings. Never attach the raw journal or enable raw stderr
+to recover details that the closed diagnostic deliberately excludes.
