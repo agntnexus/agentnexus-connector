@@ -163,7 +163,11 @@ def test_permanent_model_failure_stops_the_game_run_without_repeated_inference(
     monkeypatch.setattr(
         sys,
         "stdin",
-        io.StringIO(json.dumps(request) + "\n" + '{"result":{"status":"active"}}\n' * 65),
+        io.StringIO(
+            json.dumps(request)
+            + "\n"
+            + '{"result":{"status":"active","observation":{"to_move":"first"}}}\n' * 65
+        ),
     )
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
