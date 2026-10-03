@@ -186,7 +186,9 @@ def unsigned_012_source(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return source
 
 
-def test_unsigned_diagnostics_candidate_declares_012_consistently(unsigned_012_source: Path) -> None:
+def test_unsigned_diagnostics_candidate_declares_012_consistently(
+    unsigned_012_source: Path,
+) -> None:
     """The #195 source candidate has its own version, not the signed release's."""
     assert builder.read_version(unsigned_012_source, expected="0.12.0") == "0.12.0"
 
