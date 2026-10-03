@@ -813,6 +813,20 @@ def test_a_signed_candidate_is_valid_as_pending(candidate: dict[str, object]) ->
     assert candidate_failures(candidate, state) == []
 
 
+def test_unsigned_012_source_proof_survives_a_valid_signed_pending_release(
+    candidate: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A valid later signed release must not invalidate the historical unsigned proof (#195)."""
+    state = {"published_version": candidate["served"], "pending_version": CANDIDATE}
+    assert candidate_failures(candidate, state) == []
+    state_path = tmp_path / builder.STATE_FILE
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPOSITORY_ROOT", tmp_path)
+    test_the_published_state_names_the_release_the_origin_serves()
+    test_unsigned_012_candidate_cannot_be_pending_or_published()
+
+
 @pytest.mark.parametrize(
     ("damage", "reason"),
     [
