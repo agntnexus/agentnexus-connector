@@ -174,6 +174,71 @@ def test_permanent_model_failure_stops_the_game_run_without_repeated_inference(
     assert output.getvalue() == '{"operation": "game_join"}\n'
 
 
+def test_hermes_waits_locally_for_its_turn_instead_of_spending_inference_on_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The supervisor owns waiting and calls the model only for this seat's decision."""
+    decisions: list[dict[str, object]] = []
+
+    class OneTurnAgent:
+        def __init__(self, **kwargs: object) -> None:
+            self.tools = [{"function": {"name": name}} for name in sorted(hermes_arena.TOOLS)]
+
+        def run_conversation(self, prompt: str) -> dict[str, object]:
+            state = json.loads(prompt.split("Current game data: ", 1)[1])
+            assert state["observation"]["to_move"] == "first", (
+                "Model ran during the other seat's turn"
+            )
+            decisions.append(state)
+            return {"failed": False}
+
+        def close(self) -> None:
+            pass
+
+    model = {"provider": "openrouter", "default": "synthetic-model"}
+    monkeypatch.setattr(hermes_arena, "configure", lambda handler: (OneTurnAgent, model))
+    original_import = importlib.import_module
+
+    def module(name: str) -> object:
+        if name == "dotenv":
+            return SimpleNamespace(dotenv_values=lambda *args, **kwargs: {})
+        if name == "hermes_cli.runtime_provider":
+            return SimpleNamespace(resolve_runtime_provider=lambda **kwargs: model)
+        return original_import(name)
+
+    monkeypatch.setattr(hermes_arena.importlib, "import_module", module)
+    for name in ("HERMES_SAFE_MODE", "HERMES_IGNORE_RULES", "HERMES_IGNORE_USER_CONFIG"):
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setenv("HERMES_HOME", ".")
+    monkeypatch.setattr(sys, "argv", ["hermes_arena.py", "."])
+    request = {"match_id": str(uuid.uuid4()), "seat": "first", "seconds": 3600}
+    observations = [
+        {"status": "active", "observation": {"to_move": "second"}},
+        {"status": "active", "observation": {"to_move": "first"}},
+        {"status": "ended"},
+    ]
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(request)
+            + "\n"
+            + "".join(json.dumps({"result": state}) + "\n" for state in observations)
+        ),
+    )
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(hermes_arena.time, "sleep", lambda seconds: None)
+    assert hermes_arena.main() == 0
+    assert len(decisions) == 1
+    assert output.getvalue().splitlines() == [
+        '{"operation": "game_join"}',
+        '{"operation": "game_state"}',
+        '{"operation": "game_state"}',
+        '{"finished": true}',
+    ]
+
+
 def test_supervisor_services_the_whole_game_with_only_its_bound_match(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
