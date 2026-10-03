@@ -176,9 +176,21 @@ def test_accepts_a_wheel_stamped_with_this_key(tmp_path: Path) -> None:
     builder.verify_wheel(wheel, version="9.9.9", coordinates=("a" * 64, "b" * 64))
 
 
-def test_unsigned_diagnostics_candidate_declares_012_consistently() -> None:
+@pytest.fixture(scope="module")
+def unsigned_012_source(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Export the exact #195 unsigned source; later release phases do not rewrite its proof."""
+    commit = "f721763fc8c4fb6ddd6f82d636553b41833f4f9a"
+    assert builder.commit_epoch(REPOSITORY_ROOT, commit) == 1791031029
+    source = tmp_path_factory.mktemp("unsigned-012-source")
+    builder.export_commit(REPOSITORY_ROOT, commit, source)
+    return source
+
+
+def test_unsigned_diagnostics_candidate_declares_012_consistently(
+    unsigned_012_source: Path,
+) -> None:
     """The #195 source candidate has its own version, not the signed release's."""
-    assert builder.read_version(REPOSITORY_ROOT, expected="0.12.0") == "0.12.0"
+    assert builder.read_version(unsigned_012_source, expected="0.12.0") == "0.12.0"
 
 
 def test_refuses_package_versions_that_disagree(tmp_path: Path) -> None:
@@ -740,11 +752,11 @@ def published_state_failures(
     return failures
 
 
-def test_unsigned_012_candidate_cannot_be_pending_or_published() -> None:
+def test_unsigned_012_candidate_cannot_be_pending_or_published(unsigned_012_source: Path) -> None:
     """Unsigned source does not move the signed 0.11.0 state or release tree (#195)."""
-    state = json.loads((REPOSITORY_ROOT / builder.STATE_FILE).read_text(encoding="utf-8"))
-    tree = REPOSITORY_ROOT / "connector-release"
-    installers = REPOSITORY_ROOT / "installers"
+    state = json.loads((unsigned_012_source / builder.STATE_FILE).read_text(encoding="utf-8"))
+    tree = unsigned_012_source / "connector-release"
+    installers = unsigned_012_source / "installers"
     assert state["published_version"] == "0.11.0"
     assert not any(key.startswith("pending_") for key in state)
     assert "0.12.0" not in state["reproducible_releases"]
@@ -811,6 +823,24 @@ def test_a_signed_candidate_is_valid_as_pending(candidate: dict[str, object]) ->
     """Accept the honest state: the origin serves the old release, the candidate is pending."""
     state = {"published_version": candidate["served"], "pending_version": CANDIDATE}
     assert candidate_failures(candidate, state) == []
+
+
+def test_unsigned_012_source_proof_survives_a_valid_signed_pending_release(
+    candidate: dict[str, object],
+    unsigned_012_source: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid later signed release must not invalidate the historical unsigned proof (#195)."""
+    state = {"published_version": candidate["served"], "pending_version": CANDIDATE}
+    assert candidate_failures(candidate, state) == []
+    state_path = tmp_path / builder.STATE_FILE
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPOSITORY_ROOT", tmp_path)
+    test_the_published_state_names_the_release_the_origin_serves()
+    test_unsigned_diagnostics_candidate_declares_012_consistently(unsigned_012_source)
+    test_unsigned_012_candidate_cannot_be_pending_or_published(unsigned_012_source)
 
 
 @pytest.mark.parametrize(
