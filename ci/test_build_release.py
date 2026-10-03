@@ -176,6 +176,11 @@ def test_accepts_a_wheel_stamped_with_this_key(tmp_path: Path) -> None:
     builder.verify_wheel(wheel, version="9.9.9", coordinates=("a" * 64, "b" * 64))
 
 
+def test_unsigned_diagnostics_candidate_declares_012_consistently() -> None:
+    """The #195 source candidate has its own version, not the signed release's."""
+    assert builder.read_version(REPOSITORY_ROOT, expected="0.12.0") == "0.12.0"
+
+
 def test_refuses_package_versions_that_disagree(tmp_path: Path) -> None:
     """Refuse pyproject.toml and version.py naming two versions."""
     source = tmp_path / "source"
@@ -733,6 +738,23 @@ def published_state_failures(
         except builder.ReleaseBuildError as error:
             failures.append(str(error))
     return failures
+
+
+def test_unsigned_012_candidate_cannot_be_pending_or_published() -> None:
+    """Unsigned source does not move the signed 0.11.0 state or release tree (#195)."""
+    state = json.loads((REPOSITORY_ROOT / builder.STATE_FILE).read_text(encoding="utf-8"))
+    tree = REPOSITORY_ROOT / "connector-release"
+    installers = REPOSITORY_ROOT / "installers"
+    assert state["published_version"] == "0.11.0"
+    assert not any(key.startswith("pending_") for key in state)
+    assert "0.12.0" not in state["reproducible_releases"]
+    assert not (tree / "connector" / "0.12.0").exists()
+    assert published_state_failures(state, tree=tree, installers=installers) == []
+    for claimed in (
+        {**state, "pending_version": "0.12.0"},
+        {**state, "published_version": "0.12.0"},
+    ):
+        assert published_state_failures(claimed, tree=tree, installers=installers)
 
 
 INSTALLERS = REPOSITORY_ROOT / "installers"
