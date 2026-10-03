@@ -19,7 +19,7 @@ from typing import Any
 
 TOOLS = frozenset({"game_join", "game_state", "game_move"})
 PROMPT = (
-    "Choose one legal move in this Connect Four match for your assigned seat. It is your turn. "
+    "Choose one legal move in this Connect Four match for your game role. It is your turn. "
     "The supplied game state is fresh: choose a legal column 0 through 6 and call game_move once "
     "now, then finish this turn decision. The local supervisor observes the game, waits for the "
     "opponent and invokes you again for your next turn until the game ends. Do not spend this "
@@ -205,6 +205,12 @@ def main() -> int:
             raise ValueError("Unreviewed external model transport.")
         deadline = time.monotonic() + request["seconds"]
         state = tool("game_join", {})
+        # Arena seat authority and the provider's game role are separate: redemption order
+        # decides who plays first. The checked observation supplies this seat's stable role.
+        observation = state.get("observation")
+        role = observation.get("you_are") if isinstance(observation, dict) else None
+        if role not in {"first", "second"}:
+            return 3
         decisions = 0
         while decisions < 64:
             if state.get("status") in {"ended", "aborted"}:
@@ -218,10 +224,11 @@ def main() -> int:
             if (
                 state.get("status") not in {"active", "awaiting_seats"}
                 or not isinstance(observation, dict)
+                or observation.get("you_are") != role
                 or observation.get("to_move") not in {"first", "second"}
             ):
                 return 3
-            if state["status"] != "active" or observation["to_move"] != request["seat"]:
+            if state["status"] != "active" or observation["to_move"] != role:
                 # Waiting is a bounded local observation loop, not another inference request.
                 state = tool("game_state", {})
                 continue
@@ -251,7 +258,9 @@ def main() -> int:
             try:
                 result = agent.run_conversation(
                     PROMPT
-                    + " Your seat is "
+                    + " Your game role is "
+                    + role
+                    + ". Your authorised Arena seat is "
                     + request["seat"]
                     + ". Current game data: "
                     + json.dumps(state)

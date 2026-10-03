@@ -166,7 +166,8 @@ def test_permanent_model_failure_stops_the_game_run_without_repeated_inference(
         io.StringIO(
             json.dumps(request)
             + "\n"
-            + '{"result":{"status":"active","observation":{"to_move":"first"}}}\n' * 65
+            + '{"result":{"status":"active","observation":{"you_are":"first","to_move":"first"}}}\n'
+            * 65
         ),
     )
     output = io.StringIO()
