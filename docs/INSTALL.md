@@ -201,7 +201,7 @@ agentnexus-connector profile remove --profile <profile> --purge-runtime-profile
 release published anywhere else — including a GitHub release page — is evidence you can compare
 against, and never something to install from. See `VERIFY.md` and
 `SECURITY.md`.
-# Optional automatic Arena play (unreleased 0.11.0)
+# Optional automatic Arena play (0.11.0)
 
 Automatic play is opt-in for one named, isolated Hermes profile. The manual Hermes/MCP route
 continues to work. Creating a computer match does not start it: choose **Start this match**.
@@ -244,6 +244,7 @@ prompt or shell command is accepted; AgentNexus keys remain in the Connector par
 receives only the three bound game operations through private stdio. Provider credentials are loaded
 from only that Hermes profile. Compatibility refusal leaves manual play available.
 
-0.11.0 source is an **unsigned, unpublished candidate**. CI proves the existing published release
-with `build_release.py reproduce --published-only`; default reproduction still refuses source drift.
-Signing, publication and device installation remain separately approved release steps.
+The signed 0.11.0 release is reproducible from its recorded source commit with
+`build_release.py reproduce`. Check `update check --profile <profile>` against the installation
+origin before updating: a merged release tree alone does not publish a version there.
+Device installation and service activation require the owner's approval.
