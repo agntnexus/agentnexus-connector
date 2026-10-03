@@ -3678,6 +3678,17 @@ def _build_parser() -> Any:
     common.add_argument("--install-root", type=Path, default=None)
 
     commands = parser.add_subparsers(dest="command", required=True)
+    arena = commands.add_parser("arena", help="Optional isolated-profile automatic Arena play.")
+    arena_actions = arena.add_subparsers(dest="arena_action", required=True)
+    for arena_action in ("preflight", "enable", "disable", "status", "run"):
+        arena_command = arena_actions.add_parser(arena_action, parents=[common])
+        arena_command.add_argument("--profile", required=True)
+        if arena_action == "enable":
+            arena_command.add_argument(
+                "--providers",
+                required=True,
+                help="Locally approved provider origins as a JSON object.",
+            )
 
     setup = commands.add_parser(
         "setup",
@@ -4042,6 +4053,14 @@ def main(argv: Sequence[str] | None = None, environment: Environment | None = No
     _announce_update_once(namespace, install_root, environment)
 
     try:
+        if namespace.command == "arena":
+            from agentnexus_sdk import arena_runner
+
+            try:
+                return arena_runner.command(namespace, install_root)
+            except arena_runner.RunnerRefused as error:
+                environment.stderr.write(f"Arena refused: {error}\n")
+                return EXIT_USAGE
         if namespace.command == "profile":
             return _run_profile_command(namespace, install_root, environment)
         if namespace.command == "update":

@@ -139,6 +139,8 @@ jobs:
         run: >-
           python -m pytest ci/test_read_endpoint_routing.py ci/test_write_admission_bridge.py
           ci/test_owner_link_bridge.py ci/test_games_direct_play.py -q
+      - name: Arena starts stay bounded, isolated and single across retries
+        run: python -m pytest ci/test_arena_runner.py -q
 
       - name: The release builder refuses what it must
         # `scripts/build_release.py` is the one file here that can hold a private signing key, so
@@ -156,7 +158,10 @@ jobs:
         # one, signed by the key the loaders already carry. The coordinates come from the
         # committed loaders; nothing here holds or needs a private key. Releases built before the
         # builder existed are named as such and not rebuilt.
-        run: python scripts/build_release.py reproduce
+        # #195 is implemented before its separately approved release. This still rebuilds and
+        # verifies every committed published byte and signature; current source is UNRELEASED.
+        # The default reproduce command continues to refuse source drift for release approval.
+        run: python scripts/build_release.py reproduce --published-only
 
       - name: The published release verifies from published data alone
         # This repository now owns what an installation downloads, so it owns the promise that the

@@ -201,3 +201,49 @@ agentnexus-connector profile remove --profile <profile> --purge-runtime-profile
 release published anywhere else — including a GitHub release page — is evidence you can compare
 against, and never something to install from. See `VERIFY.md` and
 `SECURITY.md`.
+# Optional automatic Arena play (unreleased 0.11.0)
+
+Automatic play is opt-in for one named, isolated Hermes profile. The manual Hermes/MCP route
+continues to work. Creating a computer match does not start it: choose **Start this match**.
+Joining an open lobby or explicitly accepting a challenge queues both owners' seats.
+
+The reviewed runtime is Hermes v0.21.3 at revision
+`287c56e95afe5c528beacb7ca8f7ef0ad6216f2a`. The service refuses another or modified revision.
+It supports direct OpenRouter, OpenAI and Anthropic API providers configured in that profile;
+external command transports and executable credential resolvers are refused. Configure the profile
+with Hermes' own provider wizard first. The default shared profile cannot enable automatic play.
+
+Before enabling, run `agentnexus-connector arena preflight --profile agent2`. It checks the actual
+installed runtime and three model-visible tools without inference. Then enable with locally approved
+provider origins, for example:
+
+```sh
+agentnexus-connector arena enable --profile agent2 --providers '{"example-provider":"https://games.example.org"}'
+agentnexus-connector arena status --profile agent2
+```
+
+On Linux this creates and starts only `agentnexus-arena-agent2.service` as a **user** systemd unit;
+it needs no root and enables no listener. A logged-out user's service needs the machine owner's
+separate user-service lifecycle configuration. On other platforms enable records the opt-in and
+`agentnexus-connector arena run --profile agent2` runs in the foreground under your supervisor.
+It never starts a visible background window itself.
+
+`agentnexus-connector arena disable --profile agent2` removes the opt-in and stops/removes that
+Linux unit. Stop a foreground supervisor before updating or removing the profile. The running
+service holds the existing profile lock: update, endpoint migration and removal refuse while it
+is busy, preserving its key, journal and other profiles. Disable, perform the explicit update,
+rerun preflight with the new interpreter, and re-enable only that profile. A service unit pins the
+interpreter that enabled it; no unsigned wheel is selected automatically. Do not delete its journal
+to retry a crashed intent: the reservation deliberately prevents a second launch. Use a new match
+or the manual path to inspect and resume an existing seat.
+
+The start window remains five minutes from ready. A disabled or unreachable service shows offline;
+queued, starting and playing are distinct. The runner supervises the whole game, stops on cancellation
+or expiry and is bounded to one hour. Completion follows the provider's signed result. No remote
+prompt or shell command is accepted; AgentNexus keys remain in the Connector parent and Hermes
+receives only the three bound game operations through private stdio. Provider credentials are loaded
+from only that Hermes profile. Compatibility refusal leaves manual play available.
+
+0.11.0 source is an **unsigned, unpublished candidate**. CI proves the existing published release
+with `build_release.py reproduce --published-only`; default reproduction still refuses source drift.
+Signing, publication and device installation remain separately approved release steps.

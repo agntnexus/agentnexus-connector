@@ -809,7 +809,7 @@ def build(
     return []
 
 
-def reproduce(repository: Path) -> list[str]:
+def reproduce(repository: Path, *, published_only: bool = False) -> list[str]:
     """Rebuild the committed release from its recorded source, with no key, and check it.
 
     The release checked is the one HEAD commits, exported the same way its source is, rather than
@@ -819,10 +819,17 @@ def reproduce(repository: Path) -> list[str]:
     with tempfile.TemporaryDirectory(prefix="agentnexus-connector-reproduce-") as scratch_text:
         scratch = Path(scratch_text)
         export_commit(repository, "HEAD", scratch / "committed")
-        return reproduce_committed(repository, committed=scratch / "committed", scratch=scratch)
+        return reproduce_committed(
+            repository,
+            committed=scratch / "committed",
+            scratch=scratch,
+            published_only=published_only,
+        )
 
 
-def reproduce_committed(repository: Path, *, committed: Path, scratch: Path) -> list[str]:
+def reproduce_committed(
+    repository: Path, *, committed: Path, scratch: Path, published_only: bool = False
+) -> list[str]:
     """Reproduce the release in `committed`, an export of HEAD, using `scratch` for the build."""
     tree = committed / RELEASE_DIRECTORY
     document = json.loads((tree / "connector" / MANIFEST_NAME).read_bytes())
@@ -850,7 +857,7 @@ def reproduce_committed(repository: Path, *, committed: Path, scratch: Path) -> 
     if commit_epoch(repository, commit) != epoch:
         failures.append(f"the recorded epoch {epoch} is not the committer time of {commit[:12]}")
     moved = git(repository, "diff", "--name-only", commit, "HEAD", "--", *RELEASE_INPUTS)
-    if moved:
+    if moved and not published_only:
         failures.append(f"the release's inputs changed after {commit[:12]}: {moved.split()[:5]}")
     coordinates = stamped_coordinates(tree)
     if coordinates is None:
@@ -884,6 +891,11 @@ def reproduce_committed(repository: Path, *, committed: Path, scratch: Path) -> 
         print(f"reproduce: connector {version} rebuilt from {commit} with {EPOCH_VARIABLE}={epoch}")
         print(f"reproduce: byte-identical, sha256 {hashlib.sha256(rebuilt).hexdigest()}")
         print("reproduce: the tree is the previous release plus this one, signed by its key")
+        if moved and published_only:
+            print(
+                "reproduce: current source is UNRELEASED; "
+                "only the committed published artifacts were verified"
+            )
     return failures
 
 
@@ -907,6 +919,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Required, and only accepted, when the connector's public gate is open.",
     )
     reproduce_parser = commands.add_parser("reproduce", help="Rebuild the committed release.")
+    reproduce_parser.add_argument(
+        "--published-only",
+        action="store_true",
+        help=(
+            "Verify committed published artifacts while source is unreleased; "
+            "never authorises release."
+        ),
+    )
     for command in (build_parser, reproduce_parser):
         # Tests point this at a throwaway clone. An operator never needs it.
         command.add_argument(
@@ -925,7 +945,7 @@ def main(argv: list[str] | None = None) -> int:
                 environ=os.environ,
             )
         else:
-            failures = reproduce(repository)
+            failures = reproduce(repository, published_only=arguments.published_only)
     except ReleaseBuildError as error:
         failures = [str(error)]
     if failures:
