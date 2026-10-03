@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agentnexus_sdk import bridge, games
+from agentnexus_sdk import bridge, games, hermes_arena
 from agentnexus_sdk.errors import AgentNexusError
 from agentnexus_sdk.profiles import (
     ProfileRecord,
@@ -36,6 +36,22 @@ STATUSES = frozenset(
     {"offline", "queued", "starting", "playing", "completed", "refused", "expired", "cancelled"}
 )
 HERMES_REVISION = "287c56e95afe5c528beacb7ca8f7ef0ad6216f2a"
+DIAGNOSTICS = hermes_arena.DIAGNOSTICS | frozenset(
+    {
+        "game_join_started",
+        "game_join_returned",
+        "game_join_refused",
+        "game_move_started",
+        "game_move_returned",
+        "game_move_refused",
+        "protocol_refused",
+        "io_failed",
+        "sdk_failed",
+        "run_started",
+        "run_stopped",
+        "child_nonzero_exit",
+    }
+)
 
 
 class RunnerRefusedError(ValueError):
@@ -106,6 +122,26 @@ class StartIntent:
             value["status"],
             None if value["claimed_by"] is None else _uuid(value["claimed_by"]),
             until,
+        )
+
+
+def diagnostic(intent: StartIntent, event: str, duration_ms: int = 0) -> None:
+    """Write a closed local record; identifiers come only from the parent's validated intent."""
+    if event not in DIAGNOSTICS or type(duration_ms) is not int or not 0 <= duration_ms <= 3600000:
+        raise RunnerRefused("Unknown bounded Arena diagnostic.")
+    with contextlib.suppress(OSError):
+        print(
+            json.dumps(
+                {
+                    "kind": "arena_runtime",
+                    "event": event,
+                    "match_id": intent.match_id,
+                    "intent_id": intent.intent_id,
+                    "seat": intent.seat,
+                    "duration_ms": duration_ms,
+                }
+            ),
+            flush=True,
         )
 
 
@@ -315,6 +351,7 @@ class ArenaRunner:
         if child.stdout is None or child.stdin is None:
             raise RunnerRefused("Missing private Arena pipe.")
         output = child.stdout
+        diagnostics = 0
         try:
             for line in iter(lambda: output.readline(4097), ""):
                 if len(line) > 4096:
@@ -322,6 +359,20 @@ class ArenaRunner:
                 request = json.loads(line)
                 if not isinstance(request, dict):
                     raise RunnerRefused("Hermes sent an invalid Arena request.")
+                if "diagnostic" in request:
+                    if (
+                        set(request) != {"diagnostic", "duration_ms"}
+                        or not isinstance(request["diagnostic"], str)
+                        or request["diagnostic"] not in hermes_arena.DIAGNOSTICS
+                        or type(request["duration_ms"]) is not int
+                        or not 0 <= request["duration_ms"] <= 3600000
+                    ):
+                        raise RunnerRefused("Hermes sent an invalid Arena diagnostic.")
+                    diagnostics += 1
+                    if diagnostics > 256:
+                        raise RunnerRefused("Hermes exceeded the bounded Arena diagnostics.")
+                    diagnostic(intent, request["diagnostic"], request["duration_ms"])
+                    continue
                 if request == {"finished": True}:
                     break
                 operation = request.get("operation")
@@ -329,10 +380,19 @@ class ArenaRunner:
                 if operation not in bridge.GAME_OPERATIONS or set(request) != expected:
                     raise RunnerRefused("Hermes attempted an operation outside this match.")
                 command = {**request, "match_id": intent.match_id, "seat": intent.seat}
+                started = time.monotonic()
+                if operation in {"game_join", "game_move"}:
+                    diagnostic(intent, f"{operation}_started")
                 try:
                     result = bridge._run_game_command(
                         command, config=self.config, client=self.client
                     )
+                    if operation in {"game_join", "game_move"}:
+                        diagnostic(
+                            intent,
+                            f"{operation}_returned",
+                            max(0, min(int((time.monotonic() - started) * 1000), 3600000)),
+                        )
                     if operation == "game_join" and not self.playing:
                         self._report("playing")
                         self.playing = True
@@ -340,11 +400,23 @@ class ArenaRunner:
                         self.terminal = True
                     response = {"result": result}
                 except games.GameRefusedError as error:
+                    diagnostic(
+                        intent,
+                        f"{operation}_refused",
+                        max(0, min(int((time.monotonic() - started) * 1000), 3600000)),
+                    )
                     response = {"result": {"error": error.code}}
                 child.stdin.write(json.dumps(response) + "\n")
                 child.stdin.flush()
-        except (OSError, ValueError, AgentNexusError):
-            pass
+        except OSError:
+            diagnostic(intent, "io_failed")
+        except ValueError:
+            diagnostic(intent, "protocol_refused")
+        except AgentNexusError:
+            diagnostic(intent, "sdk_failed")
+        except Exception:
+            # Thread tracebacks could otherwise copy an unexpected runtime's private error text.
+            diagnostic(intent, "runtime_exception")
         finally:
             self.finished.set()
 
@@ -373,6 +445,7 @@ class ArenaRunner:
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
         )
         self.child = child
+        diagnostic(owned, "run_started")
         self.deadline = time.monotonic() + 3600
         if child.stdin is None:
             raise RunnerRefused("Missing private Arena input pipe.")
@@ -402,6 +475,10 @@ class ArenaRunner:
                     # The child and worker are stopped; Windows may refuse a dead pipe's flush.
                     with contextlib.suppress(OSError):
                         stream.close()
+            if self.active is not None:
+                if self.child.poll() != 0:
+                    diagnostic(self.active, "child_nonzero_exit")
+                diagnostic(self.active, "run_stopped")
         self.child = None
         self.worker = None
         self.active = None
@@ -466,7 +543,16 @@ class ArenaRunner:
                 while True:
                     try:
                         self.tick()
-                    except (OSError, ValueError, AgentNexusError):
+                    except (OSError, ValueError, AgentNexusError) as error:
+                        if self.active is not None:
+                            event = (
+                                "io_failed"
+                                if isinstance(error, OSError)
+                                else "protocol_refused"
+                                if isinstance(error, ValueError)
+                                else "sdk_failed"
+                            )
+                            diagnostic(self.active, event)
                         self.stop_child()
                     time.sleep(10)
         finally:

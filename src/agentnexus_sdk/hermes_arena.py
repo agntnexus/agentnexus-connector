@@ -18,6 +18,19 @@ from pathlib import Path
 from typing import Any
 
 TOOLS = frozenset({"game_join", "game_state", "game_move"})
+DIAGNOSTICS = frozenset(
+    {
+        "model_call_started",
+        "model_call_returned",
+        "model_call_failed",
+        "model_call_exception",
+        "model_return_invalid",
+        "decision_without_move",
+        "game_state_refused",
+        "run_bound_reached",
+        "runtime_exception",
+    }
+)
 PROMPT = (
     "Choose one legal move in this Connect Four match for your game role. It is your turn. "
     "The supplied game state is fresh: choose a legal column 0 through 6 and call game_move once "
@@ -28,6 +41,17 @@ PROMPT = (
     "files, shells, other agents or other matches. "
     "Your only task in this invocation is to make your one legal move."
 )
+
+
+def diagnostic(output: Any, event: str, started: float | None = None) -> None:
+    """Emit only a fixed phase code and bounded timing on the private control pipe."""
+    if event not in DIAGNOSTICS:
+        raise ValueError("Unknown bounded Arena diagnostic.")
+    duration = 0 if started is None else int((time.monotonic() - started) * 1000)
+    output.write(
+        json.dumps({"diagnostic": event, "duration_ms": max(0, min(duration, 3600000))}) + "\n"
+    )
+    output.flush()
 
 
 def assert_tools(definitions: Any) -> None:
@@ -152,11 +176,14 @@ def main() -> int:
     sys.path.insert(0, str(Path(sys.argv[1]).resolve()))
     output, input_stream = sys.stdout, sys.stdin
     last_read = 0.0
+    move_calls = 0
 
     def tool(operation: str, arguments: Any) -> Any:
         """Use private stdio; no URL, key, shell or alternate match can be supplied."""
-        nonlocal last_read
+        nonlocal last_read, move_calls
         request = bounded_request(operation, arguments)
+        if operation == "game_move":
+            move_calls += 1
         if operation == "game_state":
             time.sleep(max(0, 4 - (time.monotonic() - last_read)))
             last_read = time.monotonic()
@@ -210,6 +237,7 @@ def main() -> int:
         observation = state.get("observation")
         role = observation.get("you_are") if isinstance(observation, dict) else None
         if role not in {"first", "second"}:
+            diagnostic(output, "game_state_refused")
             return 3
         decisions = 0
         while decisions < 64:
@@ -227,6 +255,7 @@ def main() -> int:
                 or observation.get("you_are") != role
                 or observation.get("to_move") not in {"first", "second"}
             ):
+                diagnostic(output, "game_state_refused")
                 return 3
             if state["status"] != "active" or observation["to_move"] != role:
                 # Waiting is a bounded local observation loop, not another inference request.
@@ -255,29 +284,45 @@ def main() -> int:
             agent._skip_mcp_refresh = True
             agent._persist_disabled = True
             assert_tools(agent.tools)
+            before = move_calls
+            started = time.monotonic()
             try:
-                result = agent.run_conversation(
-                    PROMPT
-                    + " Your game role is "
-                    + role
-                    + ". Your authorised Arena seat is "
-                    + request["seat"]
-                    + ". Current game data: "
-                    + json.dumps(state)
-                )
-                if not isinstance(result, dict) or result.get("failed") or result.get("error"):
-                    # The runtime already classified the failure. Never restart its retry budget.
+                diagnostic(output, "model_call_started")
+                try:
+                    result = agent.run_conversation(
+                        PROMPT
+                        + " Your game role is "
+                        + role
+                        + ". Your authorised Arena seat is "
+                        + request["seat"]
+                        + ". Current game data: "
+                        + json.dumps(state)
+                    )
+                except Exception:
+                    diagnostic(output, "model_call_exception", started)
+                    raise
+                diagnostic(output, "model_call_returned", started)
+                if not isinstance(result, dict):
+                    diagnostic(output, "model_return_invalid", started)
                     return 3
+                if result.get("failed") or result.get("error"):
+                    # The runtime already classified the failure. Never restart its retry budget.
+                    diagnostic(output, "model_call_failed", started)
+                    return 3
+                if move_calls == before:
+                    diagnostic(output, "decision_without_move", started)
             finally:
                 agent.close()
             state = tool("game_state", {})
+        diagnostic(output, "run_bound_reached")
         return 3
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception as error:
+    except Exception:
         # Do not expose provider errors, credentials, config or model output in service logs.
-        print(f"Bounded Arena execution refused ({type(error).__name__}).", file=sys.stderr)
+        with contextlib.suppress(OSError):
+            diagnostic(sys.stdout, "runtime_exception")
         raise SystemExit(3) from None
