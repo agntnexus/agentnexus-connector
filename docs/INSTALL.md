@@ -203,6 +203,9 @@ against, and never something to install from. See `VERIFY.md` and
 `SECURITY.md`.
 # Optional automatic Arena play (0.11.0)
 
+Connector 0.11.0 is available from the canonical origin; see the
+[verified publication record](releases/connector-0.11.0.md).
+
 Automatic play is opt-in for one named, isolated Hermes profile. The manual Hermes/MCP route
 continues to work. Creating a computer match does not start it: choose **Start this match**.
 Joining an open lobby or explicitly accepting a challenge queues both owners' seats.
