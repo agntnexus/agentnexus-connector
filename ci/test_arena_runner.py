@@ -97,6 +97,35 @@ def test_expired_or_unbounded_intent_is_refused() -> None:
             arena_runner.StartIntent.parse({**document, field: value}, agent_id=agent)
 
 
+def test_a_chess_move_is_bounded_like_a_column() -> None:
+    """#202: a Chess move is UCI, a claim or both; never a column with it, never free text."""
+    assert hermes_arena.bounded_request("game_move", {"move": "e2e4"}) == {
+        "operation": "game_move",
+        "move": "e2e4",
+    }
+    assert hermes_arena.bounded_request("game_move", {"move": "e7e8q", "claim": "fifty_moves"}) == {
+        "operation": "game_move",
+        "move": "e7e8q",
+        "claim": "fifty_moves",
+    }
+    assert hermes_arena.bounded_request("game_move", {"claim": "threefold_repetition"}) == {
+        "operation": "game_move",
+        "claim": "threefold_repetition",
+    }
+    for arguments in (
+        {"column": 3, "move": "e2e4"},
+        {"move": "e2e9"},
+        {"move": "E2E4"},
+        {"move": "e2e4; rm -rf /"},
+        {"move": 4},
+        {"claim": "agreement"},
+        {"move": "e2e4", "match_id": str(uuid.uuid4())},
+        {},
+    ):
+        with pytest.raises(ValueError):
+            hermes_arena.bounded_request("game_move", arguments)
+
+
 def test_model_cannot_name_another_match_or_tool() -> None:
     """Refuse unknown tools, foreign match fields and a boolean masquerading as a column."""
     assert hermes_arena.bounded_request("game_move", {"column": 3}) == {
@@ -182,7 +211,7 @@ def test_permanent_model_failure_stops_the_game_run_without_repeated_inference(
     ] == ['{"operation": "game_join"}']
 
 
-@pytest.mark.parametrize("role", ["first", "second"])
+@pytest.mark.parametrize("role", ["first", "second", "white", "black"])
 def test_hermes_waits_locally_for_its_turn_instead_of_spending_inference_on_waiting(
     monkeypatch: pytest.MonkeyPatch,
     role: str,
@@ -197,6 +226,9 @@ def test_hermes_waits_locally_for_its_turn_instead_of_spending_inference_on_wait
         def run_conversation(self, prompt: str) -> dict[str, object]:
             state = json.loads(prompt.split("Current game data: ", 1)[1])
             assert state["observation"]["to_move"] == role, "Model ran during the other seat's turn"
+            chess = role in {"white", "black"}
+            assert ("chess match" in prompt) is chess, "the decision prompt names its own game"
+            assert ("Connect Four" in prompt) is not chess
             decisions.append(state)
             return {"failed": False}
 
@@ -220,10 +252,11 @@ def test_hermes_waits_locally_for_its_turn_instead_of_spending_inference_on_wait
     monkeypatch.setenv("HERMES_HOME", ".")
     monkeypatch.setattr(sys, "argv", ["hermes_arena.py", "."])
     request = {"match_id": str(uuid.uuid4()), "seat": "first", "seconds": 3600}
+    other = {"first": "second", "second": "first", "white": "black", "black": "white"}[role]
     observations = [
         {
             "status": "active",
-            "observation": {"you_are": role, "to_move": "second" if role == "first" else "first"},
+            "observation": {"you_are": role, "to_move": other},
         },
         {"status": "active", "observation": {"you_are": role, "to_move": role}},
         {"status": "ended"},

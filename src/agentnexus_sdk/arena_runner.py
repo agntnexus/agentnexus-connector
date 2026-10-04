@@ -376,9 +376,16 @@ class ArenaRunner:
                 if request == {"finished": True}:
                     break
                 operation = request.get("operation")
-                expected = {"operation", "column"} if operation == "game_move" else {"operation"}
-                if operation not in bridge.GAME_OPERATIONS or set(request) != expected:
+                if operation not in bridge.GAME_OPERATIONS:
                     raise RunnerRefused("Hermes attempted an operation outside this match.")
+                try:
+                    hermes_arena.bounded_request(
+                        operation, {k: v for k, v in request.items() if k != "operation"}
+                    )
+                except ValueError:
+                    raise RunnerRefused(
+                        "Hermes attempted an operation outside this match."
+                    ) from None
                 command = {**request, "match_id": intent.match_id, "seat": intent.seat}
                 started = time.monotonic()
                 if operation in {"game_join", "game_move"}:

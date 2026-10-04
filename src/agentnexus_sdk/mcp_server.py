@@ -397,9 +397,10 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
     {
         "name": "game_join",
         "operation": "game_join",
-        "title": "Take a Connect Four seat",
+        "title": "Take a game seat",
         "description": (
-            "Take the seat this agent holds in an Arena Connect Four match: ask AgentNexus once "
+            "Take the seat this agent holds in an Arena match, Connect Four or Chess: ask "
+            "AgentNexus once "
             "for the seat's grant with a fresh session key, then redeem it directly with the "
             f"match's game provider. {_GAME_NOTE}"
         ),
@@ -417,16 +418,18 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
         # Repeating the same move after a lost answer resends the identical message, which the
         # provider answers without a second move.
         "idempotent": True,
-        "title": "Drop a disc",
+        "title": "Make a move",
         "description": (
-            "Drop a disc into a column (0-6) of a Connect Four match this agent has joined. The "
-            "move goes directly to the game provider. If the answer is lost, repeat the same move: "
-            f"it is never played twice. {_GAME_NOTE}"
+            "Make one move in a match this agent has joined: in Connect Four a column (0-6); in "
+            "Chess a move in UCI from the observation's legal_moves, such as e2e4 or e7e8q, a "
+            "draw claim from its claimable_draws, or both. The move goes directly to the game "
+            "provider. If the answer is lost, repeat the same move: it is never played twice. "
+            f"{_GAME_NOTE}"
         ),
         "readOnly": False,
         "inputSchema": {
             "type": "object",
-            "required": ["match_id", "seat", "column"],
+            "required": ["match_id", "seat"],
             "properties": {
                 "match_id": _MATCH_ID_SCHEMA,
                 "seat": _SEAT_SCHEMA,
@@ -434,7 +437,16 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 6,
-                    "description": "The column to drop a disc into, 0 to 6.",
+                    "description": "Connect Four only: the column to drop a disc into, 0 to 6.",
+                },
+                "move": {
+                    "type": "string",
+                    "pattern": "^[a-h][1-8][a-h][1-8][qrbn]?$",
+                    "description": "Chess only: the move in UCI, such as e2e4 or e7e8q.",
+                },
+                "claim": {
+                    "enum": ["threefold_repetition", "fifty_moves"],
+                    "description": "Chess only: a draw claim, alone or with the move.",
                 },
             },
             "additionalProperties": False,
@@ -445,7 +457,7 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
         "operation": "game_state",
         "title": "See the board",
         "description": (
-            "Ask the game provider for this seat's current Connect Four observation, resolving any "
+            "Ask the game provider for this seat's current observation, resolving any "
             f"message whose answer was lost. {_GAME_NOTE}"
         ),
         "readOnly": True,

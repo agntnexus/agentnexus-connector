@@ -195,7 +195,7 @@ _ALLOWED_FIELDS: Final[dict[str, frozenset[str]]] = {
     "write_admission": frozenset({"operation"}),
     "request_owner_link": frozenset({"operation", "email", "idempotency_key"}),
     "game_join": frozenset({"operation", "match_id", "seat"}),
-    "game_move": frozenset({"operation", "match_id", "seat", "column"}),
+    "game_move": frozenset({"operation", "match_id", "seat", "column", "move", "claim"}),
     "game_state": frozenset({"operation", "match_id", "seat"}),
 }
 
@@ -464,9 +464,23 @@ def _validate_game_command(document: dict[str, Any], *, operation: str) -> None:
         message = f"Field 'seat' is required for {operation}: 1 to 64 letters, digits, - or _."
         raise BridgeInputError(message)
     if operation == "game_move":
-        column = document.get("column")
-        if isinstance(column, bool) or not isinstance(column, int) or not 0 <= column <= 6:
-            message = "Field 'column' is required for game_move: an integer from 0 to 6."
+        chess = [name for name in ("move", "claim") if name in document]
+        if ("column" in document) == bool(chess):
+            message = (
+                "game_move takes either 'column' (Connect Four, 0 to 6) or 'move' in UCI and/or "
+                "'claim' (Chess), never both."
+            )
+            raise BridgeInputError(message)
+        if "column" in document:
+            column = document["column"]
+            if isinstance(column, bool) or not isinstance(column, int) or not 0 <= column <= 6:
+                message = "Field 'column' is required for game_move: an integer from 0 to 6."
+                raise BridgeInputError(message)
+        if "move" in document and document["move"] not in games.UCI:
+            message = "Field 'move' must be a move in UCI, such as e2e4 or e7e8q."
+            raise BridgeInputError(message)
+        if "claim" in document and document["claim"] not in games.CLAIMS:
+            message = "Field 'claim' must be threefold_repetition or fifty_moves."
             raise BridgeInputError(message)
 
 
@@ -736,7 +750,12 @@ def _run_game_command(
         if command["operation"] == "game_join":
             result = player.join(match_id, seat)
         elif command["operation"] == "game_move":
-            result = player.move(match_id, seat, int(command["column"]))
+            if "column" in command:
+                result = player.move(match_id, seat, int(command["column"]))
+            else:
+                result = player.move(
+                    match_id, seat, uci=command.get("move"), claim=command.get("claim")
+                )
         else:
             result = player.state(match_id, seat)
     finally:
@@ -1138,7 +1157,8 @@ Operations:
                  (free, signed, no fields, always the write address; changes nothing)
   game_join      take a Connect Four seat: one signed grant request, then play directly
                  with the provider (match_id, seat; needs AGENTNEXUS_GAMES_PROVIDERS)
-  game_move      drop a disc (match_id, seat, column 0-6), sent to the provider only
+  game_move      one move (match_id, seat, and column 0-6 for Connect Four, or move in UCI
+                 and/or claim for Chess), sent to the provider only
   game_state     the seat's current observation, resolving an unanswered message
   request_owner_link ask the account with this email to own this agent
                  (free, signed: email; links nothing until the holder approves and an
