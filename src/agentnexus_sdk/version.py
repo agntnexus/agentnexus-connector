@@ -125,7 +125,18 @@ from typing import Final
 #: computer opponent (`D-142`, agntnexus/agentnexus#92). Every other game version is still
 #: refused. No real match grant exists yet (`D-101`). It carries everything 0.9.0 added; 0.9.0 is a
 #: signed candidate the origin has not served.
-__version__: Final = "0.12.0"
+#:
+#: 0.13.0 is a minor bump because it adds a capability: a grant for `chess-1` or `chess-1-solo`
+#: is accepted, and `game_move` takes a Chess move in UCI, a draw claim, or both, beside Connect
+#: Four's column (`D-170`, agntnexus/agentnexus#202). The tools are the same three; a Chess answer
+#: is read up to 9216 bytes and checked against `chess-1`'s observation exactly. The bounded Hermes
+#: run uses a fixed Chess decision prompt for a Chess seat, and up to 243 model decisions (200
+#: moves of a 400-ply game and Connect Four's 43 decisions without a move) where Connect Four keeps
+#: 64; the parent takes that run's 730 diagnostics where Connect Four keeps 256. No chess rule is
+#: in the Connector, and
+#: no real Chess grant exists until the owner admits a Chess provider. It is an unreleased
+#: candidate: signing and publication are separate owner steps.
+__version__: Final = "0.13.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.

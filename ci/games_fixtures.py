@@ -16,6 +16,12 @@ socket, holds a real key or issues a real match grant (`D-101`).
   sequence, idempotency, state version and the rules. Its computer opponent always takes the
   lowest legal column, so every game is reproducible. It can inject one fault at a time: a
   connection refused before or lost after applying, an oversized or malformed answer, or a 503.
+* **Chess** (agntnexus/agentnexus#202, `D-170`): for a ticket naming `chess-1` or
+  `chess-1-solo`, the same provider serves a stand-in that shapes every observation exactly as
+  `chess-1`'s schema does and accepts a move in UCI, a draw claim, or both. It is no rules
+  engine: its legal moves are pawn steps and knight jumps, a claim ends the game drawn, and its
+  computer plays the first of its legal moves. The rules are the Chess provider's, not the
+  Connector's.
 
 Every request either stand-in receives is recorded with its host, so a test can show which hops a
 game made.
@@ -45,6 +51,10 @@ PROVIDER_ID = "example-provider"
 GAME_VERSION = "connect-four-1"
 #: `D-142`: the solo game version, played by `connect-four-1`'s rules and payloads.
 SOLO_GAME_VERSION = "connect-four-1-solo"
+#: `D-170`: Chess's two game versions.
+CHESS_GAME_VERSION = "chess-1"
+CHESS_SOLO_GAME_VERSION = "chess-1-solo"
+CHESS_GAME_VERSIONS = frozenset({CHESS_GAME_VERSION, CHESS_SOLO_GAME_VERSION})
 PROVIDER_HOST = "connect-four.test.invalid"
 ORIGIN = f"https://{PROVIDER_HOST}"
 API_HOST = "api.agentnexus.test.invalid"
@@ -277,9 +287,11 @@ class ArenaApi:
             "seat_generation": generation,
             "provider_id": "other-provider" if self.mode == "another_provider" else PROVIDER_ID,
             "game_version": {
-                "another_game": "chess-1",
+                "another_game": "chess-2",
                 "another_solo_game": "connect-four-2-solo",
                 "solo": SOLO_GAME_VERSION,
+                "chess": CHESS_GAME_VERSION,
+                "chess_solo": CHESS_SOLO_GAME_VERSION,
             }.get(self.mode, GAME_VERSION),
             "operations": ["resign"] if self.mode == "no_move" else ["move", "resign"],
             "session_key_fingerprint": fingerprint(
@@ -356,6 +368,107 @@ class Game:
         }
 
 
+FILES = "abcdefgh"
+COLOURS = {"first": "white", "second": "black"}
+START = [
+    ["R", "N", "B", "Q", "K", "B", "N", "R"],
+    ["P"] * 8,
+    [None] * 8,
+    [None] * 8,
+    [None] * 8,
+    [None] * 8,
+    ["p"] * 8,
+    ["r", "n", "b", "q", "k", "b", "n", "r"],
+]
+
+
+def _square(file: int, rank: int) -> str:
+    return FILES[file] + str(rank + 1)
+
+
+@dataclass
+class ChessGame:
+    """A stand-in that shapes `chess-1`'s observation; not a rules engine (D-170)."""
+
+    board: list[list[str | None]] = field(default_factory=lambda: [list(row) for row in START])
+    moves: list[str] = field(default_factory=list)
+    result: dict[str, Any] | None = None
+    state_version: int = 0
+
+    @property
+    def to_move(self) -> str | None:
+        """Return the colour to move, or `None` once the game ended."""
+        if self.result is not None:
+            return None
+        return "white" if len(self.moves) % 2 == 0 else "black"
+
+    def legal(self) -> list[str]:
+        """Pawn steps and knight jumps of the side to move, onto empty squares."""
+        colour = self.to_move
+        if colour is None:
+            return []
+        found = []
+        for rank in range(8):
+            for file in range(8):
+                piece = self.board[rank][file]
+                if piece is None or piece.isupper() != (colour == "white"):
+                    continue
+                if piece.lower() == "p":
+                    step = 1 if colour == "white" else -1
+                    targets = [(file, rank + step)]
+                else:
+                    jumps = ((1, 2), (2, 1), (-1, 2), (-2, 1), (1, -2), (2, -1), (-1, -2), (-2, -1))
+                    targets = (
+                        [(file + df, rank + dr) for df, dr in jumps] if piece.lower() == "n" else []
+                    )
+                for to_file, to_rank in targets:
+                    if (
+                        0 <= to_file < 8
+                        and 0 <= to_rank < 8
+                        and self.board[to_rank][to_file] is None
+                    ):
+                        found.append(_square(file, rank) + _square(to_file, to_rank))
+        return sorted(found)
+
+    def play(self, uci: str) -> None:
+        """Move a piece; the caller checked the move is one of `legal()`."""
+        file, rank = FILES.index(uci[0]), int(uci[1]) - 1
+        to_file, to_rank = FILES.index(uci[2]), int(uci[3]) - 1
+        self.board[to_rank][to_file] = self.board[rank][file]
+        self.board[rank][file] = None
+        self.moves.append(uci)
+        self.state_version += 1
+
+    def claim(self) -> None:
+        """End the stand-in's game drawn; the real provider checks a claim under the rules."""
+        self.result = {"outcome": "draw", "winner": None, "reason": "threefold_repetition"}
+        self.state_version += 1
+
+    def observation(self, role: str) -> dict[str, Any]:
+        """Return the seat's observation, as `chess-1`'s schema shapes it."""
+        mine = self.to_move == COLOURS[role]
+        return {
+            "board": [list(row) for row in self.board],
+            "you_are": COLOURS[role],
+            "to_move": self.to_move,
+            "in_check": False,
+            "castling": {
+                "white_kingside": True,
+                "white_queenside": True,
+                "black_kingside": True,
+                "black_queenside": True,
+            },
+            "en_passant": None,
+            "halfmove_clock": 0,
+            "fullmove_number": 1 + len(self.moves) // 2,
+            "moves": list(self.moves),
+            "last_move": self.moves[-1] if self.moves else None,
+            "result": self.result,
+            "legal_moves": self.legal() if mine else [],
+            "claimable_draws": [],
+        }
+
+
 class Provider:
     """A conforming `agentnexus-games-v1` provider for `connect-four-1`, in memory."""
 
@@ -365,7 +478,7 @@ class Provider:
         self.requests: list[Recorded] = []
         self.bindings: dict[tuple[str, str], Binding] = {}
         self.spent: set[str] = set()
-        self.games: dict[str, Game] = {}
+        self.games: dict[str, Any] = {}
         self.fault: str | None = None
         self.applied_moves = 0
         self.stream: CountingStream | None = None
@@ -528,7 +641,8 @@ class Provider:
         if held is not None and ticket["seat_generation"] <= held.generation:
             return self._code(409, "generation_stale")
         self.spent.add(ticket["ticket_id"])
-        self.games.setdefault(match_id, Game())
+        chess = ticket["game_version"] in CHESS_GAME_VERSIONS
+        self.games.setdefault(match_id, ChessGame() if chess else Game())
         binding = Binding(public, ticket["seat_generation"], ticket["ticket_id"])
         self.bindings[(match_id, seat)] = binding
         binding.last = (body, signature)
@@ -572,6 +686,10 @@ class Provider:
         if set(document) != expected or document["operation"] != "move":
             return self._code(400, "malformed_body")
         move = document["move"]
+        if isinstance(game, ChessGame):
+            return self._continue_chess(
+                game, match_id, seat, document, body, signature, binding, sequence
+            )
         if (
             not isinstance(move, dict)
             or set(move) != {"column"}
@@ -604,6 +722,57 @@ class Provider:
             game.play(opponent, game.legal()[0])
         answer = self._accept(match_id, seat, binding, body, signature, sequence)
         binding.moves[key] = (move["column"], answer)
+        return answer
+
+    def _continue_chess(
+        self,
+        game: ChessGame,
+        match_id: str,
+        seat: str,
+        document: dict[str, Any],
+        body: bytes,
+        signature: str,
+        binding: Binding,
+        sequence: int,
+    ) -> tuple[int, bytes]:
+        move = document["move"]
+        uci = move.get("uci") if isinstance(move, dict) else None
+        claim = move.get("claim") if isinstance(move, dict) else None
+        if (
+            not isinstance(move, dict)
+            or not move
+            or not set(move) <= {"uci", "claim"}
+            or (uci is not None and not re.fullmatch(r"[a-h][1-8][a-h][1-8][qrbn]?", str(uci)))
+            or (claim is not None and claim not in ("threefold_repetition", "fifty_moves"))
+        ):
+            return self._code(400, "malformed_body")
+        key = document["idempotency_key"]
+        if key in binding.moves:
+            stored, answer = binding.moves[key]
+            if stored != json.dumps(move, sort_keys=True):
+                return self._code(409, "idempotency_conflict")
+            binding.sequence = sequence
+            binding.last, binding.last_answer = (body, signature), answer
+            return answer
+        if document["expected_state_version"] != game.state_version:
+            return self._code(409, "state_version_stale")
+        if game.result is not None:
+            return self._code(409, "match_not_running")
+        role = SEAT_ROLES[seat]
+        if game.to_move != COLOURS[role] or (uci is not None and uci not in game.legal()):
+            binding.sequence = sequence
+            answer = self._code(409, "move_not_legal")
+            binding.last, binding.last_answer = (body, signature), answer
+            return answer
+        if uci is not None:
+            game.play(uci)
+            self.applied_moves += 1
+        if claim is not None:
+            game.claim()
+        if game.result is None and game.legal():
+            game.play(game.legal()[0])
+        answer = self._accept(match_id, seat, binding, body, signature, sequence)
+        binding.moves[key] = (json.dumps(move, sort_keys=True), answer)  # type: ignore[assignment]
         return answer
 
     def _accept(

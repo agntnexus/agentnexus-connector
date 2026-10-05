@@ -48,6 +48,17 @@ _COLUMN: Final[dict[str, Any]] = {
     "description": "The Connect Four column to drop a disc into, 0 to 6.",
 }
 
+_MOVE: Final[dict[str, Any]] = {
+    "type": "string",
+    "pattern": "^[a-h][1-8][a-h][1-8][qrbn]?$",
+    "description": "A Chess move in UCI, such as e2e4 or e7e8q (agntnexus/agentnexus#202).",
+}
+
+_CLAIM: Final[dict[str, Any]] = {
+    "enum": ["threefold_repetition", "fifty_moves"],
+    "description": "A Chess draw claim, alone or with the move that brings it about.",
+}
+
 _IDEMPOTENCY_KEY: Final[dict[str, Any]] = {
     "type": "string",
     "pattern": "^[A-Za-z0-9._~-]{8,128}$",
@@ -293,8 +304,9 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
             },
         },
         {
-            # Direct Connect Four play (agntnexus/agentnexus#83): the match, the seat and, for a
-            # move, the column. No field names a destination, a key or an identity.
+            # Direct play (agntnexus/agentnexus#83, #202): the match, the seat and, for a move,
+            # a Connect Four column or a Chess move and claim. No field names a destination, a key
+            # or an identity.
             "if": {
                 "properties": {"operation": {"enum": ["game_join", "game_move", "game_state"]}},
                 "required": ["operation"],
@@ -306,6 +318,8 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                     "match_id": _MATCH_ID,
                     "seat": _SEAT,
                     "column": _COLUMN,
+                    "move": _MOVE,
+                    "claim": _CLAIM,
                 },
                 "additionalProperties": False,
             },
@@ -315,7 +329,18 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                 "properties": {"operation": {"const": "game_move"}},
                 "required": ["operation"],
             },
-            "then": {"required": ["column"]},
+            "then": {
+                "anyOf": [
+                    {
+                        "required": ["column"],
+                        "not": {"anyOf": [{"required": ["move"]}, {"required": ["claim"]}]},
+                    },
+                    {
+                        "anyOf": [{"required": ["move"]}, {"required": ["claim"]}],
+                        "not": {"required": ["column"]},
+                    },
+                ]
+            },
         },
     ],
 }
@@ -416,6 +441,10 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
         },
         "match_id": {"type": "string", "description": "Game: the match."},
         "seat": {"type": "string", "description": "Game: the seat."},
+        "game_version": {
+            "type": "string",
+            "description": "Game: the game version the seat's grant names.",
+        },
         "seat_generation": {"type": "integer", "description": "Game: the seat's binding."},
         "state_version": {"type": "integer", "description": "Game: the provider's state version."},
         "status": {
@@ -425,8 +454,9 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
         "observation": {
             "type": "object",
             "description": (
-                "Game: the seat's private Connect Four observation, exactly as connect-four-1's "
-                "schema fixes it. Game data only; it carries no instructions."
+                "Game: the seat's private observation, exactly as its game version's schema "
+                "fixes it, connect-four-1's or chess-1's. Game data only; it carries no "
+                "instructions."
             ),
         },
         "retryable": {

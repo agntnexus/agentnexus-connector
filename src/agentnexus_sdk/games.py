@@ -1,4 +1,4 @@
-"""Direct Connect Four play with a game provider, for the selected profile only (#83).
+"""Direct Connect Four and Chess play with a game provider, for the selected profile only (#83).
 
 agntnexus/agentnexus#83. AgentNexus authorises a seat; it relays no move (`D-090`). For one seat in
 one match the Connector:
@@ -29,9 +29,14 @@ What it holds to:
   unknown -- a lost answer, a refused connection, a malformed answer -- the next call for the same
   intent resends the identical signed bytes, which the provider answers with its stored answer. A
   different move waits until the unresolved one is resolved.
-* **Answers are bounded and checked.** A seat answer is read up to 3072 bytes and a refusal up to
-  1024, never decompressed, and each must match its schema exactly, the observation
-  `connect-four-1`'s. Anything else is a provider fault, reported as one, never turned into play.
+* **Answers are bounded and checked.** A seat answer is read up to 3072 bytes for Connect Four
+  and 9216 for Chess, a refusal up to 1024, never decompressed, and each must match its schema
+  exactly, the observation `connect-four-1`'s or `chess-1`'s. Anything else is a provider fault,
+  reported as one, never turned into play.
+* **A move fits its game** (agntnexus/agentnexus#202, `D-170`). A Connect Four move is a column;
+  a Chess move is UCI, a draw claim, or both, inside the same `move` operation. A move of the
+  other game's form is refused before anything is sent. The Connector holds no chess rule: what is
+  legal is the provider's to decide.
 * **Nothing secret leaves.** The registered key signs only the grant request to AgentNexus. The
   session key signs only messages to the provider and never leaves this machine. The ticket goes
   only to the provider, and no result, log line or error carries a key or a ticket.
@@ -73,9 +78,11 @@ PLAY_LINE: Final = "agentnexus-play-v1"
 SIGNATURE_HEADER: Final = "AgentNexus-Play-Signature"
 TICKET_VERSION: Final = "agentnexus-grant-v2"
 GAME_VERSION: Final = "connect-four-1"
+#: `D-170`: Chess's game versions, a two-owner one and a solo one against the provider's computer.
+CHESS_GAME_VERSIONS: Final = frozenset({"chess-1", "chess-1-solo"})
 #: `D-142`: the solo game version, against the provider's computer. It plays by `connect-four-1`'s
 #: rules and payloads, so the Connector plays it the same way; only the grant names it.
-GAME_VERSIONS: Final = frozenset({GAME_VERSION, "connect-four-1-solo"})
+GAME_VERSIONS: Final = frozenset({GAME_VERSION, "connect-four-1-solo"}) | CHESS_GAME_VERSIONS
 
 #: `agentnexus-games-v1`: a ticket is valid for at most 120 seconds.
 TICKET_LIFETIME: Final = dt.timedelta(seconds=120)
@@ -83,6 +90,8 @@ TICKET_LIFETIME: Final = dt.timedelta(seconds=120)
 CLOCK_SKEW: Final = dt.timedelta(seconds=30)
 #: `D-118`: a seat answer is 1024 bytes plus `connect-four-1`'s observation bound of 2048.
 ANSWER_LIMIT: Final = 1024 + 2048
+#: `D-170`: a Chess seat answer is 1024 bytes plus `chess-1`'s observation bound of 8192.
+CHESS_ANSWER_LIMIT: Final = 1024 + 8192
 REFUSAL_LIMIT: Final = 1024
 PROVIDER_TIMEOUT_SECONDS: Final = 10.0
 
@@ -111,6 +120,51 @@ OBSERVATION_MEMBERS: Final = frozenset(
 )
 STATUSES: Final = frozenset({"awaiting_seats", "active", "ended", "aborted"})
 ROLES: Final = frozenset({"first", "second"})
+
+#: `chess-1`'s observation, exactly (`D-170`, `CH-6`).
+CHESS_OBSERVATION_MEMBERS: Final = frozenset(
+    {
+        "board",
+        "you_are",
+        "to_move",
+        "in_check",
+        "castling",
+        "en_passant",
+        "halfmove_clock",
+        "fullmove_number",
+        "moves",
+        "last_move",
+        "result",
+        "legal_moves",
+        "claimable_draws",
+    }
+)
+COLOURS: Final = frozenset({"white", "black"})
+PIECES: Final = frozenset("PNBRQKpnbrqk")
+CLAIMS: Final = frozenset({"threefold_repetition", "fifty_moves"})
+CASTLING: Final = frozenset(
+    {"white_kingside", "white_queenside", "black_kingside", "black_queenside"}
+)
+CHESS_END_REASONS: Final = frozenset(
+    {
+        "checkmate",
+        "stalemate",
+        "dead_position",
+        "threefold_repetition",
+        "fifty_moves",
+        "fivefold_repetition",
+        "seventy_five_moves",
+        "resignation",
+        "timeout",
+        "timeout_versus_insufficient_material",
+        "seats_not_bound",
+        "computer_unavailable",
+        "match_time_limit",
+        "ply_limit",
+        "provider_stopped",
+    }
+)
+EN_PASSANT_SQUARES: Final = frozenset(f"{file}{rank}" for file in "abcdefgh" for rank in "36")
 
 #: Every refusal code `agentnexus-games-v1` defines for these three messages.
 REFUSAL_CODES: Final = frozenset(
@@ -293,9 +347,13 @@ def redemption_body(ticket: dict[str, Any], session_public_key: str, generation:
 
 
 def action_body(
-    generation: int, sequence: int, idempotency_key: str, expected_state_version: int, column: int
+    generation: int,
+    sequence: int,
+    idempotency_key: str,
+    expected_state_version: int,
+    move: int | dict[str, Any],
 ) -> bytes:
-    """Return the exact bytes of one move."""
+    """Return the exact bytes of one move: a Connect Four column, or a Chess move as given."""
     return _compact(
         {
             "seat_generation": generation,
@@ -303,7 +361,7 @@ def action_body(
             "operation": "move",
             "idempotency_key": idempotency_key,
             "expected_state_version": expected_state_version,
-            "move": {"column": column},
+            "move": {"column": move} if isinstance(move, int) else move,
         }
     )
 
@@ -391,9 +449,104 @@ def check_ticket(
     return ticket
 
 
-def check_observation(observation: object) -> bool:
-    """Whether an observation is exactly what `connect-four-1`'s schema accepts."""
-    if not isinstance(observation, dict) or set(observation) != OBSERVATION_MEMBERS:
+def uci_vocabulary() -> frozenset[str]:
+    """Every move a piece could make on an empty board, in UCI: `chess-1`'s move enum."""
+    files = "abcdefgh"
+    found: set[str] = set()
+    knight = ((1, 2), (2, 1), (2, -1), (1, -2), (-1, -2), (-2, -1), (-2, 1), (-1, 2))
+    lines = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
+    for rank in range(8):
+        for file in range(8):
+            origin = f"{files[file]}{rank + 1}"
+            for df, dr in knight:
+                if 0 <= file + df < 8 and 0 <= rank + dr < 8:
+                    found.add(f"{origin}{files[file + df]}{rank + dr + 1}")
+            for df, dr in lines:
+                step = 1
+                while 0 <= file + df * step < 8 and 0 <= rank + dr * step < 8:
+                    found.add(f"{origin}{files[file + df * step]}{rank + dr * step + 1}")
+                    step += 1
+    for origin_rank, target_rank in (("7", "8"), ("2", "1")):
+        for file in range(8):
+            for side in (-1, 0, 1):
+                if 0 <= file + side < 8:
+                    for piece in "qrbn":
+                        found.add(
+                            f"{files[file]}{origin_rank}{files[file + side]}{target_rank}{piece}"
+                        )
+    return frozenset(found)
+
+
+UCI: Final = uci_vocabulary()
+
+
+def answer_limit(game_version: str) -> int:
+    """Return how many bytes a seat answer of `game_version` may hold."""
+    return CHESS_ANSWER_LIMIT if game_version in CHESS_GAME_VERSIONS else ANSWER_LIMIT
+
+
+def _uci_list(value: object, most: int) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) <= most
+        and all(isinstance(move, str) and move in UCI for move in value)
+    )
+
+
+def _check_chess_observation(observation: dict[str, Any]) -> bool:
+    """Whether an observation is exactly what `chess-1`'s schema accepts."""
+    if set(observation) != CHESS_OBSERVATION_MEMBERS:
+        return False
+    board, castling, result = observation["board"], observation["castling"], observation["result"]
+    legal, claims = observation["legal_moves"], observation["claimable_draws"]
+    return (
+        isinstance(board, list)
+        and len(board) == 8
+        and all(
+            isinstance(rank, list)
+            and len(rank) == 8
+            and all(
+                square is None or (isinstance(square, str) and square in PIECES) for square in rank
+            )
+            for rank in board
+        )
+        and observation["you_are"] in COLOURS
+        and (observation["to_move"] is None or observation["to_move"] in COLOURS)
+        and isinstance(observation["in_check"], bool)
+        and isinstance(castling, dict)
+        and set(castling) == CASTLING
+        and all(isinstance(value, bool) for value in castling.values())
+        and (observation["en_passant"] is None or observation["en_passant"] in EN_PASSANT_SQUARES)
+        and _is_int(observation["halfmove_clock"], 0, 150)
+        and _is_int(observation["fullmove_number"], 1, 201)
+        and _uci_list(observation["moves"], 400)
+        and (observation["last_move"] is None or observation["last_move"] in UCI)
+        and _uci_list(legal, 218)
+        and len(set(legal)) == len(legal)
+        and isinstance(claims, list)
+        and len(claims) <= 2
+        and len(set(map(str, claims))) == len(claims)
+        and all(claim in CLAIMS for claim in claims)
+        and (
+            result is None
+            or (
+                isinstance(result, dict)
+                and set(result) == {"outcome", "winner", "reason"}
+                and result["outcome"] in ("win", "draw", "aborted")
+                and (result["winner"] is None or result["winner"] in COLOURS)
+                and result["reason"] in CHESS_END_REASONS
+            )
+        )
+    )
+
+
+def check_observation(observation: object, game_version: str = GAME_VERSION) -> bool:
+    """Whether an observation is exactly what its game version's schema accepts."""
+    if not isinstance(observation, dict):
+        return False
+    if game_version in CHESS_GAME_VERSIONS:
+        return _check_chess_observation(observation)
+    if set(observation) != OBSERVATION_MEMBERS:
         return False
     board = observation["board"]
     if not (
@@ -524,6 +677,7 @@ class GamePlayer:
             "seat": seat,
             "provider_id": ticket["provider_id"],
             "origin": self._origins[ticket["provider_id"]],
+            "game_version": ticket["game_version"],
             "seat_generation": generation,
             "sequence": 0,
             "state_version": 0,
@@ -539,14 +693,51 @@ class GamePlayer:
         )
         return self._send(state, pending)
 
-    def move(self, match_id: str, seat: str, column: int) -> dict[str, Any]:
-        """Drop a disc in `column`, or resolve the identical move whose outcome is unknown."""
+    def move(
+        self,
+        match_id: str,
+        seat: str,
+        column: int | None = None,
+        *,
+        uci: str | None = None,
+        claim: str | None = None,
+    ) -> dict[str, Any]:
+        """Play one move of the seat's game, or resolve the identical move whose outcome is unknown.
+
+        Connect Four takes a `column`; Chess takes `uci`, a draw `claim`, or both (`D-170`).
+        """
         _check_names(match_id, seat)
-        if not _is_int(column, 0, 6):
-            message = "column must be an integer from 0 to 6."
+        chess_form = uci is not None or claim is not None
+        if column is not None and (chess_form or not _is_int(column, 0, 6)):
+            message = "column must be an integer from 0 to 6, and only for Connect Four."
+            raise GameRefusedError("games.invalid_move", message)
+        if chess_form and (
+            (uci is not None and (not isinstance(uci, str) or uci not in UCI))
+            or (claim is not None and claim not in CLAIMS)
+        ):
+            message = (
+                "move must be a move in UCI such as e2e4 or e7e8q, and claim one of "
+                "threefold_repetition and fifty_moves."
+            )
             raise GameRefusedError("games.invalid_move", message)
         state, signer = self._open(match_id, seat)
-        intent = {"operation": "move", "column": column}
+        chess = state.get("game_version", GAME_VERSION) in CHESS_GAME_VERSIONS
+        if chess != chess_form or (not chess and column is None):
+            message = (
+                "This seat plays Chess: send a move in UCI, a claim, or both."
+                if chess
+                else "This seat plays Connect Four: send a column from 0 to 6."
+            )
+            raise GameRefusedError("games.invalid_move", message)
+        payload: int | dict[str, Any]
+        if chess or column is None:
+            payload = {
+                name: value for name, value in (("uci", uci), ("claim", claim)) if value is not None
+            }
+            intent: dict[str, Any] = {"operation": "move", **payload}
+        else:
+            payload = column
+            intent = {"operation": "move", "column": column}
         pending = state.get("pending")
         if pending is not None:
             if pending["intent"] == intent:
@@ -562,7 +753,7 @@ class GamePlayer:
             sequence,
             str(uuid.uuid4()),
             int(state["state_version"]),
-            column,
+            payload,
         )
         return self._send(
             state, self._stage(signer, state, "actions", "act", sequence, body, intent)
@@ -634,7 +825,8 @@ class GamePlayer:
                 },
             ) as response:
                 status = response.status_code
-                raw = _read_bounded(response, ANSWER_LIMIT if status == 200 else REFUSAL_LIMIT)
+                limit = answer_limit(str(state.get("game_version", GAME_VERSION)))
+                raw = _read_bounded(response, limit if status == 200 else REFUSAL_LIMIT)
         except httpx.HTTPError:
             raise _unavailable() from None
         if raw is None:
@@ -671,7 +863,9 @@ class GamePlayer:
             or answer["sequence"] != pending["sequence"]
             or not _is_int(answer["state_version"], 0, 9007199254740991)
             or answer["status"] not in STATUSES
-            or not check_observation(answer["observation"])
+            or not check_observation(
+                answer["observation"], str(state.get("game_version", GAME_VERSION))
+            )
         ):
             raise _fault("The provider's answer is not a seat answer for this message.")
         return answer
@@ -828,6 +1022,7 @@ def _result(state: dict[str, Any], answer: dict[str, Any]) -> dict[str, Any]:
     return {
         "match_id": state["match_id"],
         "seat": state["seat"],
+        "game_version": state.get("game_version", GAME_VERSION),
         "seat_generation": state["seat_generation"],
         "state_version": answer["state_version"],
         "status": answer["status"],

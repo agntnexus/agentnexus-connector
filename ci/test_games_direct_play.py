@@ -48,7 +48,9 @@ from games_fixtures import (
     PROVIDER_HOST,
     PROVIDER_ID,
     ArenaApi,
+    ChessGame,
     Clock,
+    Game,
     Provider,
 )
 
@@ -890,6 +892,7 @@ class TestBoundedAnswers:
         assert set(joined) == {
             "match_id",
             "seat",
+            "game_version",
             "seat_generation",
             "state_version",
             "status",
@@ -941,7 +944,7 @@ class TestNoSecretLeaves:
 
 GAME_TOOLS = {
     "game_join": {"match_id", "seat"},
-    "game_move": {"match_id", "seat", "column"},
+    "game_move": {"match_id", "seat", "column", "move", "claim"},
     "game_state": {"match_id", "seat"},
 }
 
@@ -1229,3 +1232,251 @@ def test_no_real_grant_key_is_known_to_the_connector() -> None:
     source = Path(games.__file__).read_text(encoding="utf-8")
     assert "lB9uNVA93XRlmIHAeAJSC0b1aRP4xtI" not in source
     assert "valid nowhere" not in source
+
+
+# ---------------------------------------------------------------------------------------------
+# Chess (agntnexus/agentnexus#202, D-170): the same grant, keys, transport and retries; a move is
+# UCI, a draw claim or both, and an answer is chess-1's, bounded at 1024 + 8192 bytes.
+# ---------------------------------------------------------------------------------------------
+
+CHESS_SEAT = "first"
+
+
+def _moves(provider: Provider) -> list[Any]:
+    """Return the move payloads the provider received, in order."""
+    return [
+        json.loads(request.body)["move"]
+        for request in provider.requests
+        if request.path.endswith("/actions")
+    ]
+
+
+class TestAChessSeat:
+    """A Chess ticket is played, and its moves reach the provider as written (#202)."""
+
+    @pytest.mark.parametrize(
+        ("mode", "version"), [("chess", "chess-1"), ("chess_solo", "chess-1-solo")]
+    )
+    def test_a_chess_ticket_is_played_and_names_its_game_version(
+        self, players: Any, api: ArenaApi, first: Profile, mode: str, version: str
+    ) -> None:
+        """A chess ticket is played and names its game version."""
+        api.mode = mode
+        player = players(first)
+        joined = player.join(MATCH, CHESS_SEAT)
+        assert joined["game_version"] == version
+        assert joined["observation"]["you_are"] == "white"
+        assert "e2e3" in joined["observation"]["legal_moves"]
+
+    def test_a_uci_move_goes_to_the_provider_as_written(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """A uci move goes to the provider as written."""
+        api.mode = "chess"
+        player = players(first)
+        player.join(MATCH, CHESS_SEAT)
+        played = player.move(MATCH, CHESS_SEAT, uci="e2e3")
+        assert played["observation"]["moves"][0] == "e2e3"
+        assert _moves(provider) == [{"uci": "e2e3"}]
+
+    def test_a_claim_alone_and_with_a_move_are_sent_as_written(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """A claim alone and with a move are sent as written."""
+        api.mode = "chess"
+        player = players(first)
+        player.join(MATCH, CHESS_SEAT)
+        played = player.move(MATCH, CHESS_SEAT, uci="g1f3", claim="fifty_moves")
+        assert played["observation"]["result"]["outcome"] == "draw"
+        assert _moves(provider) == [{"uci": "g1f3", "claim": "fifty_moves"}]
+
+    def test_a_claim_without_a_move_is_sent(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """A claim without a move is sent."""
+        api.mode = "chess"
+        player = players(first)
+        player.join(MATCH, CHESS_SEAT)
+        player.move(MATCH, CHESS_SEAT, claim="threefold_repetition")
+        assert _moves(provider) == [{"claim": "threefold_repetition"}]
+
+
+class TestTheMoveFitsTheGame:
+    """A move of the other game's form is refused before anything is sent (#202)."""
+
+    @pytest.mark.parametrize(
+        ("arguments", "why"),
+        [
+            ({"column": 3}, "a column for Chess"),
+            ({}, "nothing"),
+            ({"uci": "E2E4"}, "upper case"),
+            ({"uci": "e2e9"}, "off the board"),
+            ({"uci": "a1a1"}, "no move at all"),
+            ({"uci": "g1f3q"}, "a knight jump with a promotion"),
+            ({"uci": "e2e4 resign"}, "free text"),
+            ({"claim": "agreement"}, "an unknown claim"),
+            ({"column": 3, "uci": "e2e4"}, "both forms"),
+        ],
+    )
+    def test_a_move_off_the_chess_form_is_refused_before_it_is_sent(
+        self,
+        players: Any,
+        api: ArenaApi,
+        provider: Provider,
+        first: Profile,
+        arguments: dict[str, Any],
+        why: str,
+    ) -> None:
+        """A move off the chess form is refused before it is sent."""
+        api.mode = "chess"
+        player = players(first)
+        player.join(MATCH, CHESS_SEAT)
+        sent = len(provider.requests)
+        column = arguments.pop("column", None)
+        expect_refusal(
+            lambda: player.move(MATCH, CHESS_SEAT, column, **arguments), "games.invalid_move"
+        )
+        assert len(provider.requests) == sent, why
+
+    def test_a_uci_move_for_a_connect_four_seat_is_refused(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """A uci move for a connect four seat is refused."""
+        player = players(first)
+        player.join(MATCH, CHESS_SEAT)
+        sent = len(provider.requests)
+        expect_refusal(lambda: player.move(MATCH, CHESS_SEAT, uci="e2e4"), "games.invalid_move")
+        expect_refusal(
+            lambda: player.move(MATCH, CHESS_SEAT, claim="fifty_moves"), "games.invalid_move"
+        )
+        assert len(provider.requests) == sent
+        assert player.move(MATCH, CHESS_SEAT, 3)["observation"]["move_count"] == 2
+
+
+class TestARetryIsNoSecondMove:
+    """A retry never makes a second Chess move (#202)."""
+
+    def test_a_lost_answer_resends_the_identical_move(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """A lost answer resends the identical move."""
+        api.mode = "chess"
+        player = players(first)
+        player.join(MATCH, CHESS_SEAT)
+        provider.fault = "lose_answer"
+        expect_refusal(
+            lambda: player.move(MATCH, CHESS_SEAT, uci="e2e3"), "games.provider_unavailable"
+        )
+        expect_refusal(lambda: player.move(MATCH, CHESS_SEAT, uci="d2d3"), "games.pending_other")
+        played = player.move(MATCH, CHESS_SEAT, uci="e2e3")
+        assert provider.applied_moves == 1
+        assert played["observation"]["moves"][0] == "e2e3"
+        actions = [r for r in provider.requests if r.path.endswith("/actions")]
+        assert actions[0].body == actions[-1].body
+
+
+class TestTheAnswerIsChecked:
+    """A Chess answer is bounded and checked exactly (#202)."""
+
+    def test_a_chess_answer_is_read_up_to_its_own_bound(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """A chess answer is read up to its own bound."""
+        assert games.answer_limit("chess-1") == games.answer_limit("chess-1-solo") == 1024 + 8192
+        assert games.answer_limit("connect-four-1") == 1024 + 2048
+        api.mode = "chess"
+        player = players(first)
+        player.join(MATCH, CHESS_SEAT)
+        provider.fault = "oversize"
+        played = player.move(MATCH, CHESS_SEAT, uci="e2e3")
+        assert played["observation"]["moves"][0] == "e2e3"
+
+    @pytest.mark.parametrize(
+        ("change", "why"),
+        [
+            (lambda o: o.update(hint="play e2e4"), "an extra member"),
+            (lambda o: o.update(you_are="first"), "a seat instead of a colour"),
+            (lambda o: o.update(legal_moves=["a1a1"]), "an impossible move"),
+            (lambda o: o.update(legal_moves=["e2e4", "e2e4"]), "a repeated move"),
+            (lambda o: o.update(board=o["board"][:7]), "seven ranks"),
+            (lambda o: o["board"][0].__setitem__(0, "X"), "an unknown piece"),
+            (lambda o: o.update(en_passant="e4"), "en passant on the wrong rank"),
+            (lambda o: o.update(halfmove_clock=151), "a halfmove clock over 150"),
+            (lambda o: o.update(moves=["e2e3"] * 401), "more than 400 moves"),
+            (lambda o: o.update(last_move="<b>e2e4</b>"), "markup"),
+            (lambda o: o.update(claimable_draws=["agreement"]), "an unknown claim"),
+            (
+                lambda o: o.update(result={"outcome": "win", "winner": "white"}),
+                "a result without a reason",
+            ),
+        ],
+    )
+    def test_an_observation_off_the_chess_schema_is_a_provider_fault(
+        self, change: Any, why: str
+    ) -> None:
+        """An observation off the chess schema is a provider fault."""
+        observation = ChessGame().observation("first")
+        assert games.check_observation(observation, "chess-1"), "the stand-in must conform"
+        change(observation)
+        assert not games.check_observation(observation, "chess-1"), why
+
+    def test_a_connect_four_observation_is_no_chess_observation(self) -> None:
+        """A connect four observation is no chess observation."""
+        assert not games.check_observation(Game().observation("first"), "chess-1")
+        assert not games.check_observation(ChessGame().observation("first"), "connect-four-1")
+
+
+def test_the_vocabulary_is_the_contracts() -> None:
+    """The 1968 moves a piece could make on an empty board, as `chess-1`'s move schema lists."""
+    vocabulary = games.uci_vocabulary()
+    assert len(vocabulary) == 1968 == len(set(vocabulary))
+    assert {"e2e4", "e7e8q", "a2a1n", "e1g1"} <= vocabulary
+    assert not {"a1a1", "g1f3q", "e2e4q"} & vocabulary
+
+
+class TestTheBridgeAndTheTool:
+    """`game_move` takes a column, or a Chess move and claim; never both, and no new tool."""
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"move": "e2e4"},
+            {"move": "e7e8q", "claim": "fifty_moves"},
+            {"claim": "threefold_repetition"},
+            {"column": 3},
+        ],
+    )
+    def test_a_move_of_either_form_parses(self, fields: dict[str, Any]) -> None:
+        """A move of either form parses."""
+        command = {"operation": "game_move", "match_id": MATCH, "seat": CHESS_SEAT, **fields}
+        assert bridge.parse_command(json.dumps(command).encode()) == command
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"column": 3, "move": "e2e4"},
+            {"column": 3, "claim": "fifty_moves"},
+            {"move": "e2e9"},
+            {"move": "a1a1"},
+            {"move": 4},
+            {"claim": "agreement"},
+            {"move": "e2e4", "claim": None},
+            {},
+        ],
+    )
+    def test_a_move_of_no_form_or_both_is_refused(self, fields: dict[str, Any]) -> None:
+        """A move of no form or both is refused."""
+        command = {"operation": "game_move", "match_id": MATCH, "seat": CHESS_SEAT, **fields}
+        with pytest.raises(bridge.BridgeInputError):
+            bridge.parse_command(json.dumps(command).encode())
+
+    def test_the_tool_takes_a_chess_move_and_the_tool_set_is_unchanged(self) -> None:
+        """The tool takes a chess move and the tool set is unchanged."""
+        names = {tool["name"] for tool in mcp_server.TOOLS if tool["name"].startswith("game_")}
+        assert names == {"game_join", "game_move", "game_state"}
+        (tool,) = [tool for tool in mcp_server.TOOLS if tool["name"] == "game_move"]
+        schema = tool["inputSchema"]
+        assert set(schema["properties"]) == {"match_id", "seat", "column", "move", "claim"}
+        assert schema["required"] == ["match_id", "seat"]
+        assert schema["properties"]["claim"]["enum"] == ["threefold_repetition", "fifty_moves"]
+        assert "Chess" in tool["description"] and "Connect Four" in tool["description"]
