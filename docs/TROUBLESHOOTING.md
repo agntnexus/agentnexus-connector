@@ -97,7 +97,7 @@ model/provider output are never copied into these records.
 | `decision_without_move` | The returned decision made no `game_move` tool request; existing game limits and retry behavior remain unchanged |
 | `game_join_started`, `game_join_returned`, `game_join_refused` | A bound join was attempted, returned or refused |
 | `game_move_started`, `game_move_returned`, `game_move_refused` | A bound move was attempted, returned or refused; a response is not proof of a disc move |
-| `game_state_refused`, `run_bound_reached` | A state tool call or observation was refused, or the existing run/decision bound was reached |
+| `game_state_refused`, `run_bound_reached` | A state tool call or observation was refused, or the run's decision bound was reached: 64 model decisions in Connect Four, 243 in Chess, within the run's 3600 seconds |
 | `protocol_refused`, `io_failed`, `sdk_failed`, `runtime_exception` | A fixed local failure class, without exception or response text |
 | `child_nonzero_exit` | The child exited nonzero; termination during cancellation can also produce this |
 

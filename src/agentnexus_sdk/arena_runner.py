@@ -352,6 +352,9 @@ class ArenaRunner:
             raise RunnerRefused("Missing private Arena pipe.")
         output = child.stdout
         diagnostics = 0
+        # Connect Four's run stays within 256; a joined Chess match may send its own whole run's
+        # diagnostics, a finite bound derived from its decisions (agntnexus/agentnexus#202).
+        diagnostic_limit = 256
         try:
             for line in iter(lambda: output.readline(4097), ""):
                 if len(line) > 4096:
@@ -369,7 +372,7 @@ class ArenaRunner:
                     ):
                         raise RunnerRefused("Hermes sent an invalid Arena diagnostic.")
                     diagnostics += 1
-                    if diagnostics > 256:
+                    if diagnostics > diagnostic_limit:
                         raise RunnerRefused("Hermes exceeded the bounded Arena diagnostics.")
                     diagnostic(intent, request["diagnostic"], request["duration_ms"])
                     continue
@@ -399,6 +402,13 @@ class ArenaRunner:
                             intent,
                             f"{operation}_returned",
                             max(0, min(int((time.monotonic() - started) * 1000), 3600000)),
+                        )
+                    if (
+                        operation == "game_join"
+                        and result.get("game_version") in games.CHESS_GAME_VERSIONS
+                    ):
+                        diagnostic_limit = hermes_arena.diagnostic_bound(
+                            hermes_arena.DECISIONS["chess"]
                         )
                     if operation == "game_join" and not self.playing:
                         self._report("playing")

@@ -804,7 +804,7 @@ def test_diagnostic_security_oracles_detect_weakened_source(
     source = Path(arena_runner.__file__).read_text(encoding="utf-8")
     original, replacement = {
         "extra-fields": ('set(request) != {"diagnostic", "duration_ms"}', "False"),
-        "flood": ("if diagnostics > 256:", "if False:"),
+        "flood": ("if diagnostics > diagnostic_limit:", "if False:"),
         "raw-stderr": ("stderr=subprocess.DEVNULL,", "stderr=subprocess.PIPE,"),
     }[mutation]
     assert source.count(original) == 1
@@ -851,3 +851,137 @@ def test_diagnostic_security_oracles_detect_weakened_source(
                 oracle(mutant)
     finally:
         del sys.modules[spec.name]
+
+
+# agntnexus/agentnexus#202: the automatic run's decision and diagnostic bounds, per game.
+
+
+def run_decisions(
+    monkeypatch: pytest.MonkeyPatch, role: str, turns: int, *, end: bool
+) -> tuple[int, int, list[str]]:
+    """Run the child against a game that stays on this seat's turn for `turns` decisions."""
+    decisions: list[int] = []
+
+    class NeverMovingAgent:
+        def __init__(self, **kwargs: object) -> None:
+            self.tools = [{"function": {"name": name}} for name in sorted(hermes_arena.TOOLS)]
+
+        def run_conversation(self, prompt: str) -> dict[str, object]:
+            decisions.append(1)
+            return {"failed": False}
+
+        def close(self) -> None:
+            pass
+
+    model = {"provider": "openrouter", "default": "synthetic-model"}
+    monkeypatch.setattr(hermes_arena, "configure", lambda handler: (NeverMovingAgent, model))
+    original_import = importlib.import_module
+
+    def module(name: str) -> object:
+        if name == "dotenv":
+            return SimpleNamespace(dotenv_values=lambda *args, **kwargs: {})
+        if name == "hermes_cli.runtime_provider":
+            return SimpleNamespace(resolve_runtime_provider=lambda **kwargs: model)
+        return original_import(name)
+
+    monkeypatch.setattr(hermes_arena.importlib, "import_module", module)
+    for name in ("HERMES_SAFE_MODE", "HERMES_IGNORE_RULES", "HERMES_IGNORE_USER_CONFIG"):
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setenv("HERMES_HOME", ".")
+    monkeypatch.setattr(sys, "argv", ["hermes_arena.py", "."])
+    request = {"match_id": str(uuid.uuid4()), "seat": "first", "seconds": 3600}
+    turn = {"status": "active", "observation": {"you_are": role, "to_move": role}}
+    states = [turn] * turns + ([{"status": "ended"}] if end else [])
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(request) + "\n" + "".join(json.dumps({"result": s}) + "\n" for s in states)
+        ),
+    )
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(hermes_arena.time, "sleep", lambda seconds: None)
+    code = hermes_arena.main()
+    events = [
+        json.loads(line)["diagnostic"]
+        for line in output.getvalue().splitlines()
+        if "diagnostic" in json.loads(line)
+    ]
+    return code, len(decisions), events
+
+
+@pytest.mark.parametrize("role", ["white", "black"])
+def test_a_running_chess_game_reaches_its_65th_decision(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """400 plies give a seat up to 200 moves; decision 65 must still be made."""
+    code, decisions, events = run_decisions(monkeypatch, role, 65, end=True)
+    assert (code, decisions) == (0, 65)
+    assert "run_bound_reached" not in events
+
+
+@pytest.mark.parametrize("role", ["first", "second"])
+def test_connect_four_keeps_its_64_decisions(monkeypatch: pytest.MonkeyPatch, role: str) -> None:
+    """Connect Four's bound is unchanged: decision 65 is not made."""
+    code, decisions, events = run_decisions(monkeypatch, role, 65, end=True)
+    assert (code, decisions) == (3, 64)
+    assert events[-1] == "run_bound_reached"
+
+
+def test_the_chess_decision_bound_is_finite(monkeypatch: pytest.MonkeyPatch) -> None:
+    """200 own moves and Connect Four's 43 decisions without a move: 243, then the run stops."""
+    assert hermes_arena.DECISIONS == {"connect-four": 64, "chess": 243}
+    code, decisions, events = run_decisions(monkeypatch, "white", 244, end=False)
+    assert (code, decisions) == (3, 243)
+    assert events[-1] == "run_bound_reached"
+    # At most three diagnostics per decision and one as the run ends: the parent's bound.
+    assert len(events) <= hermes_arena.diagnostic_bound(243) == 730
+
+
+def serve_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    game_version: str,
+    count: int,
+) -> list[str]:
+    """Serve one joined match's diagnostics through the parent and return its events."""
+    runner, owned = diagnostic_supervisor()
+    joined = {"status": "active", "game_version": game_version, "observation": {}}
+    monkeypatch.setattr(arena_runner.bridge, "_run_game_command", lambda *a, **k: joined)
+    child = SimpleNamespace(
+        stdout=io.StringIO(
+            '{"operation":"game_join"}\n'
+            + '{"diagnostic":"model_call_started","duration_ms":0}\n' * count
+            + '{"finished": true}\n'
+        ),
+        stdin=io.StringIO(),
+    )
+    runner._serve(child, owned)
+    return [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines()]
+
+
+def test_the_parent_takes_a_whole_chess_run_of_diagnostics(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A whole Chess run's diagnostics are taken: 243 decisions, three each, and one more."""
+    events = serve_diagnostics(monkeypatch, capsys, "chess-1", 730)
+    assert "protocol_refused" not in events
+    assert events.count("model_call_started") == 730
+
+
+def test_the_parent_still_bounds_a_chess_run_of_diagnostics(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One diagnostic past the Chess bound is refused."""
+    events = serve_diagnostics(monkeypatch, capsys, "chess-1-solo", 731)
+    assert events[-1] == "protocol_refused"
+
+
+def test_connect_four_keeps_its_256_diagnostics(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Connect Four's diagnostic bound is unchanged."""
+    events = serve_diagnostics(monkeypatch, capsys, "connect-four-1", 257)
+    assert events[-1] == "protocol_refused"
+    assert events.count("model_call_started") == 256

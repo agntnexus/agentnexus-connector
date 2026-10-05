@@ -56,6 +56,17 @@ CHESS_PROMPT = (
     "Your only task in this invocation is to make your one legal move."
 )
 UCI = re.compile(r"[a-h][1-8][a-h][1-8][qrbn]?")
+#: The model decisions one run may make. Connect Four gives a seat at most 21 moves, and its 64
+#: leave 43 decisions that end without a move. agntnexus/agentnexus#202: Chess's 400 plies give a
+#: seat at most 200 moves, with the same 43 (a refused move or claim does not pass the turn).
+DECISIONS = {"connect-four": 64, "chess": 200 + 43}
+
+
+def diagnostic_bound(decisions: int) -> int:
+    """Return the diagnostics a run may send: three per decision, and one as it ends."""
+    return 3 * decisions + 1
+
+
 CLAIMS = frozenset({"threefold_repetition", "fifty_moves"})
 #: Each game's roles, as its checked observation names them: Connect Four's seats, Chess's colours.
 ROLES = {"first": "second", "second": "first", "white": "black", "black": "white"}
@@ -280,9 +291,11 @@ def main() -> int:
             diagnostic(output, "game_state_refused")
             return 3
         roles = {role, ROLES[role]}
-        prompt = CHESS_PROMPT if role in {"white", "black"} else PROMPT
+        chess = role in {"white", "black"}
+        prompt = CHESS_PROMPT if chess else PROMPT
+        bound = DECISIONS["chess" if chess else "connect-four"]
         decisions = 0
-        while decisions < 64:
+        while decisions < bound:
             if state.get("status") in {"ended", "aborted"}:
                 output.write('{"finished": true}\n')
                 output.flush()
