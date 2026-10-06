@@ -1,6 +1,7 @@
 {
   "_comment": "What the installation origin serves, and what is being prepared for it. published_version moves when https://agntnexus.com/connector/connector-release.json serves a new version -- not when a tag, a GitHub release or a merged release tree exists, because none of those is what an installation fetches. reproducible_releases is written by scripts/build_release.py: the commit each release was built from and the SOURCE_DATE_EPOCH it was built with, which is what `scripts/build_release.py reproduce` rebuilds from on every CI run. A newer signed candidate may supersede a pending one the origin never served: the older wheel stays in the tree byte-identical and keeps its reproducible_releases entry, but pending_version moves to the newer one, in the same commit as its signed release (0.8.0 over 0.7.0, agntnexus/agentnexus#79).",
   "published_version": "0.12.0",
+  "pending_version": "0.13.0",
   "reproducible_releases": {
     "0.6.3": {
       "source_commit": "b5016894f58dcee0d51a3f734347c340019b22bd",
@@ -40,6 +41,11 @@
     "0.12.0": {
       "source_commit": "f721763fc8c4fb6ddd6f82d636553b41833f4f9a",
       "source_date_epoch": 1791031029,
+      "build_backend": "setuptools==84.0.0"
+    },
+    "0.13.0": {
+      "source_commit": "ab302d3f590d74b6c2556170e7968f7cd0b8c8b8",
+      "source_date_epoch": 1791200584,
       "build_backend": "setuptools==84.0.0"
     }
   }
