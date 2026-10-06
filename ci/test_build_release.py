@@ -787,6 +787,82 @@ def test_the_published_state_names_the_release_the_origin_serves() -> None:
     assert published_state_failures(state, tree=tree, installers=INSTALLERS) == []
 
 
+#: The bounded HTTPS read-back of https://agntnexus.com after the observer carrying 0.13.0 was
+#: promoted (agntnexus/agentnexus#202): what the origin served, byte for byte, with the manifest's
+#: signature verified against the published loader key. 0.12.0 is the retained earlier release.
+ORIGIN_READBACK_0130 = {
+    "manifest_sha256": "d5eaa9742b12b0e9fba8178a35195283cb09b0d524f4db4501822b56c2964ad2",
+    "wheel_bytes": 293531,
+    "wheel_sha256": "ee69ae9e02a5cc120065de3a27027fb91d6042ab729e34cea7f187e2210b290d",
+    "retained_0120_bytes": 289511,
+    "retained_0120_sha256": "0e74377ce3b75fc78aab7106049bc56063ca352716251aaa04a2ffc97e329642",
+}
+#: Where 0.13.0 came from, as the signed candidate recorded it. Publication moves none of it.
+PROVENANCE_0130 = {
+    "source_commit": "ab302d3f590d74b6c2556170e7968f7cd0b8c8b8",
+    "source_date_epoch": 1791200584,
+    "build_backend": "setuptools==84.0.0",
+}
+
+
+def _committed_state() -> dict[str, object]:
+    state: dict[str, object] = json.loads(
+        (REPOSITORY_ROOT / builder.STATE_FILE).read_text(encoding="utf-8")
+    )
+    return state
+
+
+def test_the_origin_serves_0130_and_the_state_says_so() -> None:
+    """0.13.0 is published only after the origin served exactly the committed, signed bytes."""
+    state = _committed_state()
+    assert state["published_version"] == "0.13.0"
+    assert not any(key.startswith("pending_") for key in state)
+    releases = state["reproducible_releases"]
+    assert isinstance(releases, dict)
+    assert releases["0.13.0"] == PROVENANCE_0130
+    connector = REPOSITORY_ROOT / "connector-release" / "connector"
+    manifest = (connector / builder.MANIFEST_NAME).read_bytes()
+    assert hashlib.sha256(manifest).hexdigest() == ORIGIN_READBACK_0130["manifest_sha256"]
+    assert json.loads(manifest)["connector_version"] == "0.13.0"
+    for version, size, digest in (
+        ("0.13.0", "wheel_bytes", "wheel_sha256"),
+        ("0.12.0", "retained_0120_bytes", "retained_0120_sha256"),
+    ):
+        wheel = (connector / version / builder.wheel_name(version)).read_bytes()
+        assert len(wheel) == ORIGIN_READBACK_0130[size], version
+        assert hashlib.sha256(wheel).hexdigest() == ORIGIN_READBACK_0130[digest], version
+    record = (REPOSITORY_ROOT / "docs" / "releases" / "connector-0.13.0.md").read_text("utf-8")
+    for value in (*ORIGIN_READBACK_0130.values(), *PROVENANCE_0130.values()):
+        assert str(value) in record, value
+
+
+@pytest.mark.parametrize(
+    "claimed",
+    (
+        {"published_version": "0.12.0"},
+        {"published_version": "0.12.0", "pending_version": "0.12.0"},
+        {"published_version": "0.13.0", "pending_version": "0.13.0"},
+        {"published_version": "0.13.0", "pending_reason": "left behind"},
+        {"published_version": "0.14.0"},
+    ),
+    ids=(
+        "the-old-release-as-served",
+        "the-old-release-twice",
+        "published-and-pending",
+        "a-pending-field-left-behind",
+        "a-release-the-tree-does-not-hold",
+    ),
+)
+def test_a_state_other_than_the_served_0130_is_refused(claimed: dict[str, object]) -> None:
+    """The committed tree holds 0.13.0 as its manifest; no other claim about it passes."""
+    state = {
+        key: value for key, value in _committed_state().items() if not key.startswith("pending_")
+    }
+    state.update(claimed)
+    tree = REPOSITORY_ROOT / "connector-release"
+    assert published_state_failures(state, tree=tree, installers=INSTALLERS)
+
+
 @pytest.fixture
 def candidate(tmp_path: Path) -> dict[str, object]:
     """Add one signed candidate to a copy of the committed release tree, under a throwaway key.
