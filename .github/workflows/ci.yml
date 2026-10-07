@@ -142,6 +142,14 @@ jobs:
       - name: Arena starts stay bounded, isolated and single across retries
         run: python -m pytest ci/test_arena_runner.py -q
 
+      - name: An Arena decision ends inside the provider's turn, and no late move is sent
+        # agntnexus/agentnexus#223. A model decision has 45 of the provider's 60 seconds. These
+        # cases run the child with a fake clock, the supervisor against scripted streams, and a real
+        # supervisor with a real child process whose stand-in model blocks, is slow or is fast: the
+        # blocked one must be killed at the cutoff with no move forwarded, no process left and one
+        # fixed diagnostic. No network, no model, no credential and no real match.
+        run: python -m pytest ci/test_arena_turn_budget.py -q
+
       - name: The release builder refuses what it must
         # `scripts/build_release.py` is the one file here that can hold a private signing key, so
         # its refusals are worth more than its output: a key inside a work tree, an unstamped

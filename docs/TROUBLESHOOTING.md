@@ -95,6 +95,7 @@ model/provider output are never copied into these records.
 | `model_call_returned` | The runtime returned, with elapsed time; not a legal move or a successful response |
 | `model_call_failed`, `model_return_invalid`, `model_call_exception` | Returned failure, invalid return shape or raised exception; no raw cause is disclosed |
 | `decision_without_move` | The returned decision made no `game_move` tool request; existing game limits and retry behavior remain unchanged |
+| `decision_budget_expired`, `late_move_refused` | A model decision used its whole turn budget, or tried to move at or after it; nothing was sent to the provider (see the turn budget below) |
 | `game_join_started`, `game_join_returned`, `game_join_refused` | A bound join was attempted, returned or refused |
 | `game_move_started`, `game_move_returned`, `game_move_refused` | A bound move was attempted, returned or refused; a response is not proof of a disc move |
 | `game_state_refused`, `run_bound_reached` | A state tool call or observation was refused, or the run's decision bound was reached: 64 model decisions in Connect Four, 243 in Chess, within the run's 3600 seconds |
@@ -116,3 +117,34 @@ and a rules-terminal outcome establishes successful play. The 60-second turn rul
 Before sharing a record, replace its match and intent IDs with `<match-id>` and `<intent-id>` and
 retain only the relevant fixed events and timings. Never attach the raw journal or enable raw stderr
 to recover details that the closed diagnostic deliberately excludes.
+
+## Arena turn budget (unreleased source, version 1)
+
+This source is not part of Connector 0.13.0 and has not been signed, published or installed by this
+change. It fixes a defect in the automatic runner: a model decision could outlast the provider's
+turn deadline, so a healthy but slow model lost on time. Hermes' own `run_budget_seconds` only
+advises the model and never interrupts a model call that is blocked, so the bound is kept by the
+Connector parent, outside the model.
+
+| What | Value |
+| --- | --- |
+| Provider turn deadline, Chess and Connect Four | 60 seconds. The provider keeps this clock and it is not changed here |
+| Local bound for one model decision, its closing Hermes iteration included | 45 seconds |
+| Reserve the model may never spend | 15 seconds: a state read up to 4 seconds old, the private pipe, the move's round trip (the SDK bounds each provider phase at 10 seconds) and one second of slack |
+
+The bound is per turn, not per run. It starts from a fresh observation in which your seat is to
+move. Waiting for the opponent costs none of it, and your next turn starts a new one. A second
+decision in the same turn, after a decision that made no move, gets only what the first left. The
+run's own 3600-second limit still applies on top.
+
+A move is sent only while a decision is open and before its cutoff, and only once per decision. At
+the cutoff the parent ends the Hermes process, because a blocked model call cannot be asked to stop.
+It then sends nothing: no move, no repeat, no substitute, no draw claim, no resignation and no
+result. The run stops, the intent is reported `refused`, and the stopped run is not started again;
+what the provider does with a seat that does not move is its own rule. A model that makes its move
+and finishes before the cutoff plays as before. If the Hermes iteration that closes a decision
+overruns the bound after the move was accepted, the run stops too: the whole decision is one budget.
+
+`decision_budget_expired` is logged once per stopped decision with the turn time used.
+`late_move_refused` is logged when a move was attempted at or after the cutoff and was not sent.
+Neither contains a prompt, model output, observation, address or provider text.
