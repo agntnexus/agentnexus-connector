@@ -1202,35 +1202,49 @@ when = module.dt.datetime.now(module.dt.UTC)
 intent = module.StartIntent(
     str(uuid.uuid4()), str(uuid.uuid4()), "first", str(uuid.uuid4()), when, "queued", None, when
 )
-module.diagnostic(intent, "decision_budget_expired", 5)
+module.diagnostic(intent, "run_started", 5)
+print("ready", file=sys.stderr, flush=True)
 time.sleep(60)
 """
 
 
-def first_line_from_a_pipe(arena_file: Path, tmp_path: Path, wait: float = 15.0) -> str | None:
-    """Run the emitter with stdout on a pipe, as under systemd, and read the first line early."""
+def read_line(stream: Any, wait: float) -> str | None:
+    """Return the next line of a pipe if it arrives within `wait` seconds, else None."""
+    answer: list[str] = []
+    reader = threading.Thread(target=lambda: answer.append(stream.readline()), daemon=True)
+    reader.start()
+    reader.join(timeout=wait)
+    return answer[0] if answer and answer[0] else None
+
+
+def first_line_from_a_pipe(arena_file: Path, tmp_path: Path) -> str | None:
+    """Run the emitter with stdout on a pipe, as under systemd, and read its line while it lives.
+
+    The emitter says `ready` on stderr once its diagnostic call has returned, so the wait that
+    follows is for the line to be readable and not for a slow interpreter to start. The event is
+    one the previous release already knew, so this holds the flush and nothing new.
+    """
     script = tmp_path / "emitter.py"
     script.write_text(EMITTER, encoding="utf-8")
     environment = {k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"}
     process = subprocess.Popen(  # noqa: S603 - this interpreter and a script this test wrote
         [sys.executable, str(script), str(arena_file)],
         stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         env=environment,
     )
-    answer: list[str] = []
-    reader = threading.Thread(
-        target=lambda: answer.append(process.stdout.readline()),  # type: ignore[union-attr]
-        daemon=True,
-    )
-    reader.start()
-    reader.join(timeout=wait)
-    alive = process.poll() is None
-    process.kill()
-    process.wait(timeout=10)
-    reader.join(timeout=5)
-    assert alive or not answer, "the emitter ended before the line could be read early"
-    return answer[0] if answer and answer[0] else None
+    try:
+        for _ in range(20):
+            if (line := read_line(process.stderr, 60)) is None or line.strip() == "ready":
+                break
+        assert line is not None, "the emitter never got to its diagnostic call"
+        first = read_line(process.stdout, 2)
+        assert process.poll() is None, "the emitter ended before the line could be read early"
+        return first
+    finally:
+        process.kill()
+        process.wait(timeout=10)
 
 
 def test_a_diagnostic_reaches_a_pipe_while_the_service_is_still_running(tmp_path: Path) -> None:
@@ -1238,7 +1252,7 @@ def test_a_diagnostic_reaches_a_pipe_while_the_service_is_still_running(tmp_path
     line = first_line_from_a_pipe(Path(arena_runner.__file__), tmp_path)
     assert line is not None, "the diagnostic stayed in the process's buffer"
     record = json.loads(line)
-    assert record["event"] == "decision_budget_expired" and record["duration_ms"] == 5
+    assert record["event"] == "run_started" and record["duration_ms"] == 5
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1452,4 +1466,4 @@ def test_a_diagnostic_that_is_not_flushed_stays_in_the_buffer(tmp_path: Path) ->
     assert source.count("flush=True,") == 1
     path = tmp_path / "arena_runner_buffered.py"
     path.write_text(source.replace("flush=True,", "flush=False,"), encoding="utf-8")
-    assert first_line_from_a_pipe(path, tmp_path, wait=3.0) is None
+    assert first_line_from_a_pipe(path, tmp_path) is None
