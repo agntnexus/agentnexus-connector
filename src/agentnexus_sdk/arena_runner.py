@@ -156,10 +156,14 @@ class DecisionWindow:
 
     Hermes' `run_budget_seconds` advises the model and never interrupts a blocked call, so a bound
     held inside the child could not stop a child that is blocked. This window is held by the parent,
-    which also holds the signing key: it opens when the child says a decision began, forwards a move
-    only while it is open and before its cutoff, and at the cutoff expires exactly once and kills
-    the child. The child reports how much of the turn it has used; the cutoff is that turn's bound,
-    not a fresh one.
+    which also holds the signing key: it opens when the child says a decision began, admits a move
+    only while it is open, before its cutoff and while none has been accepted, and at the cutoff
+    expires exactly once and kills the child. The child reports how much of the turn it has used;
+    the cutoff is that turn's bound, not a fresh one.
+
+    The bound is on admission. A move admitted just before the cutoff is already on its way, bounded
+    by the SDK's own per-phase provider timeouts and by the reserve; killing the child cannot
+    recall it, and it does not claim to.
     """
 
     def __init__(self, cut_off: Callable[[int], None]) -> None:
@@ -168,8 +172,10 @@ class DecisionWindow:
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
         self._cutoff: float | None = None
+        self._deadline: float | None = None
         self._turn_started = 0.0
         self._expired = False
+        self._moved = False
         self._generation = 0
 
     @property
@@ -178,11 +184,37 @@ class DecisionWindow:
         with self._lock:
             return self._cutoff is not None
 
+    @property
+    def expired(self) -> bool:
+        """True once the decision was cut off; nothing more is served after that."""
+        with self._lock:
+            return self._expired
+
+    @property
+    def moved(self) -> bool:
+        """True once a move of this decision was accepted by the provider."""
+        with self._lock:
+            return self._moved
+
+    def mark_moved(self) -> None:
+        """Record an accepted move: a decision makes one."""
+        with self._lock:
+            self._moved = True
+
     def allows_move(self) -> bool:
         """Return whether a move may go now: open, unexpired and before the cutoff."""
         with self._lock:
             return (
                 self._cutoff is not None and not self._expired and time.monotonic() < self._cutoff
+            )
+
+    def before_cutoff(self) -> bool:
+        """Return whether this turn's cutoff is still ahead, even after the decision has closed."""
+        with self._lock:
+            return (
+                self._deadline is not None
+                and not self._expired
+                and time.monotonic() < self._deadline
             )
 
     def elapsed_ms(self) -> int:
@@ -200,6 +232,7 @@ class DecisionWindow:
             generation = self._generation
             now = time.monotonic()
             self._turn_started, self._cutoff = now - used, now + remaining
+            self._deadline, self._moved = self._cutoff, False
             if remaining > 0 and not self._expired:
                 self._timer = threading.Timer(
                     remaining, self.expire, kwargs={"generation": generation}
@@ -444,8 +477,15 @@ class ArenaRunner:
         # game's own once the join names it (agntnexus/agentnexus#223).
         seconds = hermes_arena.DECISION_SECONDS["connect-four"]
         window = DecisionWindow(lambda duration_ms: self._cut_off(child, intent, duration_ms))
+        # A move whose outcome is unknown stays staged in the SDK, and the next state read sends it
+        # again. Until something is read or moved successfully, a state read is held to the cutoff
+        # like the move it would send.
+        uncertain = False
         try:
             for line in iter(lambda: output.readline(4097), ""):
+                if window.expired:
+                    # The child was ended at its cutoff; what it left in the pipe is not served.
+                    break
                 if len(line) > 4096:
                     raise RunnerRefused("Hermes sent an oversized Arena request.")
                 request = json.loads(line)
@@ -500,6 +540,13 @@ class ArenaRunner:
                         diagnostic(intent, "late_move_refused", window.elapsed_ms())
                         window.expire()
                         break
+                    if window.moved:
+                        raise RunnerRefused("Hermes attempted a second move in one decision.")
+                elif operation == "game_state" and uncertain and not window.before_cutoff():
+                    # This read would send the staged move after the cutoff: it is that move.
+                    diagnostic(intent, "late_move_refused", window.elapsed_ms())
+                    window.expire()
+                    break
                 command = {**request, "match_id": intent.match_id, "seat": intent.seat}
                 started = time.monotonic()
                 if operation in {"game_join", "game_move"}:
@@ -527,6 +574,10 @@ class ArenaRunner:
                         self.playing = True
                     if result.get("status") in {"ended", "aborted"}:
                         self.terminal = True
+                    if operation == "game_move":
+                        window.mark_moved()
+                    if operation in {"game_move", "game_state"}:
+                        uncertain = False
                     response = {"result": result}
                 except games.GameRefusedError as error:
                     diagnostic(
@@ -534,6 +585,8 @@ class ArenaRunner:
                         f"{operation}_refused",
                         max(0, min(int((time.monotonic() - started) * 1000), 3600000)),
                     )
+                    if operation == "game_move" and error.retryable:
+                        uncertain = True
                     response = {"result": {"error": error.code}}
                 child.stdin.write(json.dumps(response) + "\n")
                 child.stdin.flush()
@@ -551,16 +604,19 @@ class ArenaRunner:
             self.finished.set()
 
     def _cut_off(self, child: Any, intent: StartIntent, duration_ms: int) -> None:
-        """End a decision that outlived its budget: log it once and kill the child that holds it.
+        """End a decision that outlived its budget: kill the child that holds it, then log it once.
 
-        A kill, not a request to stop: a model call blocked in a transport cannot be asked to.
-        Nothing is sent to the provider, no move is chosen and the run is not retried; the
-        supervisor's next tick sees a child that ended without a finished game and reports the
-        intent `refused`.
+        A kill, not a request to stop: a model call blocked in a transport cannot be asked to. It
+        comes first, so a log that cannot be written never leaves a blocked child alive. After it
+        this run sends no move, chooses none and is not retried; a move admitted just before the
+        cutoff is already on its way and is bounded by the SDK's own timeouts. The supervisor's next
+        tick sees a child that ended without a finished game and reports the intent `refused`.
         """
-        diagnostic(intent, "decision_budget_expired", duration_ms)
-        with contextlib.suppress(OSError):
-            child.kill()  # decision cutoff
+        try:
+            with contextlib.suppress(OSError):
+                child.kill()  # decision cutoff
+        finally:
+            diagnostic(intent, "decision_budget_expired", duration_ms)
 
     def _launch(self, intent: StartIntent) -> None:
         """Claim, reserve durably, then spawn; restart uncertainty never launches twice."""

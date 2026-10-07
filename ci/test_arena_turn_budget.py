@@ -686,6 +686,7 @@ def started(elapsed_ms: int = 0) -> str:
 RETURNED = json.dumps({"diagnostic": "model_call_returned", "duration_ms": 5})
 JOIN = json.dumps({"operation": "game_join"})
 MOVE = json.dumps({"operation": "game_move", "column": 3})
+STATE = json.dumps({"operation": "game_state"})
 FINISHED = json.dumps({"finished": True})
 
 
@@ -696,6 +697,7 @@ def serve(
     *,
     clock: Clock | None = None,
     module: ModuleType = arena_runner,
+    uncertain: bool = False,
 ) -> tuple[Any, FakeChild, list[dict[str, Any]], list[str]]:
     """Serve one scripted child and return the runner, child, forwarded commands and log events."""
     runner, owned = supervisor(module)
@@ -703,6 +705,8 @@ def serve(
 
     def game(command: dict[str, Any], **kwargs: object) -> dict[str, Any]:
         forwarded.append(command)
+        if uncertain and command["operation"] == "game_move":
+            raise games.GameRefusedError("games.provider_unavailable", "lost", retryable=True)
         return {"status": "active", "game_version": "connect-four-1-solo"}
 
     monkeypatch.setattr(module.bridge, "_run_game_command", game)
@@ -858,6 +862,148 @@ def test_the_parent_ends_a_blocked_child_at_the_cutoff_exactly_once(
     assert 0.3 <= elapsed < 5, "the 200 ms already used count against the 0.6 s turn"
     assert not worker.is_alive()
     assert not [t for t in threading.enumerate() if isinstance(t, threading.Timer)]
+
+
+def test_the_child_is_killed_even_if_the_log_cannot_be_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The kill comes first: a log that raises or blocks must not leave a blocked child alive."""
+    runner, owned = supervisor()
+    child = FakeChild(Pipe([]))
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise ValueError("synthetic closed log")
+
+    monkeypatch.setattr(arena_runner, "diagnostic", broken)
+    with pytest.raises(ValueError, match="closed log"):
+        runner._cut_off(child, owned, 5)
+    assert child.killed == 1
+
+
+class LeakyChild(FakeChild):
+    """A child whose pipe still holds a request when it is killed, as a real pipe can."""
+
+    def kill(self) -> None:
+        """Leave one more request in the pipe, then die."""
+        assert isinstance(self.stdout, OpenPipe)
+        self.stdout.feed(STATE)
+        super().kill()
+
+
+def served_after_cut_off(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Cut a blocked child off with a state read left in its pipe; return what was forwarded."""
+    monkeypatch.setattr(
+        hermes_arena, "DECISION_SECONDS", {"chess": 0.4, "connect-four": 0.4}, raising=False
+    )
+    runner, owned = supervisor(module)
+    calls: list[str] = []
+
+    def game(command: dict[str, Any], **kwargs: object) -> dict[str, Any]:
+        calls.append(command["operation"])
+        return {"status": "active", "game_version": "connect-four-1-solo"}
+
+    monkeypatch.setattr(module.bridge, "_run_game_command", game)
+    pipe = OpenPipe()
+    child = LeakyChild(pipe)
+    pipe.feed(JOIN)
+    pipe.feed(started())
+    worker = threading.Thread(
+        target=module.ArenaRunner._serve, args=(runner, child, owned), daemon=True
+    )
+    worker.start()
+    assert runner.finished.wait(timeout=10), "the blocked child was never ended"
+    worker.join(timeout=5)
+    return calls
+
+
+def test_requests_still_in_the_pipe_when_a_child_is_cut_off_are_not_served(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """After the expiry nothing more is forwarded, whatever the dead child left in its pipe."""
+    assert served_after_cut_off(arena_runner, monkeypatch) == ["game_join"]
+    events = [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines()]
+    assert events.count("decision_budget_expired") == 1
+
+
+@pytest.mark.parametrize(
+    ("delay", "operations"),
+    [
+        (LIMIT - 0.001, ["game_join", "game_move", "game_state"]),
+        (LIMIT, ["game_join", "game_move"]),
+        (LIMIT + 10, ["game_join", "game_move"]),
+    ],
+)
+def test_a_state_read_after_an_uncertain_move_is_held_to_the_cutoff_like_a_move(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    delay: float,
+    operations: list[str],
+) -> None:
+    """The SDK resolves an unresolved move by sending it again when the state is read."""
+    clock = Clock()
+    base = clock.now
+
+    def at() -> None:
+        clock.now = base + delay
+
+    _, child, forwarded, events = serve(
+        monkeypatch,
+        capsys,
+        [JOIN, started(), MOVE, RETURNED, at, STATE, FINISHED],
+        clock=clock,
+        uncertain=True,
+    )
+    assert [c["operation"] for c in forwarded] == operations
+    if len(operations) == 2:
+        assert child.killed == 1
+        assert events.count("late_move_refused") == 1
+        assert events.count("decision_budget_expired") == 1
+
+
+def test_a_state_read_after_a_successful_move_is_never_held_back(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Nothing is staged after an accepted move, so the readback is a plain read at any time."""
+    clock = Clock()
+    base = clock.now
+
+    def at() -> None:
+        clock.now = base + LIMIT + 10
+
+    _, child, forwarded, _ = serve(
+        monkeypatch, capsys, [JOIN, started(), MOVE, RETURNED, at, STATE, FINISHED], clock=clock
+    )
+    assert [c["operation"] for c in forwarded] == ["game_join", "game_move", "game_state"]
+    assert child.killed == 0
+
+
+def test_a_second_move_in_one_decision_is_refused_by_the_parent_too(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The parent counts accepted moves itself and does not rely on the child's own guard."""
+    _, _, forwarded, events = serve(
+        monkeypatch, capsys, [JOIN, started(), MOVE, MOVE, RETURNED, FINISHED], clock=Clock()
+    )
+    assert [c["operation"] for c in forwarded] == ["game_join", "game_move"]
+    assert events[-1] == "protocol_refused"
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_a_state_read_that_sleeps_past_the_cutoff_is_not_sent(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """The poll spacing is spent before the cutoff is checked, not after it."""
+
+    def reads(decision: Decision) -> Any:
+        decision.clock.now = decision.started + LIMIT - 2
+        decision.call("game_state", {})
+        decision.call("game_state", {})
+        return {"failed": False}
+
+    played = play(monkeypatch, role, reads)
+    operations = [m["operation"] for m in played.match.requests]
+    assert operations == ["game_join", "game_state"], "a read left the child after the cutoff"
+    assert played.code == 3
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1453,6 +1599,48 @@ def parent_elapsed_oracle(
     assert [c["operation"] for c in forwarded] == ["game_join"], "the used turn time was forgotten"
 
 
+def buffered_oracle(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Require that nothing a cut-off child left in its pipe is served."""
+    assert served_after_cut_off(module, monkeypatch) == ["game_join"], "a dead child was served"
+
+
+def staged_oracle(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Require that a staged move is not sent again by a state read after the cutoff."""
+    clock = Clock()
+    base = clock.now
+
+    def at() -> None:
+        clock.now = base + LIMIT + 10
+
+    _, _, forwarded, _ = serve(
+        monkeypatch,
+        capsys,
+        [JOIN, started(), MOVE, RETURNED, at, STATE, FINISHED],
+        clock=clock,
+        module=module,
+        uncertain=True,
+    )
+    assert [c["operation"] for c in forwarded] == ["game_join", "game_move"], "a staged move left"
+
+
+def counted_oracle(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Require that the parent forwards one accepted move per decision."""
+    _, _, forwarded, _ = serve(
+        monkeypatch,
+        capsys,
+        [JOIN, started(), MOVE, MOVE, RETURNED, FINISHED],
+        clock=Clock(),
+        module=module,
+    )
+    assert [c["operation"] for c in forwarded] == ["game_join", "game_move"], "a second move left"
+
+
 def log_oracle(
     module: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1471,6 +1659,9 @@ def log_oracle(
             "with contextlib.suppress(OSError):",
             log_oracle,
         ),
+        ("if window.expired:", "if False:", buffered_oracle),
+        ("not window.before_cutoff()", "False", staged_oracle),
+        ("if window.moved:", "if False:", counted_oracle),
     ],
 )
 def test_parent_guards_detect_a_weakened_source(

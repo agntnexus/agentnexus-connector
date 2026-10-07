@@ -68,8 +68,9 @@ DECISIONS = {"connect-four": 64, "chess": 200 + 43}
 TURN_BUDGET_VERSION = 1
 PROVIDER_TURN_SECONDS = {"connect-four": 60, "chess": 60}
 #: What the model may never spend of a turn. It holds the poll that finds the turn (up to
-#: `STATE_POLL_SECONDS` old), the private pipe, the move's round trip, which the SDK bounds at its
-#: 10-second provider timeout per phase, and a second of slack.
+#: `STATE_POLL_SECONDS` old), the private pipe, the move's round trip on a healthy provider path and
+#: a second of slack. The SDK bounds each provider phase at 10 seconds, so an unreachable provider
+#: can take longer than the reserve: that path is never retried and cannot make a second move.
 TURN_RESERVE_SECONDS = 15
 #: How often the supervisor reads the game while it waits for the opponent.
 STATE_POLL_SECONDS = 4
@@ -258,6 +259,10 @@ def main() -> int:
         """Use private stdio; no URL, key, shell or alternate match can be supplied."""
         nonlocal last_read, move_calls, turn_started, expired, moved, reported
         request = bounded_request(operation, arguments)
+        if operation == "game_state":
+            # The poll interval is spent first, so the cutoff below is judged when the read leaves.
+            time.sleep(max(0, STATE_POLL_SECONDS - (time.monotonic() - last_read)))
+            last_read = time.monotonic()
         if cutoff is not None:
             # The decision is open: its tools end at the cutoff, whatever the model returns later.
             # Nothing is sent, nothing is retried and nothing is made up in its place.
@@ -271,9 +276,6 @@ def main() -> int:
                 return {"error": "move_already_made"}
         if operation == "game_move":
             move_calls += 1
-        if operation == "game_state":
-            time.sleep(max(0, STATE_POLL_SECONDS - (time.monotonic() - last_read)))
-            last_read = time.monotonic()
         output.write(json.dumps(request) + "\n")
         output.flush()
         line = input_stream.readline(65537)
