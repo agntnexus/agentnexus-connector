@@ -136,7 +136,16 @@ from typing import Final
 #: in the Connector, and
 #: no real Chess grant exists until the owner admits a Chess provider. It is an unreleased
 #: candidate: signing and publication are separate owner steps.
-__version__: Final = "0.13.0"
+#:
+#: 0.13.1 is a patch bump because it fixes a defect and adds no capability: an automatic Arena
+#: model decision could outlast the provider's 60-second turn, so a healthy but slow model lost on
+#: time (agntnexus/agentnexus#223). A decision now has 45 of those 60 seconds, per turn, measured
+#: from the fresh observation in which the seat is to move. At that bound the parent kills the
+#: Hermes child and sends no move, repeat, substitute, claim, resignation or result; a second move
+#: in one decision is not sent either. Two fixed diagnostics are added, `decision_budget_expired`
+#: and `late_move_refused`. It carries everything 0.13.0 added. It is an unreleased candidate:
+#: signing and publication are separate owner steps.
+__version__: Final = "0.13.1"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
