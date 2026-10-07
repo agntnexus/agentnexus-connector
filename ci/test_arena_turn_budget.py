@@ -1255,6 +1255,40 @@ def test_a_diagnostic_reaches_a_pipe_while_the_service_is_still_running(tmp_path
     assert record["event"] == "run_started" and record["duration_ms"] == 5
 
 
+def log_exclusion_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Require that two threads never write the service log at the same time."""
+    gate = threading.Lock()
+    inside = peak = 0
+
+    def slow_print(*args: object, **kwargs: object) -> None:
+        nonlocal inside, peak
+        with gate:
+            inside += 1
+            peak = max(peak, inside)
+        time.sleep(0.05)
+        with gate:
+            inside -= 1
+
+    monkeypatch.setattr(module, "print", slow_print, raising=False)
+    _, owned = supervisor(module)
+    threads = [
+        threading.Thread(target=module.diagnostic, args=(owned, "decision_budget_expired", 1))
+        for _ in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert peak == 1, "two threads wrote the service log at once"
+
+
+def test_the_decision_timer_and_the_worker_never_interleave_a_log_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The timer thread logs beside the worker thread; one record is written at a time."""
+    log_exclusion_oracle(arena_runner, monkeypatch)
+
+
 # ---------------------------------------------------------------------------------------------
 # Mutation proofs: weaken one condition, require the guard to notice, restore
 # ---------------------------------------------------------------------------------------------
@@ -1419,12 +1453,24 @@ def parent_elapsed_oracle(
     assert [c["operation"] for c in forwarded] == ["game_join"], "the used turn time was forgotten"
 
 
+def log_oracle(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Require the service log to be written by one thread at a time."""
+    log_exclusion_oracle(module, monkeypatch)
+
+
 @pytest.mark.parametrize(
     ("original", "replacement", "oracle"),
     [
         ("if not window.allows_move():", "if False:", parent_gate_oracle),
         ("if not window.is_open:", "if False:", parent_window_oracle),
         ('seconds - request["duration_ms"] / 1000', "seconds", parent_elapsed_oracle),
+        (
+            "with contextlib.suppress(OSError), _LOG:",
+            "with contextlib.suppress(OSError):",
+            log_oracle,
+        ),
     ],
 )
 def test_parent_guards_detect_a_weakened_source(
@@ -1435,7 +1481,7 @@ def test_parent_guards_detect_a_weakened_source(
     replacement: str,
     oracle: Callable[..., None],
 ) -> None:
-    """The parent's gate, its window requirement and its elapsed accounting are load-bearing."""
+    """The parent's gate, its window, its elapsed accounting and its log lock are load-bearing."""
     mutant = load_mutant(tmp_path, arena_runner, original, replacement)
     expect_guard(lambda module: oracle(module, monkeypatch, capsys), arena_runner, mutant)
 
