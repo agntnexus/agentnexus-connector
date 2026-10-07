@@ -863,6 +863,29 @@ def test_a_state_other_than_the_served_0130_is_refused(claimed: dict[str, object
     assert published_state_failures(state, tree=tree, installers=INSTALLERS)
 
 
+def test_unsigned_0131_candidate_declares_0131_consistently() -> None:
+    """The #223 source candidate has its own version, not the served release's."""
+    assert builder.read_version(REPOSITORY_ROOT, expected="0.13.1") == "0.13.1"
+
+
+def test_unsigned_0131_candidate_cannot_be_pending_or_published() -> None:
+    """Unsigned source does not move the served 0.13.0 state or release tree (#223)."""
+    state = _committed_state()
+    tree = REPOSITORY_ROOT / "connector-release"
+    releases = state["reproducible_releases"]
+    assert isinstance(releases, dict)
+    assert state["published_version"] == "0.13.0"
+    assert not any(key.startswith("pending_") for key in state)
+    assert "0.13.1" not in releases
+    assert not (tree / "connector" / "0.13.1").exists()
+    assert published_state_failures(state, tree=tree, installers=INSTALLERS) == []
+    for claimed in (
+        {**state, "pending_version": "0.13.1"},
+        {**state, "published_version": "0.13.1"},
+    ):
+        assert published_state_failures(claimed, tree=tree, installers=INSTALLERS)
+
+
 @pytest.fixture
 def candidate(tmp_path: Path) -> dict[str, object]:
     """Add one signed candidate to a copy of the committed release tree, under a throwaway key.
