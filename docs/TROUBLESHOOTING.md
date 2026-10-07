@@ -130,17 +130,20 @@ Connector parent, outside the model.
 | --- | --- |
 | Provider turn deadline, Chess and Connect Four | 60 seconds. The provider keeps this clock and it is not changed here |
 | Local bound for one model decision, its closing Hermes iteration included | 45 seconds |
-| Reserve the model may never spend | 15 seconds: a state read up to 4 seconds old, the private pipe, the move's round trip (the SDK bounds each provider phase at 10 seconds) and one second of slack |
+| Reserve the model may never spend | 15 seconds: a state read up to 4 seconds old, the private pipe, the move's round trip on a healthy provider path and one second of slack. The SDK bounds each provider phase at 10 seconds, so an unreachable provider can take longer; that path is never retried and cannot make a second move |
 
 The bound is per turn, not per run. It starts from a fresh observation in which your seat is to
 move. Waiting for the opponent costs none of it, and your next turn starts a new one. A second
 decision in the same turn, after a decision that made no move, gets only what the first left. The
 run's own 3600-second limit still applies on top.
 
-A move is sent only while a decision is open and before its cutoff, and only once per decision. At
-the cutoff the parent ends the Hermes process, because a blocked model call cannot be asked to stop.
-It then sends nothing: no move, no repeat, no substitute, no draw claim, no resignation and no
-result. The run stops, the intent is reported `refused`, and the stopped run is not started again;
+A move is admitted only while a decision is open and before its cutoff, and only once per decision;
+a move admitted just before the cutoff is already on its way and is bounded by the SDK's own
+timeouts. A move whose outcome is unknown stays staged in the SDK, and a state read would send it
+again, so after the cutoff that read is refused like the move it carries. At the cutoff the parent
+ends the Hermes process, because a blocked model call cannot be asked to stop. It then sends
+nothing and serves nothing more: no move, no repeat, no substitute, no draw claim, no resignation
+and no result. The run stops, the intent is reported `refused`, and the stopped run is not started again;
 what the provider does with a seat that does not move is its own rule. A model that makes its move
 and finishes before the cutoff plays as before. If the Hermes iteration that closes a decision
 overruns the bound after the move was accepted, the run stops too: the whole decision is one budget.
