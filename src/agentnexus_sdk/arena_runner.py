@@ -126,11 +126,16 @@ class StartIntent:
         )
 
 
+#: A decision's timer thread logs beside the worker thread (agntnexus/agentnexus#223), and `print`
+#: writes a line in two steps: one record at a time keeps every line a whole record.
+_LOG = threading.Lock()
+
+
 def diagnostic(intent: StartIntent, event: str, duration_ms: int = 0) -> None:
     """Write a closed local record; identifiers come only from the parent's validated intent."""
     if event not in DIAGNOSTICS or type(duration_ms) is not int or not 0 <= duration_ms <= 3600000:
         raise RunnerRefused("Unknown bounded Arena diagnostic.")
-    with contextlib.suppress(OSError):
+    with contextlib.suppress(OSError), _LOG:
         print(
             json.dumps(
                 {
