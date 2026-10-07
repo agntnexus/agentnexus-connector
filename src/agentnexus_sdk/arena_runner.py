@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -143,6 +144,85 @@ def diagnostic(intent: StartIntent, event: str, duration_ms: int = 0) -> None:
             ),
             flush=True,
         )
+
+
+class DecisionWindow:
+    """One model decision's budget on the parent's own clock (agntnexus/agentnexus#223).
+
+    Hermes' `run_budget_seconds` advises the model and never interrupts a blocked call, so a bound
+    held inside the child could not stop a child that is blocked. This window is held by the parent,
+    which also holds the signing key: it opens when the child says a decision began, forwards a move
+    only while it is open and before its cutoff, and at the cutoff expires exactly once and kills
+    the child. The child reports how much of the turn it has used; the cutoff is that turn's bound,
+    not a fresh one.
+    """
+
+    def __init__(self, cut_off: Callable[[int], None]) -> None:
+        """Hold the callback that logs the expiry and ends the child, run at most once."""
+        self._cut_off = cut_off
+        self._lock = threading.Lock()
+        self._timer: threading.Timer | None = None
+        self._cutoff: float | None = None
+        self._turn_started = 0.0
+        self._expired = False
+        self._generation = 0
+
+    @property
+    def is_open(self) -> bool:
+        """True from the child's opening of a decision until its close."""
+        with self._lock:
+            return self._cutoff is not None
+
+    def allows_move(self) -> bool:
+        """Return whether a move may go now: open, unexpired and before the cutoff."""
+        with self._lock:
+            return (
+                self._cutoff is not None and not self._expired and time.monotonic() < self._cutoff
+            )
+
+    def elapsed_ms(self) -> int:
+        """Return how much of the turn has gone, in the bounded whole milliseconds a log allows."""
+        with self._lock:
+            return self._elapsed_ms()
+
+    def _elapsed_ms(self) -> int:
+        return max(0, min(int((time.monotonic() - self._turn_started) * 1000), 3600000))
+
+    def open(self, remaining: float, used: float = 0.0) -> None:
+        """Start the clock: `remaining` seconds are left of a turn of which `used` are gone."""
+        with self._lock:
+            self._generation += 1
+            generation = self._generation
+            now = time.monotonic()
+            self._turn_started, self._cutoff = now - used, now + remaining
+            if remaining > 0 and not self._expired:
+                self._timer = threading.Timer(
+                    remaining, self.expire, kwargs={"generation": generation}
+                )
+                self._timer.daemon = True
+                self._timer.start()
+                return
+        self.expire()
+
+    def expire(self, duration_ms: int | None = None, *, generation: int | None = None) -> None:
+        """Cut the decision off once; later calls and a timer past its decision do nothing."""
+        with self._lock:
+            if self._expired or (generation is not None and generation != self._generation):
+                return
+            self._expired = True
+            elapsed = self._elapsed_ms()
+        self._cut_off(elapsed if duration_ms is None else duration_ms)
+
+    def close(self) -> None:
+        """End the decision: the cutoff no longer applies. An expiry already running finishes."""
+        with self._lock:
+            self._generation += 1
+            self._cutoff = None
+            timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
+            if timer is not threading.current_thread():
+                timer.join(timeout=5)
 
 
 class RunJournal:
@@ -355,6 +435,10 @@ class ArenaRunner:
         # Connect Four's run stays within 256; a joined Chess match may send its own whole run's
         # diagnostics, a finite bound derived from its decisions (agntnexus/agentnexus#202).
         diagnostic_limit = 256
+        # The provider's turn is the same 60 seconds in both games today, but the bound is the
+        # game's own once the join names it (agntnexus/agentnexus#223).
+        seconds = hermes_arena.DECISION_SECONDS["connect-four"]
+        window = DecisionWindow(lambda duration_ms: self._cut_off(child, intent, duration_ms))
         try:
             for line in iter(lambda: output.readline(4097), ""):
                 if len(line) > 4096:
@@ -374,6 +458,19 @@ class ArenaRunner:
                     diagnostics += 1
                     if diagnostics > diagnostic_limit:
                         raise RunnerRefused("Hermes exceeded the bounded Arena diagnostics.")
+                    if request["diagnostic"] == "model_call_started":
+                        # The child says a decision began and how much of the turn it has used.
+                        if window.is_open:
+                            raise RunnerRefused("Hermes opened a decision inside a decision.")
+                        window.open(
+                            seconds - request["duration_ms"] / 1000, request["duration_ms"] / 1000
+                        )
+                    elif request["diagnostic"] in {"model_call_returned", "model_call_exception"}:
+                        window.close()
+                    elif request["diagnostic"] == "decision_budget_expired":
+                        # The child found its own budget spent: one expiry, logged and ended here.
+                        window.expire(request["duration_ms"])
+                        break
                     diagnostic(intent, request["diagnostic"], request["duration_ms"])
                     continue
                 if request == {"finished": True}:
@@ -389,6 +486,15 @@ class ArenaRunner:
                     raise RunnerRefused(
                         "Hermes attempted an operation outside this match."
                     ) from None
+                if operation == "game_move":
+                    # A move is forwarded only inside an open decision and before its cutoff, on
+                    # this process's clock. Late is refused, never repeated and never replaced.
+                    if not window.is_open:
+                        raise RunnerRefused("Hermes attempted a move outside a model decision.")
+                    if not window.allows_move():
+                        diagnostic(intent, "late_move_refused", window.elapsed_ms())
+                        window.expire()
+                        break
                 command = {**request, "match_id": intent.match_id, "seat": intent.seat}
                 started = time.monotonic()
                 if operation in {"game_join", "game_move"}:
@@ -410,6 +516,7 @@ class ArenaRunner:
                         diagnostic_limit = hermes_arena.diagnostic_bound(
                             hermes_arena.DECISIONS["chess"]
                         )
+                        seconds = hermes_arena.DECISION_SECONDS["chess"]
                     if operation == "game_join" and not self.playing:
                         self._report("playing")
                         self.playing = True
@@ -435,7 +542,20 @@ class ArenaRunner:
             # Thread tracebacks could otherwise copy an unexpected runtime's private error text.
             diagnostic(intent, "runtime_exception")
         finally:
+            window.close()
             self.finished.set()
+
+    def _cut_off(self, child: Any, intent: StartIntent, duration_ms: int) -> None:
+        """End a decision that outlived its budget: log it once and kill the child that holds it.
+
+        A kill, not a request to stop: a model call blocked in a transport cannot be asked to.
+        Nothing is sent to the provider, no move is chosen and the run is not retried; the
+        supervisor's next tick sees a child that ended without a finished game and reports the
+        intent `refused`.
+        """
+        diagnostic(intent, "decision_budget_expired", duration_ms)
+        with contextlib.suppress(OSError):
+            child.kill()  # decision cutoff
 
     def _launch(self, intent: StartIntent) -> None:
         """Claim, reserve durably, then spawn; restart uncertainty never launches twice."""

@@ -27,6 +27,8 @@ DIAGNOSTICS = frozenset(
         "model_call_exception",
         "model_return_invalid",
         "decision_without_move",
+        "decision_budget_expired",
+        "late_move_refused",
         "game_state_refused",
         "run_bound_reached",
         "runtime_exception",
@@ -60,6 +62,23 @@ UCI = re.compile(r"[a-h][1-8][a-h][1-8][qrbn]?")
 #: leave 43 decisions that end without a move. agntnexus/agentnexus#202: Chess's 400 plies give a
 #: seat at most 200 moves, with the same 43 (a refused move or claim does not pass the turn).
 DECISIONS = {"connect-four": 64, "chess": 200 + 43}
+#: agntnexus/agentnexus#223, turn budget version 1. Both providers give a seat 60 seconds for each
+#: turn (`D-134` TL-4 for Connect Four, `D-170` CH-4 for Chess) and alone keep that clock. Nothing
+#: here is read from a manifest, an observation or a match: it is the admitted value, fixed.
+TURN_BUDGET_VERSION = 1
+PROVIDER_TURN_SECONDS = {"connect-four": 60, "chess": 60}
+#: What the model may never spend of a turn. It holds the poll that finds the turn (up to
+#: `STATE_POLL_SECONDS` old), the private pipe, the move's round trip, which the SDK bounds at its
+#: 10-second provider timeout per phase, and a second of slack.
+TURN_RESERVE_SECONDS = 15
+#: How often the supervisor reads the game while it waits for the opponent.
+STATE_POLL_SECONDS = 4
+#: One model decision, its closing Hermes iteration included, ends this long after the fresh
+#: observation that began the turn. Hermes' own `run_budget_seconds` only advises the model and does
+#: not interrupt a blocked call, so the parent kills the child at this bound.
+DECISION_SECONDS = {
+    game: seconds - TURN_RESERVE_SECONDS for game, seconds in PROVIDER_TURN_SECONDS.items()
+}
 
 
 def diagnostic_bound(decisions: int) -> int:
@@ -227,15 +246,33 @@ def main() -> int:
     output, input_stream = sys.stdout, sys.stdin
     last_read = 0.0
     move_calls = 0
+    # The turn's own clock (agntnexus/agentnexus#223). `turn_started` is when this seat's fresh
+    # own-turn observation first arrived; it is not the run's start, and an accepted move or any
+    # wait for the opponent ends it. `cutoff` exists only while a model decision is in flight.
+    turn_started: float | None = None
+    cutoff: float | None = None
+    begun = 0.0
+    expired = moved = reported = False
 
     def tool(operation: str, arguments: Any) -> Any:
         """Use private stdio; no URL, key, shell or alternate match can be supplied."""
-        nonlocal last_read, move_calls
+        nonlocal last_read, move_calls, turn_started, expired, moved, reported
         request = bounded_request(operation, arguments)
+        if cutoff is not None:
+            # The decision is open: its tools end at the cutoff, whatever the model returns later.
+            # Nothing is sent, nothing is retried and nothing is made up in its place.
+            if expired or time.monotonic() >= cutoff:
+                expired = True
+                if operation == "game_move" and not reported:
+                    reported = True
+                    diagnostic(output, "late_move_refused", begun)
+                return {"error": "decision_budget_expired"}
+            if operation == "game_move" and moved:
+                return {"error": "move_already_made"}
         if operation == "game_move":
             move_calls += 1
         if operation == "game_state":
-            time.sleep(max(0, 4 - (time.monotonic() - last_read)))
+            time.sleep(max(0, STATE_POLL_SECONDS - (time.monotonic() - last_read)))
             last_read = time.monotonic()
         output.write(json.dumps(request) + "\n")
         output.flush()
@@ -245,7 +282,16 @@ def main() -> int:
         response = json.loads(line)
         if not isinstance(response, dict) or set(response) != {"result"}:
             raise ValueError("Invalid supervised game response.")
-        return response["result"]
+        result = response["result"]
+        if (
+            operation == "game_move"
+            and cutoff is not None
+            and isinstance(result, dict)
+            and "error" not in result
+        ):
+            moved = True
+            turn_started = None  # accepted: the next turn begins when the opponent has answered
+        return result
 
     with contextlib.redirect_stdout(sys.stderr):
         agent_type, model = configure(tool)
@@ -293,7 +339,8 @@ def main() -> int:
         roles = {role, ROLES[role]}
         chess = role in {"white", "black"}
         prompt = CHESS_PROMPT if chess else PROMPT
-        bound = DECISIONS["chess" if chess else "connect-four"]
+        game = "chess" if chess else "connect-four"
+        bound = DECISIONS[game]
         decisions = 0
         while decisions < bound:
             if state.get("status") in {"ended", "aborted"}:
@@ -313,10 +360,27 @@ def main() -> int:
                 diagnostic(output, "game_state_refused")
                 return 3
             if state["status"] != "active" or observation["to_move"] != role:
-                # Waiting is a bounded local observation loop, not another inference request.
+                # Waiting is a bounded local observation loop, not another inference request, and
+                # it spends none of a turn's budget: the next own turn is timed from its own
+                # observation.
+                turn_started = None  # waiting
                 state = tool("game_state", {})
                 continue
+            now = time.monotonic()
+            if turn_started is None:
+                turn_started = now
+            cutoff_at = min(turn_started + DECISION_SECONDS[game], deadline)
+            if now >= cutoff_at:
+                # An earlier decision of this turn spent it. No move is made up, repeated or
+                # retried: the run stops and the provider's clock decides the rest.
+                diagnostic(output, "decision_budget_expired", turn_started)
+                return 3
             decisions += 1
+            begun = turn_started
+            cutoff, expired, moved, reported = cutoff_at, False, False, False
+            # The parent opens its own clock on this line, with the turn time already used, so the
+            # window covers the agent's construction as well as the model.
+            diagnostic(output, "model_call_started", begun)
             agent = agent_type(
                 model=model.get("default", ""),
                 provider=credentials.get("provider"),
@@ -325,7 +389,7 @@ def main() -> int:
                 api_mode=credentials.get("api_mode"),
                 enabled_toolsets=["arena_runner"],
                 max_iterations=3,
-                run_budget_seconds=min(remaining, 120),
+                run_budget_seconds=cutoff_at - now,
                 max_tokens=2048,
                 skip_context_files=True,
                 skip_memory=True,
@@ -342,7 +406,6 @@ def main() -> int:
             before = move_calls
             started = time.monotonic()
             try:
-                diagnostic(output, "model_call_started")
                 try:
                     result = agent.run_conversation(
                         prompt
@@ -357,6 +420,11 @@ def main() -> int:
                     diagnostic(output, "model_call_exception", started)
                     raise
                 diagnostic(output, "model_call_returned", started)
+                if expired or time.monotonic() >= cutoff_at:
+                    # The decision outlived its budget. Whatever it did after the cutoff does not
+                    # count: no readback, no further decision, no move.
+                    diagnostic(output, "decision_budget_expired", begun)
+                    return 3
                 if not isinstance(result, dict):
                     diagnostic(output, "model_return_invalid", started)
                     return 3
@@ -368,6 +436,7 @@ def main() -> int:
                     diagnostic(output, "decision_without_move", started)
             finally:
                 agent.close()
+                cutoff = None
             state = tool("game_state", {})
         diagnostic(output, "run_bound_reached")
         return 3
