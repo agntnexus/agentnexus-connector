@@ -308,7 +308,9 @@ def test_supervisor_services_the_whole_game_with_only_its_bound_match(
     monkeypatch.setattr(arena_runner.bridge, "_run_game_command", game)
     child = SimpleNamespace(
         stdout=io.StringIO(
-            '{"operation":"game_join"}\n{"operation":"game_move","column":3}\n'
+            '{"operation":"game_join"}\n{"diagnostic":"model_call_started","duration_ms":0}\n'
+            '{"operation":"game_move","column":3}\n'
+            '{"diagnostic":"model_call_returned","duration_ms":1}\n'
             '{"operation":"game_state"}\n{"finished":true}\n'
         ),
         stdin=io.StringIO(),
@@ -718,7 +720,7 @@ def test_diagnostic_flood_is_bounded_before_another_game_operation(
     monkeypatch.setattr(arena_runner.bridge, "_run_game_command", lambda *a, **k: calls.append(a))
     child = SimpleNamespace(
         stdout=io.StringIO(
-            '{"diagnostic":"model_call_started","duration_ms":0}\n' * 257
+            '{"diagnostic":"decision_without_move","duration_ms":0}\n' * 257
             + '{"operation":"game_join"}\n'
         ),
         stdin=io.StringIO(),
@@ -749,12 +751,17 @@ def test_parent_failure_codes_never_log_exception_text(
 
     monkeypatch.setattr(arena_runner.bridge, "_run_game_command", game)
     child = SimpleNamespace(
-        stdout=io.StringIO('{"operation":"game_move","column":3}\n'), stdin=io.StringIO()
+        stdout=io.StringIO(
+            '{"diagnostic":"model_call_started","duration_ms":0}\n'
+            '{"operation":"game_move","column":3}\n'
+        ),
+        stdin=io.StringIO(),
     )
     runner._serve(child, owned)
     raw = capsys.readouterr().out
     records = [json.loads(line) for line in raw.splitlines()]
     assert [record["event"] for record in records] == [
+        "model_call_started",
         "game_move_started",
         {
             "refused": "game_move_refused",
@@ -829,7 +836,7 @@ def test_diagnostic_security_oracles_detect_weakened_source(
                 '{"diagnostic":"model_call_started","duration_ms":0,"prompt":"synthetic-private"}\n'
             )
         else:
-            stream = '{"diagnostic":"model_call_started","duration_ms":0}\n' * 257
+            stream = '{"diagnostic":"decision_without_move","duration_ms":0}\n' * 257
         child = SimpleNamespace(
             stdout=io.StringIO(stream + '{"operation":"game_join"}\n'), stdin=io.StringIO()
         )
@@ -952,7 +959,7 @@ def serve_diagnostics(
     child = SimpleNamespace(
         stdout=io.StringIO(
             '{"operation":"game_join"}\n'
-            + '{"diagnostic":"model_call_started","duration_ms":0}\n' * count
+            + '{"diagnostic":"decision_without_move","duration_ms":0}\n' * count
             + '{"finished": true}\n'
         ),
         stdin=io.StringIO(),
@@ -967,7 +974,7 @@ def test_the_parent_takes_a_whole_chess_run_of_diagnostics(
     """A whole Chess run's diagnostics are taken: 243 decisions, three each, and one more."""
     events = serve_diagnostics(monkeypatch, capsys, "chess-1", 730)
     assert "protocol_refused" not in events
-    assert events.count("model_call_started") == 730
+    assert events.count("decision_without_move") == 730
 
 
 def test_the_parent_still_bounds_a_chess_run_of_diagnostics(
@@ -984,4 +991,4 @@ def test_connect_four_keeps_its_256_diagnostics(
     """Connect Four's diagnostic bound is unchanged."""
     events = serve_diagnostics(monkeypatch, capsys, "connect-four-1", 257)
     assert events[-1] == "protocol_refused"
-    assert events.count("model_call_started") == 256
+    assert events.count("decision_without_move") == 256
