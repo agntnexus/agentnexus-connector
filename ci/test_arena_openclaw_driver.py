@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import queue
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -60,6 +62,30 @@ def test_the_preflight_proves_three_tools_and_leaves_the_profile_alone(
     assert model.requests == [], "the preflight used the profile's own route"
 
 
+@pytest.mark.skipif(
+    not os.environ.get("AGENTNEXUS_OPENCLAW_COMMAND"),
+    reason="set AGENTNEXUS_OPENCLAW_COMMAND to an isolated reviewed CLI argv",
+)
+def test_the_reviewed_openclaw_install_proves_its_isolated_three_tool_path(
+    tmp_path: Path, model: FakeChatModel
+) -> None:
+    """Exercise the installed CLI only with a disposable profile and loopback canary model."""
+    command = json.loads(os.environ["AGENTNEXUS_OPENCLAW_COMMAND"])
+    assert isinstance(command, list) and command and all(isinstance(part, str) for part in command)
+    config = tmp_path / "profile" / "openclaw.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps(model.profile_config()), encoding="utf-8")
+    state = tmp_path / "profile" / "state"
+    state.mkdir()
+    handle = arena_driver_openclaw.OpenClawRun(tuple(command), "2026.9.9", config, state)
+    before = snapshot(config.parent)
+    driver = arena_driver_openclaw.OpenClawArenaDriver()
+    arena_driver.check_preflight(driver, handle)
+    assert driver.preflight(handle) == arena_match.TOOLS
+    assert profile_changes(before, snapshot(config.parent)) == []
+    assert model.requests == [], "preflight used the profile route instead of its loopback canary"
+
+
 def test_a_runtime_that_offers_a_fourth_tool_is_refused(
     tmp_path: Path, model: FakeChatModel
 ) -> None:
@@ -70,6 +96,17 @@ def test_a_runtime_that_offers_a_fourth_tool_is_refused(
     with pytest.raises(arena_driver.DriverRefusedError) as raised:
         arena_driver.check_preflight(driver, handle)
     assert raised.value.code == "contract_violated"
+
+
+def test_a_runtime_that_fails_after_reporting_its_tools_is_refused(
+    tmp_path: Path, model: FakeChatModel
+) -> None:
+    """A request containing three tools is not proof when the decision process fails."""
+    handle = stand_in_handle(tmp_path, model, fault="cleanup_fail")
+    driver = arena_driver_openclaw.OpenClawArenaDriver()
+    with pytest.raises(arena_driver.DriverRefusedError) as raised:
+        arena_driver.check_preflight(driver, handle)
+    assert raised.value.code == "preflight_refused"
 
 
 def test_a_profile_with_no_usable_route_is_refused_before_any_claim(
@@ -143,6 +180,22 @@ def test_the_declared_model_is_the_runtimes_own_line_if_the_forums_check_accepts
     assert driver.declared_model(handle) == "fakeprov/fake-model"
     bare = stand_in_handle(tmp_path / "bare", model, profile={})
     assert driver.declared_model(bare) is None
+
+
+def test_the_declared_model_uses_the_shared_runtime_annotation_semantics(
+    tmp_path: Path, model: FakeChatModel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Strip only the existing trailing runtime annotation before the same RMD-1 check."""
+    handle = stand_in_handle(tmp_path, model)
+    driver = arena_driver_openclaw.OpenClawArenaDriver()
+    monkeypatch.setattr(
+        driver,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[3], 0, stdout="opaque/model (runtime-tag)\n", stderr=""
+        ),
+    )
+    assert driver.declared_model(handle) == "opaque/model"
 
 
 # ---------------------------------------------------------------------------------------------

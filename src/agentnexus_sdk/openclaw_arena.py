@@ -404,6 +404,22 @@ class Run:
         return self.process.returncode
 
 
+def channel_address(work: Path) -> tuple[str, Path | None]:
+    """Return the local channel's address, and a short private directory if it needed one.
+
+    A named pipe on Windows; a Unix socket in the throwaway directory elsewhere. A socket path has a
+    hard limit of about a hundred bytes, which a long temporary directory can exceed: the socket
+    then lives in a short private directory of its own, which the decision removes.
+    """
+    if sys.platform == "win32":
+        return rf"\\.\pipe\agentnexus-arena-{secrets.token_hex(8)}", None
+    address = str(work / "r.sock")
+    if len(os.fsencode(address)) <= 90:
+        return address, None
+    short = Path(tempfile.mkdtemp(prefix="ax", dir="/tmp" if Path("/tmp").is_dir() else None))
+    return str(short / "r.sock"), short
+
+
 def remove_tree(path: Path) -> bool:
     """Remove the throwaway directory; a process still exiting may hold a file a moment."""
     for _ in range(25):
@@ -494,15 +510,12 @@ def run_decision(
     state = Decision()
     run: Run | None = None
     listener: Any = None
+    short: Path | None = None
     outcome = "exception"
     try:
         make_world(work)
         key = secrets.token_bytes(32)
-        address = (
-            rf"\\.\pipe\agentnexus-arena-{secrets.token_hex(8)}"
-            if sys.platform == "win32"
-            else str(work / "r.sock")
-        )
+        address, short = channel_address(work)
         listener = Listener(address, authkey=key)
         prompt = work / "prompt.txt"
         prompt.write_text(
@@ -552,6 +565,8 @@ def run_decision(
             send({"decision": "returned", "outcome": "ok" if status == 0 else "failed"})
         else:
             send({"decision": "exception"})
+        if short is not None:
+            shutil.rmtree(short, ignore_errors=True)
         send({"decision": "closed" if remove_tree(work) else "close_failed"})
 
 

@@ -18,7 +18,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import secrets
 import shutil
 import subprocess
@@ -33,7 +32,7 @@ from typing import Any
 from agentnexus_sdk import arena_match, openclaw_arena
 from agentnexus_sdk.arena_driver import CONTRACT, Capabilities, DriverRefused, Launch
 from agentnexus_sdk.bridge import is_declared_model_valid
-from agentnexus_sdk.runtimes import OpenClawAdapter
+from agentnexus_sdk.runtimes import OpenClawAdapter, model_identifier
 
 #: The only OpenClaw releases the Arena contract was reviewed against. A release is added by
 #: running the preflight and the process acceptance against it, not by editing this line.
@@ -235,13 +234,15 @@ class OpenClawArenaDriver:
                 prompt = work / "prompt.txt"
                 prompt.write_text("Reply with the single word ok.", encoding="utf-8")
                 path = overlay(provider=canary.provider)
-                self._run(
+                canary_run = self._run(
                     handle,
                     work,
                     path,
                     openclaw_arena.exec_arguments([], prompt, 120, path, work),
                     CANARY_SECONDS,
                 )
+                if canary_run.returncode != 0:
+                    raise refusal
                 offered = canary.tools[0] if canary.tools else None
         except (OSError, subprocess.TimeoutExpired) as error:
             raise refusal from error
@@ -296,12 +297,8 @@ class OpenClawArenaDriver:
         except (OSError, subprocess.TimeoutExpired):
             return None
         lines = answer.stdout.strip().splitlines() if answer.returncode == 0 else []
-        text = lines[0].strip() if lines else ""
-        return (
-            text
-            if re.fullmatch(r"[\w.:/@+-]{1,128}", text) and is_declared_model_valid(text)
-            else None
-        )
+        text = model_identifier(lines[0]) if lines else ""
+        return text if is_declared_model_valid(text) else None
 
     def launch(self, handle: OpenClawRun, scratch: Path) -> Launch:
         """Return the match process command: it runs the OpenClaw worker as its decision worker."""
