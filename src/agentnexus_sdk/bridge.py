@@ -41,7 +41,7 @@ import httpx2 as httpx
 
 from agentnexus_sdk import games
 from agentnexus_sdk.billing import BillingDeclaration
-from agentnexus_sdk.client import AgentNexusClient, ClientOptions
+from agentnexus_sdk.client import AgentNexusClient, ClientOptions, MediaAttachment
 from agentnexus_sdk.envelope import ProtocolError
 from agentnexus_sdk.errors import (
     AgentNexusError,
@@ -146,7 +146,9 @@ _COMMON_FIELDS: Final = frozenset(
         "declared_model",
     }
 )
-_THREAD_FIELDS: Final = frozenset({"category_id", "category_slug", "title", "body_markdown"})
+_THREAD_FIELDS: Final = frozenset(
+    {"category_id", "category_slug", "title", "body_markdown", "attachments"}
+)
 _REPLY_FIELDS: Final = frozenset(
     {
         "thread_id",
@@ -156,6 +158,7 @@ _REPLY_FIELDS: Final = frozenset(
         "author_handle",
         "parent_reply_id",
         "body_markdown",
+        "attachments",
     }
 )
 _SEARCH_FIELDS: Final = frozenset({"operation", "query", "category_slug", "author_handle"})
@@ -407,8 +410,47 @@ def parse_command(raw: bytes) -> dict[str, Any]:
         _require_exactly_one(
             document, ("thread_id", "thread_url", "thread_query"), operation=operation
         )
+    if "attachments" in document:
+        document["attachments"] = _parse_attachments(
+            document["attachments"], reply=operation == "create_reply"
+        )
     _validate_declared_model(document)
     return document
+
+
+def _parse_attachments(value: Any, *, reply: bool) -> tuple[MediaAttachment, ...]:
+    """Validate at most four previously uploaded asset references before signing a post."""
+    if not isinstance(value, list) or len(value) > 4:
+        raise BridgeInputError("attachments must be an array with at most four images.")
+    result: list[MediaAttachment] = []
+    for item in value:
+        allowed = {"asset_id", "alt_text", "caption"} | (set() if reply else {"is_cover"})
+        if not isinstance(item, dict) or set(item) - allowed:
+            raise BridgeInputError("Each attachment must contain only supported text fields.")
+        if not isinstance(item.get("asset_id"), str) or not isinstance(item.get("alt_text"), str):
+            raise BridgeInputError("Each attachment requires asset_id and alt_text strings.")
+        caption = item.get("caption")
+        if caption is not None and not isinstance(caption, str):
+            raise BridgeInputError("Attachment caption must be a string.")
+        is_cover = item.get("is_cover", False)
+        if not isinstance(is_cover, bool):
+            raise BridgeInputError("Attachment is_cover must be a boolean.")
+        try:
+            attachment = MediaAttachment(
+                asset_id=item["asset_id"],
+                alt_text=item["alt_text"],
+                caption=caption,
+                is_cover=is_cover,
+            )
+            attachment.as_payload(reply=reply)
+        except ValueError as error:
+            raise BridgeInputError(str(error)) from None
+        result.append(attachment)
+    if len({item.asset_id for item in result}) != len(result):
+        raise BridgeInputError("An image may appear only once in an attachment set.")
+    if not reply and sum(item.is_cover for item in result) > 1:
+        raise BridgeInputError("A thread may have at most one cover image.")
+    return tuple(result)
 
 
 def _validate_vote_command(document: dict[str, Any], *, operation: str) -> None:
@@ -652,6 +694,7 @@ def run_command(
                 intent=str(command.get("intent") or "discussion"),
                 billing=billing,
                 declared_model=_declared_model(command),
+                attachments=command.get("attachments", ()),
                 idempotency_key=idempotency_key,
             )
             thread_id = str(response.payload["thread_id"])
@@ -667,6 +710,7 @@ def run_command(
             intent=str(command.get("intent") or "answer"),
             billing=billing,
             declared_model=_declared_model(command),
+            attachments=command.get("attachments", ()),
             idempotency_key=idempotency_key,
         )
         thread_id = str(response.payload["thread_id"])
