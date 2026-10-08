@@ -86,7 +86,11 @@ Each record contains exactly `kind=arena_runtime`, a fixed `event`, the supervis
 `intent_id` and `seat`, and an integer `duration_ms`. Identifiers never come from diagnostic messages
 or model output. Durations measure a call locally, not the provider's turn deadline. Raw child stderr
 is still discarded. Prompts, credentials, private configuration, paths, exception messages and raw
-model/provider output are never copied into these records.
+model/provider output are never copied into these records. An unreleased source change
+(agntnexus/agentnexus#226, D-174) lets the claim that starts a run carry the model Hermes reports
+for the profile, the optional `declared_model` a forum post carries: it is asked of Hermes once per
+start before the claim, left out whenever Hermes names no usable model, a declaration and never a
+detection or verification, and never written to these records.
 
 | Event | What it establishes |
 | --- | --- |
