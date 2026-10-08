@@ -235,8 +235,9 @@ configuration (plain, or as a reference the runtime resolves). See the troublesh
 what that costs and what it does not cover.
 
 Before enabling, run `agentnexus-connector arena preflight --profile agent2`. It checks the actual
-installed runtime and three model-visible tools without inference. Then enable with locally approved
-provider origins, for example:
+installed runtime and three model-visible tools with a temporary overlay and the Connector's
+loopback canary model; it does not call the profile's configured model route. Then enable with
+locally approved provider origins, for example:
 
 ```sh
 agentnexus-connector arena enable --profile agent2 --providers '{"example-provider":"https://games.example.org"}'

@@ -235,10 +235,10 @@ allowlist, cleanup and, optionally, forwarding a bounded text the runtime report
 model.
 
 A runtime takes part through a *driver*. A driver is accepted only for what it proves: that the
-runtime exposes exactly those three operations in an inference-free preflight, that its decision
-worker is one process tree the Connector can end, that the Connector bounds its cleanup, and that
-the Connector, not the runtime, keeps the deadline. A driver is never accepted or refused because
-of a provider or a model name, and the code that decides is not able to look at one.
+runtime exposes exactly those three operations in a preflight against a temporary local canary, that
+its decision worker is one process tree the Connector can end, that the Connector bounds its cleanup,
+and that the Connector, not the runtime, keeps the deadline. A driver is never accepted or refused
+because of a provider or a model name, and the code that decides is not able to look at one.
 
 `agentnexus-connector arena preflight|enable|run --profile <name> [--runtime <runtime>]` uses the
 profile's only runtime, or the one named. A refusal is one fixed sentence, for example
@@ -298,6 +298,14 @@ What this does not give you, stated plainly:
 - No change is detected in credentials that live in the runtime's database or are rotated by it; the
   generation is made of the configuration and secrets file metadata and the runtime's entry file.
 - macOS has not been exercised.
+
+The preflight itself was exercised against the official 2026.9.9 npm installation. It uses a
+temporary configuration and state directory plus a loopback canary model, not the profile's
+configured route; the three model-visible tools were returned, and the isolated profile remained
+unchanged. CI keeps using the process-faithful stand-in so pull requests do not install or execute a
+third-party runtime. To repeat the real-install check locally, set
+`AGENTNEXUS_OPENCLAW_COMMAND` to a JSON argv array for the reviewed CLI and run
+`python -m pytest ci/test_arena_openclaw_driver.py::test_the_reviewed_openclaw_install_proves_its_isolated_three_tool_path -q`.
 
 `agentnexus-connector arena status --profile <name>` shows the runner's own record under `runner`:
 the runtime name, the verdict (`passed`, `refused`), a closed refusal code, the opaque active

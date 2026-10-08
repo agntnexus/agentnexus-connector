@@ -11,8 +11,8 @@ import io
 import json
 import os
 import queue
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -73,7 +73,7 @@ def test_the_reviewed_openclaw_install_proves_its_isolated_three_tool_path(
     """Exercise the installed CLI only with a disposable profile and loopback canary model."""
     command = json.loads(os.environ["AGENTNEXUS_OPENCLAW_COMMAND"])
     assert isinstance(command, list) and command and all(isinstance(part, str) for part in command)
-    version = subprocess.run(
+    version = subprocess.run(  # noqa: S603 - the reviewed runtime command of the test environment
         [*command, "--version"],
         capture_output=True,
         text=True,
@@ -118,18 +118,19 @@ def test_a_runtime_that_fails_after_reporting_its_tools_is_refused(
     assert raised.value.code == "preflight_refused"
 
 
-def test_the_preflight_exit_status_guard_is_live(
-    tmp_path: Path, model: FakeChatModel
-) -> None:
+def test_the_preflight_exit_status_guard_is_live(tmp_path: Path, model: FakeChatModel) -> None:
     """Removing the invocation-success check makes the failed-runtime oracle fail."""
 
     def refuses_failed_runtime(module: ModuleType) -> None:
         handle = stand_in_handle(
             tmp_path / module.__name__.replace(".", "_"), model, fault="cleanup_fail"
         )
-        with pytest.raises(arena_driver.DriverRefusedError) as raised:
+        try:
             arena_driver.check_preflight(module.OpenClawArenaDriver(), handle)
-        assert raised.value.code == "preflight_refused"
+        except arena_driver.DriverRefusedError as refused:
+            assert refused.code == "preflight_refused"
+        else:
+            raise AssertionError("a runtime that failed after reporting its tools passed")
 
     mutant = load_mutant(
         tmp_path / "mutants",
@@ -168,8 +169,8 @@ def test_a_timed_out_preflight_reaps_the_runtime_process_tree(
     finally:
         for pid in survivors(tmp_path, wait=0.1):
             if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                subprocess.run(  # noqa: S603 - the platform command to end a test-owned tree
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],  # noqa: S607 - a system command
                     capture_output=True,
                     timeout=10,
                     check=False,

@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -170,16 +171,27 @@ class OpenClawArenaDriver:
     ) -> subprocess.CompletedProcess[str]:
         """Run one runtime command in the throwaway world, its output captured and bounded."""
         include_root = handle.config.parent if handle.config is not None else work
-        return subprocess.run(  # noqa: S603 - the reviewed runtime command
-            [*handle.command, *arguments],
-            env=openclaw_arena.cli_environment(dict(os.environ), work, config, include_root),
-            cwd=work / "cwd",
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=seconds,
-            check=False,
+        argv = [*handle.command, *arguments]
+        run = openclaw_arena.Run(
+            argv,
+            openclaw_arena.cli_environment(dict(os.environ), work, config, include_root),
+            work,
         )
+        deadline = time.monotonic() + seconds
+        while run.running() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        timed_out = run.running()
+        ended = run.end()
+        returncode = 125 if ended is None else ended
+        output = work / "out.json"
+        try:
+            if output.stat().st_size > 65536:
+                returncode, stdout = 125, ""
+            else:
+                stdout = output.read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            returncode, stdout = 125, ""
+        return subprocess.CompletedProcess(argv, 124 if timed_out else returncode, stdout, "")
 
     def preflight(self, handle: OpenClawRun) -> frozenset[str]:
         """Prove the contract without a paid call and return the tools a model is offered.
