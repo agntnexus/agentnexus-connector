@@ -481,6 +481,8 @@ def play(
     )
     for name in FLAGS:
         monkeypatch.setenv(name, "1")
+    monkeypatch.setenv("HERMES_HOME", "synthetic-hermes-home")
+    monkeypatch.setenv(hermes_arena.PROFILE_ENV, "synthetic-profile")
     monkeypatch.setattr(sys, "argv", ["hermes_arena.py", "."])
     monkeypatch.setattr(sys, "stdin", parent)
     monkeypatch.setattr(sys, "stdout", parent)

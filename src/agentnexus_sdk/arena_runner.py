@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -342,8 +343,14 @@ class RunJournal:
         self.connection.close()
 
 
-def hermes_environment(home: Path) -> dict[str, str]:
-    """Pass OS essentials only; select the one profile before Hermes is imported."""
+def hermes_environment(home: Path, scratch: Path) -> dict[str, str]:
+    """Pass OS essentials only; Hermes gets a throwaway home and the profile is named apart.
+
+    Hermes fills its home with state of its own the moment it starts: logs, caches, a state database
+    and a backup of the config it finds there. That must never be the profile (agntnexus/agentnexus
+    #223), so `HERMES_HOME` is a scratch directory that is removed after the run. The profile is
+    passed apart, in `AGENTNEXUS_ARENA_PROFILE`, and the adapter reads two files of it and no more.
+    """
     allowed = {
         "PATH",
         "SYSTEMROOT",
@@ -359,13 +366,23 @@ def hermes_environment(home: Path) -> dict[str, str]:
     }
     environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
     environment.update(
-        HERMES_HOME=str(home),
+        HERMES_HOME=str(scratch),
+        AGENTNEXUS_ARENA_PROFILE=str(home),
         HERMES_SAFE_MODE="1",
         HERMES_IGNORE_RULES="1",
         HERMES_IGNORE_USER_CONFIG="1",
         PYTHONUTF8="1",
     )
     return environment
+
+
+def remove_scratch(path: Path) -> None:
+    """Remove a throwaway Hermes home; a process that is still exiting may hold a file a moment."""
+    for _ in range(10):
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            return
+        time.sleep(0.2)
 
 
 @dataclass(frozen=True)
@@ -420,15 +437,22 @@ class HermesRun:
         return result
 
     def preflight(self) -> bool:
-        """Run the adapter's check of the exact three-tool contract, which makes no inference."""
-        probe = subprocess.run(  # noqa: S603 - fixed local runtime or service command
-            self.command("--preflight"),
-            env=hermes_environment(self.home),
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
+        """Run the adapter's check of the exact three-tool contract, which makes no inference.
+
+        Importing Hermes fills its home, so the check runs with a throwaway one: the profile is
+        left exactly as it was.
+        """
+        with tempfile.TemporaryDirectory(
+            prefix="agentnexus-hermes-", ignore_cleanup_errors=True
+        ) as scratch:
+            probe = subprocess.run(  # noqa: S603 - fixed local runtime or service command
+                self.command("--preflight"),
+                env=hermes_environment(self.home, Path(scratch)),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
         return probe.returncode == 0 and '"bounded": true' in probe.stdout
 
     def command(self, *arguments: str) -> list[str]:
@@ -459,6 +483,8 @@ def profile_storage(paths: Any) -> None:
 
 class ArenaRunner:
     """Poll as one signed identity; supervise one bounded child through the whole game."""
+
+    scratch: Path | None = None  # the running child's throwaway Hermes home
 
     def __init__(self, paths: Any, providers: str, runtime: HermesRun) -> None:
         """Read only this profile's state and key; provider origins are local configuration."""
@@ -691,18 +717,23 @@ class ArenaRunner:
             return
         self.finished.clear()
         self.terminal = self.playing = False
-        child = subprocess.Popen(  # noqa: S603 - reviewed interpreter and shipped adapter
-            self.runtime.command(),
-            env=hermes_environment(self.runtime.home),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            cwd=self.paths.root,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
-        )
-        self.child = child
+        scratch = Path(tempfile.mkdtemp(prefix="agentnexus-hermes-"))
+        try:
+            child = subprocess.Popen(  # noqa: S603 - reviewed interpreter and shipped adapter
+                self.runtime.command(),
+                env=hermes_environment(self.runtime.home, scratch),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                cwd=self.paths.root,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+            )
+        except BaseException:
+            remove_scratch(scratch)  # scratch
+            raise
+        self.child, self.scratch = child, scratch
         diagnostic(owned, "run_started")
         self.deadline = time.monotonic() + 3600
         if child.stdin is None:
@@ -740,6 +771,10 @@ class ArenaRunner:
         self.child = None
         self.worker = None
         self.active = None
+        if self.scratch is not None:
+            # Nothing of the run is left running that could still write to it.
+            remove_scratch(self.scratch)  # scratch
+            self.scratch = None
 
     def tick(self) -> None:
         """Heartbeat, enforce authoritative cancellation and expiry, and claim one queued seat."""

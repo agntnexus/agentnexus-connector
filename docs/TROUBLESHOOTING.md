@@ -186,6 +186,14 @@ A replaced worker starts Hermes again while the match waits for the opponent, an
 budget. If the opponent answers at once, the start is charged to the next turn's 45 seconds as
 described above (about four to seven seconds on a fast desktop; a slow device needs more).
 
+**The profile is not written to.** Hermes fills its home with state of its own the moment it starts:
+logs, caches, a state database and a backup of the config it finds there. The automatic runner
+therefore gives Hermes a throwaway home, a fresh temporary directory for each run and for each
+enabling check, and removes it afterwards. The profile is passed apart; the adapter reads two files
+of it, `config.yaml` and `.env`, and nothing else, and refuses to start if Hermes' home and the
+profile are the same directory. Hermes' own logs of a run are gone with its home; the fixed
+diagnostics below are the record.
+
 `decision_budget_expired` is logged once per stopped decision with the turn time used.
 `late_move_refused` is logged when a move was attempted at or after the cutoff and was not sent.
 `decision_cleanup_expired` and `decision_cleanup_failed` are logged when a finished decision's

@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import sys
+import tempfile
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -637,6 +638,9 @@ def test_new_phase_channel_keeps_raw_child_stderr_discarded(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Structured diagnostics must not enable unfiltered Hermes or provider stderr."""
+    temporary = tmp_path / "temporary"
+    temporary.mkdir(exist_ok=True)
+    monkeypatch.setattr(tempfile, "tempdir", str(temporary))
     runner, owned = diagnostic_supervisor()
     runner_id = str(uuid.uuid4())
     runner.journal = SimpleNamespace(runner_id=runner_id, reserve=lambda identifier: True)
@@ -658,6 +662,15 @@ def test_new_phase_channel_keeps_raw_child_stderr_discarded(
     runner._launch(owned)
     assert len(spawned) == 1
     assert spawned[0]["stderr"] == arena_runner.subprocess.DEVNULL
+    # Hermes gets a throwaway home of its own; the profile is named apart and only read.
+    environment = spawned[0]["env"]
+    assert isinstance(environment, dict)
+    assert environment["AGENTNEXUS_ARENA_PROFILE"] == str(tmp_path)
+    assert environment["HERMES_HOME"] != str(tmp_path)
+    assert runner.scratch is not None and str(runner.scratch) == environment["HERMES_HOME"]
+    assert runner.scratch.parent == temporary
+    arena_runner.remove_scratch(runner.scratch)
+    assert not runner.scratch.exists()
 
 
 @pytest.mark.parametrize("mutation", ["extra-fields", "flood", "raw-stderr"])

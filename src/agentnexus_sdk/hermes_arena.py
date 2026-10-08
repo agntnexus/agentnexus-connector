@@ -10,6 +10,9 @@ process that does: it keeps Hermes configured between decisions, makes each deci
 agent, and can be ended by a kill at any time. Once the provider has accepted a move, a closing
 request that never answers or a cleanup that never ends is therefore the worker's loss and never
 the match's. A decision that has not made its move by its bound is killed and the run stops.
+
+Hermes runs in a throwaway home of the supervisor's (`HERMES_HOME`); the profile whose config and
+credentials it plays with is named apart (`AGENTNEXUS_ARENA_PROFILE`) and only read.
 """
 
 from __future__ import annotations
@@ -30,6 +33,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+#: The profile whose `config.yaml` and `.env` this adapter reads and nothing else. Hermes' own home
+#: (`HERMES_HOME`) is a throwaway directory of the supervisor's, because Hermes fills its home with
+#: state of its own the moment it starts (agntnexus/agentnexus#223).
+PROFILE_ENV = "AGENTNEXUS_ARENA_PROFILE"
 TOOLS = frozenset({"game_join", "game_state", "game_move"})
 DIAGNOSTICS = frozenset(
     {
@@ -173,7 +180,7 @@ def configure(handler: Any) -> tuple[Any, dict[str, Any]]:
     config: Any = importlib.import_module("hermes_cli.config")
     safe = copy.deepcopy(config.DEFAULT_CONFIG)
     # Model choice is local; executable credential commands and custom transports are refused.
-    home = Path(os.environ["HERMES_HOME"])
+    home = Path(os.environ[PROFILE_ENV])
     yaml = importlib.import_module("yaml")
     local = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")) or {}
     model = local.get("model", {})
@@ -390,7 +397,7 @@ def spawn_worker(source: str) -> Worker:
 def load_credentials(model: dict[str, Any]) -> dict[str, Any]:
     """Load only this profile's direct API keys and resolve the one reviewed model transport."""
     dotenv = importlib.import_module("dotenv")
-    values = dotenv.dotenv_values(Path(os.environ["HERMES_HOME"]) / ".env", interpolate=False)
+    values = dotenv.dotenv_values(Path(os.environ[PROFILE_ENV]) / ".env", interpolate=False)
     for key in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
         if values.get(key):
             os.environ[key] = values[key]
@@ -805,6 +812,14 @@ def play(output: Any, input_stream: Any) -> int:
         worker.close()
 
 
+def homes_are_apart() -> bool:
+    """Return whether Hermes has a home of its own, which is not the profile this adapter reads."""
+    home, profile = os.environ.get("HERMES_HOME"), os.environ.get(PROFILE_ENV)
+    if not home or not profile:
+        return False
+    return os.path.normcase(os.path.realpath(home)) != os.path.normcase(os.path.realpath(profile))
+
+
 def main() -> int:
     """Preflight without inference, serve decisions as the worker, or play one supervised game."""
     if len(sys.argv) not in {2, 3}:
@@ -813,6 +828,9 @@ def main() -> int:
         os.environ.get(name) != "1"
         for name in ("HERMES_SAFE_MODE", "HERMES_IGNORE_RULES", "HERMES_IGNORE_USER_CONFIG")
     ):
+        return 2
+    if not homes_are_apart():
+        # Hermes would fill the profile it plays from. Refuse before it is imported.
         return 2
     sys.path.insert(0, str(Path(sys.argv[1]).resolve()))
     flag = sys.argv[2] if len(sys.argv) == 3 else None

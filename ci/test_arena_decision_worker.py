@@ -35,6 +35,7 @@ from arena_fakes import (
     FLAGS,
     MOVES,
     PRIVATE,
+    expect_guard,
     intent,
     load_mutant,
     supervisor,
@@ -119,7 +120,13 @@ def create_custom_toolset(name, description, tools):
     return None
 """,
     "dotenv.py": """\
+from pathlib import Path
+
+
 def dotenv_values(*args, **kwargs):
+    # Say which file was asked for: the credentials come from the profile, not from Hermes' home.
+    with open(Path(__file__).with_name("dotenv-reads.stand-in-record"), "a") as handle:
+        handle.write(str(args[0]) + "\\n")
     return {}
 """,
     "model_tools.py": """\
@@ -355,6 +362,7 @@ class Process:
     profile_before: dict[str, tuple[str, int, str, int]]
     profile_after: dict[str, tuple[str, int, str, int]]
     homes: list[str]
+    env_reads: list[str]
 
     @property
     def events(self) -> list[str]:
@@ -482,6 +490,7 @@ def run_process(
         profile_before,
         snapshot(home),
         hermes_homes(homes_record),
+        hermes_homes(source / "dotenv-reads.stand-in-record"),
     )
 
 
@@ -497,6 +506,9 @@ def assert_profile_untouched(run: Process) -> None:
     for home in run.homes:
         assert Path(home) != run.profile, "Hermes ran in the profile"
         assert not Path(home).exists(), "a temporary Hermes home was left behind"
+    # The credentials were read from the profile, which is only read, and from nowhere else.
+    assert run.env_reads, "no credentials were asked for, so their source was not shown"
+    assert set(run.env_reads) == {str(run.profile / ".env")}, "credentials came from elsewhere"
 
 
 def assert_no_residue(run: Process) -> None:
@@ -689,17 +701,16 @@ def test_two_fast_turns_leave_the_profile_exactly_as_it_was(
     assert "synthetic-private" not in run.raw and "synthetic-disposable" not in run.raw
 
 
-def test_the_preflight_leaves_the_profile_exactly_as_it_was(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Enabling a profile imports Hermes too: that must not fill the profile either."""
-    scratch_parent = tmp_path / "scratch-parent"
+def preflight_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Require that enabling a profile imports Hermes without filling the profile."""
+    work = Path(tempfile.mkdtemp(dir=tmp_path))
+    scratch_parent = work / "scratch-parent"
     scratch_parent.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(scratch_parent))
-    record = tmp_path / "hermes-homes.stand-in-record"
-    source, home = hermes_stand_in(tmp_path, {"mode": "fast", "record": str(record)})
+    record = work / "hermes-homes.stand-in-record"
+    source, home = hermes_stand_in(work, {"mode": "fast", "record": str(record)})
     before = snapshot(home)
-    run = arena_runner.HermesRun(source, Path(sys.executable), home)
+    run = module.HermesRun(source, Path(sys.executable), home)
     assert run.preflight()
     assert profile_changes(before, snapshot(home)) == []
     homes = hermes_homes(record)
@@ -708,24 +719,44 @@ def test_the_preflight_leaves_the_profile_exactly_as_it_was(
     assert list(scratch_parent.iterdir()) == []
 
 
-@pytest.mark.parametrize("profile", [None, "same", "unset-home"])
-def test_the_adapter_refuses_to_run_hermes_in_the_profile_it_reads(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, profile: str | None
+def test_the_preflight_leaves_the_profile_exactly_as_it_was(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Hermes' home must be its own: the same directory, or a missing one, is refused."""
+    """Enabling a profile imports Hermes too: that must not fill the profile either."""
+    preflight_oracle(arena_runner, monkeypatch, tmp_path)
+
+
+def homes_refusal_oracle(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Require the adapter to refuse a Hermes home that is the profile, or a missing one."""
     for name in FLAGS:
         monkeypatch.setenv(name, "1")
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    if profile == "same":
-        monkeypatch.setenv("AGENTNEXUS_ARENA_PROFILE", str(tmp_path))
-    else:
-        monkeypatch.delenv("AGENTNEXUS_ARENA_PROFILE", raising=False)
-    if profile == "unset-home":
-        monkeypatch.setenv("AGENTNEXUS_ARENA_PROFILE", str(tmp_path / "profile"))
-        monkeypatch.delenv("HERMES_HOME")
     monkeypatch.setattr(sys, "argv", ["hermes_arena.py", str(tmp_path), "--preflight"])
     monkeypatch.setattr(sys, "path", list(sys.path))
-    assert hermes_arena.main() == 2
+    for home, profile in (
+        (str(tmp_path), None),
+        (str(tmp_path), str(tmp_path)),
+        (None, str(tmp_path / "profile")),
+        ("", str(tmp_path / "profile")),
+    ):
+        for name, value in (("HERMES_HOME", home), ("AGENTNEXUS_ARENA_PROFILE", profile)):
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        try:
+            code: Any = module.main()
+        except Exception:
+            code = "an unrefused start"
+        assert code == 2, f"Hermes was started with home {home!r} and profile {profile!r}"
+
+
+def test_the_adapter_refuses_to_run_hermes_in_the_profile_it_reads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Hermes' home must be its own: the same directory, or a missing one, is refused."""
+    homes_refusal_oracle(hermes_arena, monkeypatch, tmp_path)
 
 
 HELPER = """\
@@ -931,3 +962,149 @@ def test_a_worker_that_outlives_its_match_process_is_noticed(
     assert run.forwarded == []
     with pytest.raises(AssertionError, match="still alive"):
         assert_no_residue(run)
+
+
+# ---------------------------------------------------------------------------------------------
+# Mutation proofs of the profile: weaken one condition, require the proof to notice
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_scratch_home_that_outlives_the_run_is_noticed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Weakened so that the supervisor never removes the throwaway home, the proof sees it."""
+    broken = load_mutant(
+        tmp_path / "mutant", arena_runner, "remove_scratch(self.scratch)  # scratch", "pass"
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    try:
+        behavior = {"mode": "fast", "arguments": MOVES["white"]}
+        run = run_process(
+            monkeypatch, capsys, run_dir, "white", behavior, bound=10.0, turns=2, module=broken
+        )
+        with pytest.raises(AssertionError, match="left behind"):
+            assert_profile_untouched(run)
+        run.tethers.close()
+    finally:
+        sys.modules.pop(broken.__name__, None)
+
+
+def test_a_supervisor_that_gives_hermes_the_profile_is_refused_by_the_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The second line of defence: Hermes is never started in the profile, whatever calls it."""
+    broken = load_mutant(
+        tmp_path / "mutant", arena_runner, "HERMES_HOME=str(scratch),", "HERMES_HOME=str(home),"
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    try:
+        behavior = {"mode": "fast", "arguments": MOVES["white"]}
+        run = run_process(
+            monkeypatch, capsys, run_dir, "white", behavior, bound=10.0, module=broken
+        )
+        assert run.forwarded == [] and run.homes == [], "the adapter went on into Hermes"
+        assert "model_call_started" not in run.events
+        assert profile_changes(run.profile_before, run.profile_after) == []
+        run.tethers.close()
+    finally:
+        sys.modules.pop(broken.__name__, None)
+
+
+def test_a_supervisor_and_an_adapter_that_both_give_hermes_the_profile_are_noticed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """With both lines of defence removed the snapshot sees what Hermes writes into the profile."""
+    broken = load_mutant(
+        tmp_path / "mutant", arena_runner, "HERMES_HOME=str(scratch),", "HERMES_HOME=str(home),"
+    )
+    source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
+    original = "if not homes_are_apart():"
+    assert source.count(original) == 1
+    lax = tmp_path / "lax" / "hermes_arena.py"
+    lax.parent.mkdir()
+    lax.write_text(source.replace(original, "if False:"), encoding="utf-8")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    try:
+        behavior = {"mode": "fast", "arguments": MOVES["white"]}
+        run = run_process(
+            monkeypatch, capsys, run_dir, "white", behavior, bound=10.0, module=broken, arena=lax
+        )
+        with pytest.raises(AssertionError, match="changed the Hermes profile"):
+            assert_profile_untouched(run)
+        run.tethers.close()
+    finally:
+        sys.modules.pop(broken.__name__, None)
+
+
+def test_a_preflight_that_gives_hermes_the_profile_is_noticed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The enabling check is held to the same proof as the run."""
+    broken = load_mutant(
+        tmp_path / "mutant",
+        arena_runner,
+        "env=hermes_environment(self.home, Path(scratch)),",
+        "env=hermes_environment(self.home, self.home),",
+    )
+    try:
+        with pytest.raises(AssertionError):
+            preflight_oracle(broken, monkeypatch, tmp_path)
+    finally:
+        sys.modules.pop(broken.__name__, None)
+
+
+def test_a_adapter_that_does_not_refuse_a_shared_home_is_noticed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The refusal is load-bearing: without it the start goes on into Hermes."""
+    mutant = load_mutant(
+        tmp_path / "mutant", hermes_arena, "if not homes_are_apart():", "if False:"
+    )
+    try:
+        expect_guard(
+            lambda module: homes_refusal_oracle(module, monkeypatch, tmp_path), hermes_arena, mutant
+        )
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        ("home = Path(os.environ[PROFILE_ENV])", 'home = Path(os.environ["HERMES_HOME"])'),
+        (
+            'values = dotenv.dotenv_values(Path(os.environ[PROFILE_ENV]) / ".env"',
+            'values = dotenv.dotenv_values(Path(os.environ["HERMES_HOME"]) / ".env"',
+        ),
+    ],
+    ids=["config-read-from-hermes-home", "credentials-read-from-hermes-home"],
+)
+def test_an_adapter_that_reads_the_profile_from_the_wrong_place_is_noticed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    original: str,
+    replacement: str,
+) -> None:
+    """The profile is read, and read only for its config and its credentials, from its own path."""
+    source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
+    assert source.count(original) == 1
+    broken = tmp_path / "broken" / "hermes_arena.py"
+    broken.parent.mkdir()
+    broken.write_text(source.replace(original, replacement), encoding="utf-8")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    behavior = {"mode": "fast", "arguments": MOVES["white"]}
+    run = run_process(monkeypatch, capsys, run_dir, "white", behavior, bound=10.0, arena=broken)
+    with pytest.raises(AssertionError):
+        assert_profile_untouched(run)
+    run.tethers.close()
