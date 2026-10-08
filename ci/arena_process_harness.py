@@ -12,6 +12,7 @@ import contextlib
 import hashlib
 import json
 import socket
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -485,9 +486,13 @@ def openclaw_stand_in(root: Path, behavior: dict[str, Any]) -> tuple[tuple[str, 
     """
     home = root / "home"
     (home / "state").mkdir(parents=True)
+    home.chmod(0o700)
     config = home / "openclaw.json"
     config.write_text(json.dumps(behavior["profile"]), encoding="utf-8")
     (home / "state" / "canary.txt").write_text("canary state, never rewritten\n", encoding="utf-8")
+    auth_store = home / "state" / "agents" / "main" / "agent" / "openclaw-agent.sqlite"
+    auth_store.parent.mkdir(parents=True)
+    sqlite3.connect(auth_store).close()
     (home / ".env").write_text("SYNTHETIC_KEY=synthetic-disposable-key\n", encoding="utf-8")
     target = str(Path(__file__).with_name("fake_openclaw.py").resolve())
     wrapper = root / "openclaw-wrapper.py"
@@ -712,7 +717,9 @@ def run_process(
         runner.handle = driver_module.HermesRun(source, Path(sys.executable), home)
     elif runtime == "openclaw":
         real = arena_driver_openclaw.OpenClawArenaDriver()
-        runner.handle = arena_driver_openclaw.OpenClawRun(command, "2026.9.9", config, state)
+        runner.handle = arena_driver_openclaw.OpenClawRun(
+            command, "2026.9.9", config, state, config.parent
+        )
     else:
         real = FakeArenaDriver(behavior_file, home)
         runner.handle = real.inspect(None)

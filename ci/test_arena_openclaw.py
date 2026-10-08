@@ -7,7 +7,7 @@ profile, credential, account or model is involved.
 What is held to the contract: the decision's runtime sees exactly the three operations; one run
 makes at most one move; the run is ended as soon as a move is accepted, so no closing request is
 made; a run that outlives its bound, or a worker that is killed, leaves no process of the tree; the
-profile is only read, and everything the runtime writes goes into a throwaway that is removed.
+empty profile auth-store snapshot is unchanged, and per-decision session state is throwaway.
 """
 
 from __future__ import annotations
@@ -153,7 +153,7 @@ def test_the_runtime_gets_a_throwaway_world_and_nothing_of_the_services_environm
     tmp_path: Path,
     model: FakeChatModel,
 ) -> None:
-    """No key, no token, no other home; the profile is reachable only through the overlay."""
+    """No key, token or other home; only the state path and read-only overlay reach OpenClaw."""
     monkeypatch.setenv("SYNTHETIC_PROVIDER_KEY", "synthetic-must-not-reach-the-runtime")
     monkeypatch.setenv("AGENTNEXUS_PRIVATE_KEY_FILE", str(tmp_path / "keys" / "agent.pem"))
     run = play(monkeypatch, capsys, tmp_path, model)
@@ -165,8 +165,16 @@ def test_the_runtime_gets_a_throwaway_world_and_nothing_of_the_services_environm
         assert not [key for key in environment if key.startswith("AGENTNEXUS_")], environment
         assert environment["OPENCLAW_CONFIG_READONLY"] == "1"
         assert environment["OPENCLAW_NO_AUTO_UPDATE"] == "1"
-        for name in ("HOME", "USERPROFILE", "OPENCLAW_STATE_DIR", "TMPDIR"):
+        assert environment["OPENCLAW_STATE_DIR"] == str(run.profile / "state")
+        for name in ("HOME", "USERPROFILE", "TMPDIR"):
             assert str(run.profile) not in environment.get(name, ""), name
+    contexts = [r for r in records_of(tmp_path) if r.get("role") == "runtime"]
+    assert contexts, "the stand-in did not record its runtime state boundary"
+    for context in contexts:
+        assert context["profile_state"] == str(run.profile / "state")
+        session_state = Path(context["session_state"])
+        assert session_state.is_relative_to((tmp_path / "scratch-parent").resolve())
+        assert not session_state.is_relative_to(run.profile.resolve())
     run.tethers.close()
 
 

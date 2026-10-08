@@ -179,9 +179,13 @@ jobs:
         # one move, is ended at the accepted move so no closing request follows, and leaves no
         # process and no file behind - also when the model never answers, when the runtime ignores
         # termination and when the worker is killed. The preflight's canary refuses a fourth tool.
-        # Each guard is then broken on purpose and must be noticed. No real OpenClaw, profile,
-        # credential, account or model, and no network beyond loopback.
-        run: python -m pytest ci/test_arena_openclaw.py ci/test_arena_openclaw_driver.py -q
+        # The auth-state proofs use only an empty/synthetic store to check profile ownership, path
+        # containment, disposable sessions and pre-claim refusal. Each guard is then broken on
+        # purpose and must be noticed. No real OpenClaw, profile, credential, account or model, and
+        # no network beyond loopback.
+        run: >-
+          python -m pytest ci/test_arena_openclaw.py ci/test_arena_openclaw_driver.py
+          ci/test_arena_openclaw_auth.py -q
 
       - name: The release builder refuses what it must
         # `scripts/build_release.py` is the one file here that can hold a private signing key, so

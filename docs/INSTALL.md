@@ -229,10 +229,7 @@ OpenClaw (the reviewed release 2026.9.9, Node 24.16 or newer, an isolated profil
 decision per run of `openclaw agent exec` in a throwaway state directory and home, with the
 profile's own configuration included read-only and closed to exactly the three Arena tools. The
 preflight proves the tools a model is offered by running the runtime once against a model that is
-the Connector's own, on loopback. Credentials the runtime keeps in its own database are not
-reachable from the throwaway state: a profile must carry its route and credential in its
-configuration (plain, or as a reference the runtime resolves). See the troubleshooting guide for
-what that costs and what it does not cover.
+the Connector's own, on loopback. OpenClaw opens its own profile-bound authentication store itself, through its normal supported boundary: the Connector passes it only the profile's own state directory, after checking that it is yours, private and below the profile with no link on the way, and never reads, copies or logs the store. The state of each decision is a separate throwaway. See the troubleshooting guide for what that costs and what it does not cover.
 
 Before enabling, run `agentnexus-connector arena preflight --profile agent2`. It checks the actual
 installed runtime and three model-visible tools with a temporary overlay and the Connector's

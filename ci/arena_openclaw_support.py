@@ -80,4 +80,4 @@ def stand_in_handle(
     if profile is not None:
         behavior["profile"] = profile
     command, config, state = openclaw_stand_in(tmp_path, behavior)
-    return arena_driver_openclaw.OpenClawRun(command, "2026.9.9", config, state)
+    return arena_driver_openclaw.OpenClawRun(command, "2026.9.9", config, state, config.parent)

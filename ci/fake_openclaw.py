@@ -28,6 +28,9 @@ Environment knobs (all optional):
     ``emit_hostname``, ``no_auth``, ``extra_tool_in_request``.
 ``FAKE_OPENCLAW_OUTSIDE``
     File the ``write_outside`` fault touches.
+
+``agent_path_escape``
+    Reports an agent store outside the selected profile so preflight must refuse.
 ``FAKE_OPENCLAW_SANDBOX``
     When set, refuse (exit 64) if HOME or OPENCLAW_STATE_DIR resolve outside this directory.
 
@@ -496,7 +499,14 @@ def command_config(args: list[str]) -> int:
         sys.stdout.write(f"Config valid: {path or '(none)'}\n")
         return 0
     if action == "get" and len(args) > 1:
-        value = dig(config, args[1])
+        if args[1] == "agents.entries":
+            value = dig(config, args[1]) or []
+            if "agent_path_escape" in faults():
+                value = [{"id": "main", "agentDir": os.environ.get("FAKE_OPENCLAW_OUTSIDE", "")}]
+        elif args[1] == "agents.defaults.systemAgent.agentId":
+            value = dig(config, args[1]) or "main"
+        else:
+            value = dig(config, args[1])
         if value is None:
             emit(
                 {
@@ -1039,8 +1049,12 @@ class Runtime:
 
 def run_runtime(argv: list[str]) -> int:
     """Act as the runtime process: install signal handling, then run the turn."""
-    record_role("runtime")
     options = parse_exec(argv)
+    record_role(
+        "runtime",
+        profile_state=os.environ.get("OPENCLAW_STATE_DIR"),
+        session_state=options.get("state_dir"),
+    )
     try:
         config = load_config(options.get("config") or config_path_from_env())
     except ConfigError as error:

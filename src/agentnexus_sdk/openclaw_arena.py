@@ -13,7 +13,8 @@ supervisor reports a move accepted, the whole OpenClaw process tree is ended - t
 otherwise ask its model once more - and the throwaway directory is removed.
 
 Standalone: it loads the sibling `arena_match.py` by path and imports nothing of the Connector, so
-no signing key, profile or provider session can reach it or the runtime.
+no signing key or provider session can reach it. OpenClaw receives only its isolated profile state
+root through its own environment; `agent exec --state-dir` keeps each session disposable.
 """
 
 from __future__ import annotations
@@ -54,6 +55,9 @@ arena = _arena_match()
 COMMAND_ENV = "AGENTNEXUS_OPENCLAW_COMMAND"
 CONFIG_ENV = "AGENTNEXUS_OPENCLAW_CONFIG"
 SCRATCH_ENV = "AGENTNEXUS_ARENA_SCRATCH"
+PROFILE_ROOT_ENV = "AGENTNEXUS_OPENCLAW_PROFILE_ROOT"
+PROFILE_CONFIG_ENV = "AGENTNEXUS_OPENCLAW_PROFILE_CONFIG"
+PROFILE_STATE_ENV = "AGENTNEXUS_OPENCLAW_PROFILE_STATE"
 #: The server name of the bridge in the throwaway configuration; the runtime prefixes its tools.
 SERVER = "arena"
 PREFIXED = tuple(f"{SERVER}__{name}" for name in sorted(arena.TOOLS))
@@ -70,17 +74,157 @@ FORCE = getattr(signal, "SIGKILL", signal.SIGTERM)
 KEPT = {"PATH", "SYSTEMROOT", "WINDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR"}
 
 
+def profile_context_valid(profile_root: Path, profile_config: Path, profile_state: Path) -> bool:
+    """Accept only the non-linked OpenClaw config and state this Connector profile owns.
+
+    Nothing is opened: only paths and their metadata are looked at. The configuration and the state
+    must lie below the profile's own directory, with no link or junction on the way down, and on a
+    system with owners and modes the profile directory must be the current user's and closed to
+    everyone else, because the runtime's own auth store lives in that state and nobody else may
+    reach it. Anything else is refused, and a refusal comes before any seat is claimed.
+    """
+    try:
+        root = Path(profile_root).absolute()
+        config = Path(profile_config).absolute()
+        state = Path(profile_state).absolute()
+        if config == root or state == root:
+            return False
+        if not root.is_dir() or not config.is_file() or not state.is_dir():
+            return False
+        for path in (config, state):
+            if not path.is_relative_to(root):
+                return False
+            current = root
+            for part in (Path(".") if path == root else path.relative_to(root)).parts:
+                current /= part
+                is_junction = getattr(current, "is_junction", lambda: False)
+                if current.is_symlink() or is_junction():
+                    return False
+        if root.is_symlink() or getattr(root, "is_junction", lambda: False)():
+            return False
+        resolved_root = root.resolve(strict=True)
+        if not config.resolve(strict=True).is_relative_to(resolved_root):
+            return False
+        if not state.resolve(strict=True).is_relative_to(resolved_root):
+            return False
+        if hasattr(os, "geteuid"):
+            info = root.stat()
+            if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                return False
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def agent_directories_valid(
+    entries: Any, default_id: Any, profile_root: Path, profile_state: Path
+) -> bool:
+    """Accept only bounded, non-linked agent-store paths owned by this profile."""
+    try:
+        if entries is None:
+            entries = []
+        if isinstance(entries, dict):
+            agents = [
+                {**entry, "id": identity} if isinstance(entry, dict) else entry
+                for identity, entry in entries.items()
+            ]
+        elif isinstance(entries, list):
+            agents = entries
+        else:
+            return False
+        root = Path(profile_root).resolve(strict=True)
+        state = Path(profile_state).resolve(strict=True)
+        if len(agents) > 32:
+            return False
+        paths: list[str] = []
+        default = default_id if isinstance(default_id, str) else "main"
+        if not 0 < len(default) <= 64:
+            return False
+        paths.append(str(state / "agents" / default / "agent"))
+        for agent in agents:
+            if not isinstance(agent, dict):
+                return False
+            identity = agent.get("id")
+            if not isinstance(identity, str) or not 0 < len(identity) <= 64:
+                return False
+            value = agent.get("agentDir")
+            if value is None:
+                value = state / "agents" / identity / "agent"
+            if not isinstance(value, str | Path) or not 0 < len(str(value)) <= 2048:
+                return False
+            paths.append(str(value))
+        for value in paths:
+            path = Path(value)
+            if not path.is_absolute():
+                return False
+            current = Path(path.anchor)
+            for part in path.parts[1:]:
+                current /= part
+                is_junction = getattr(current, "is_junction", lambda: False)
+                if current.is_symlink() or is_junction():
+                    return False
+            if not path.resolve(strict=False).is_relative_to(root):
+                return False
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return True
+
+
+def config_value(
+    command: list[str], path: str, environment: dict[str, str], work: Path, default: Any = None
+) -> Any:
+    """Read one bounded config field through OpenClaw, using a default only when it is unset."""
+    status, output = bounded_run(
+        [*command, "config", "get", path, "--json"], environment, work, VERSION_SECONDS
+    )
+    try:
+        value = json.loads(output)
+    except ValueError as unreadable:
+        raise RuntimeError("OpenClaw returned an unreadable config field.") from unreadable
+    if status == 0:
+        return value
+    error = value.get("error") if isinstance(value, dict) else None
+    message = error.get("message") if isinstance(error, dict) else None
+    if (
+        status == 1
+        and isinstance(error, dict)
+        and error.get("type") == "cli_error"
+        and isinstance(message, str)
+        and message.startswith(f"Config path is valid but unset: {path}.")
+    ):
+        return default
+    raise RuntimeError("OpenClaw refused a config field required for state isolation.")
+
+
 def cli_environment(
-    base: dict[str, str], work: Path, config: Path, include_root: Path
+    base: dict[str, str],
+    work: Path,
+    config: Path,
+    include_root: Path,
+    *,
+    profile_root: Path | None = None,
+    profile_config: Path | None = None,
+    profile_state: Path | None = None,
 ) -> dict[str, str]:
     """Return the exact environment one runtime run gets: OS essentials and a throwaway world.
 
     Nothing of the service's environment but the essentials is passed on - no key, no token, no
-    other tool's home - and everything the runtime writes goes below `work`, which is removed.
+    other tool's home. OpenClaw receives its profile state root through its supported boundary so it
+    can resolve its own auth; `agent exec --state-dir` directs sessions and run data below `work`.
     Telemetry and update checks are switched off, its log is silent, and the profile's own
     configuration is reachable only through the overlay's include, read-only.
     """
     environment = {key: value for key, value in base.items() if key.upper() in KEPT}
+    state_dir = work / "ambient"
+    context_values = (profile_root, profile_config, profile_state)
+    if any(value is not None for value in context_values):
+        if any(value is None for value in context_values):
+            raise ValueError("Incomplete OpenClaw profile context.")
+        if profile_root is None or profile_config is None or profile_state is None:
+            raise ValueError("Incomplete OpenClaw profile context.")
+        if not profile_context_valid(profile_root, profile_config, profile_state):
+            raise ValueError("OpenClaw profile state is outside its owned context.")
+        state_dir = profile_state
     home = work / "home"
     environment.update(
         HOME=str(home),
@@ -95,7 +239,7 @@ def cli_environment(
         TEMP=str(work / "tmp"),
         TMPDIR=str(work / "tmp"),
         NODE_COMPILE_CACHE=str(work / "cc"),
-        OPENCLAW_STATE_DIR=str(work / "ambient"),
+        OPENCLAW_STATE_DIR=str(state_dir),
         OPENCLAW_CONFIG_PATH=str(config),
         OPENCLAW_INCLUDE_ROOTS=str(include_root),
         OPENCLAW_CONFIG_READONLY="1",
@@ -139,7 +283,10 @@ def overlay_document(
     servers[SERVER] = {
         "command": python,
         "args": [str(bridge)],
-        "env": {"ARENA_BRIDGE_ADDRESS": address, "ARENA_BRIDGE_KEY": key},
+        "env": {
+            "ARENA_BRIDGE_ADDRESS": address,
+            "ARENA_BRIDGE_KEY": key,
+        },
         "enabled": True,
         "connectionTimeoutMs": 30000,
         "requestTimeoutMs": 60000,
@@ -404,6 +551,26 @@ class Run:
         return self.process.returncode
 
 
+def bounded_run(
+    argv: list[str], environment: dict[str, str], work: Path, seconds: int
+) -> tuple[int, str]:
+    """Run one OpenClaw command with a tree bound and bounded captured output."""
+    run = Run(argv, environment, work)
+    deadline = time.monotonic() + seconds
+    while run.running() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    timed_out = run.running()
+    status = run.end()
+    output = work / "out.json"
+    try:
+        if output.stat().st_size > 65536:
+            return 125, ""
+        stdout = output.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return 125, ""
+    return (124 if timed_out else status if status is not None else 125), stdout
+
+
 def channel_address(work: Path) -> tuple[str, Path | None]:
     """Return the local channel's address, and a short private directory if it needed one.
 
@@ -458,6 +625,13 @@ def worker_main(
     command: list[str] = json.loads(os.environ[COMMAND_ENV])
     config = Path(os.environ[CONFIG_ENV]) if os.environ.get(CONFIG_ENV) else None
     scratch = Path(os.environ[SCRATCH_ENV])
+    profile_root = Path(os.environ[PROFILE_ROOT_ENV])
+    profile_config = Path(os.environ[PROFILE_CONFIG_ENV])
+    profile_state = Path(os.environ[PROFILE_STATE_ENV])
+    if config != profile_config or not profile_context_valid(
+        profile_root, profile_config, profile_state
+    ):
+        raise RuntimeError("OpenClaw profile context is no longer owned.")
 
     def pump() -> None:
         # The match process closing this pipe means it is gone. The guard ends the runtime's tree.
@@ -474,27 +648,50 @@ def worker_main(
     with contextlib.redirect_stdout(sys.stderr):
         boot = scratch / "boot"
         make_world(boot)
-        version = subprocess.run(  # noqa: S603 - the driver's reviewed runtime command
+        version, _ = bounded_run(
             [*command, "--version"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=VERSION_SECONDS,
-            check=False,
-            env=cli_environment(dict(os.environ), boot, boot, boot),
+            cli_environment(
+                dict(os.environ),
+                boot,
+                boot,
+                boot,
+                profile_root=profile_root,
+                profile_config=profile_config,
+                profile_state=profile_state,
+            ),
+            boot,
+            VERSION_SECONDS,
         )
-        if version.returncode != 0:
+        if version != 0:
             raise RuntimeError("The runtime does not start.")
         # Asked once, before the worker is ready: a start of the runtime costs seconds that a
         # decision's budget does not have.
-        others = server_names(command, config, boot)
+        others = server_names(
+            command,
+            config,
+            boot,
+            profile_root=profile_root,
+            profile_config=profile_config,
+            profile_state=profile_state,
+        )
         send({"ready": True})
         while True:
             line = arena.line_document(incoming.get())
             if line == {"stop": True}:
                 return 0
             decision = arena.checked_decision(line)
-            run_decision(command, config, scratch, others, decision, incoming, send)
+            run_decision(
+                command,
+                config,
+                scratch,
+                others,
+                decision,
+                incoming,
+                send,
+                profile_root,
+                profile_config,
+                profile_state,
+            )
 
 
 def run_decision(
@@ -505,6 +702,9 @@ def run_decision(
     decision: dict[str, Any],
     incoming: queue.Queue[str],
     send: Callable[[dict[str, Any]], None],
+    profile_root: Path,
+    profile_config: Path,
+    profile_state: Path,
 ) -> None:
     """Make one decision with one run of the runtime; every ending is one fixed message."""
     work = Path(tempfile.mkdtemp(prefix="d", dir=scratch))
@@ -541,7 +741,15 @@ def run_decision(
         include_root = config.parent if config is not None else work
         run = Run(
             exec_arguments(command, prompt, seconds, overlay, work),
-            cli_environment(dict(os.environ), work, overlay, include_root),
+            cli_environment(
+                dict(os.environ),
+                work,
+                overlay,
+                include_root,
+                profile_root=profile_root,
+                profile_config=profile_config,
+                profile_state=profile_state,
+            ),
             work,
         )
         end = time.monotonic() + decision["seconds"] + MARGIN_SECONDS
@@ -571,7 +779,15 @@ def run_decision(
         send({"decision": "closed" if remove_tree(work) else "close_failed"})
 
 
-def server_names(command: list[str], config: Path | None, work: Path) -> list[str]:
+def server_names(
+    command: list[str],
+    config: Path | None,
+    work: Path,
+    *,
+    profile_root: Path,
+    profile_config: Path,
+    profile_state: Path,
+) -> list[str]:
     """Return the names of the profile's own MCP servers, so the overlay can switch them off.
 
     Asked of the runtime itself and read for their names only: the answer may carry values that
@@ -579,18 +795,30 @@ def server_names(command: list[str], config: Path | None, work: Path) -> list[st
     """
     if config is None:
         return []
+    environment = cli_environment(
+        dict(os.environ),
+        work,
+        config,
+        config.parent,
+        profile_root=profile_root,
+        profile_config=profile_config,
+        profile_state=profile_state,
+    )
+    entries = config_value(command, "agents.entries", environment, work, [])
+    default_id = config_value(
+        command, "agents.defaults.systemAgent.agentId", environment, work, "main"
+    )
+    if not agent_directories_valid(entries, default_id, profile_root, profile_state):
+        raise RuntimeError("OpenClaw agent directories are outside the profile.")
     try:
-        answer = subprocess.run(  # noqa: S603 - the driver's reviewed runtime command
+        status, stdout = bounded_run(
             [*command, "config", "get", "mcp.servers", "--json"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=VERSION_SECONDS,
-            check=False,
-            env=cli_environment(dict(os.environ), work, config, config.parent),
+            environment,
+            work,
+            VERSION_SECONDS,
         )
-        document = json.loads(answer.stdout) if answer.returncode == 0 else {}
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+        document = json.loads(stdout) if status == 0 else {}
+    except (OSError, ValueError):
         return []
     return (
         [name for name in document if isinstance(name, str)] if isinstance(document, dict) else []

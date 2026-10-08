@@ -13,6 +13,7 @@ import os
 import queue
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -83,15 +84,24 @@ def test_the_reviewed_openclaw_install_proves_its_isolated_three_tool_path(
     assert version.returncode == 0 and "OpenClaw 2026.9.9" in version.stdout
     config = tmp_path / "profile" / "openclaw.json"
     config.parent.mkdir()
+    config.parent.chmod(0o700)
     config.write_text(json.dumps(model.profile_config()), encoding="utf-8")
     state = tmp_path / "profile" / "state"
     state.mkdir()
-    handle = arena_driver_openclaw.OpenClawRun(tuple(command), "2026.9.9", config, state)
-    before = snapshot(config.parent)
+    auth_store = state / "agents" / "main" / "agent" / "openclaw-agent.sqlite"
+    auth_store.parent.mkdir(parents=True)
+    sqlite3.connect(auth_store).close()
+    auth_before = snapshot(auth_store.parent)
+    config_before = config.read_bytes()
+    handle = arena_driver_openclaw.OpenClawRun(
+        tuple(command), "2026.9.9", config, state, config.parent
+    )
     driver = arena_driver_openclaw.OpenClawArenaDriver()
-    arena_driver.check_preflight(driver, handle)
-    assert driver.preflight(handle) == arena_match.TOOLS
-    assert profile_changes(before, snapshot(config.parent)) == []
+    tools = driver.preflight(handle)
+    arena_driver.prove_tools(driver, tools)
+    assert tools == arena_match.TOOLS
+    assert config.read_bytes() == config_before
+    assert profile_changes(auth_before, snapshot(auth_store.parent)) == []
     assert model.requests == [], "preflight used the profile route instead of its loopback canary"
 
 
@@ -180,7 +190,11 @@ def test_a_timed_out_preflight_reaps_the_runtime_process_tree(
 
 
 def inspect_with(
-    monkeypatch: pytest.MonkeyPatch, version: str | None, isolation: str = "isolated"
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    version: str | None,
+    isolation: str = "isolated",
+    state_override: Path | None = None,
 ) -> Any:
     """Run `inspect` against a runtime detection the test chooses."""
     executable = shutil.which("python") or sys.executable
@@ -188,24 +202,49 @@ def inspect_with(
         installed=version is not None, version=version, executable=executable
     )
     monkeypatch.setattr(runtimes.OpenClawAdapter, "detect", lambda self: detection)
-    context = SimpleNamespace(server_name="agentnexus", openclaw_config=None, openclaw_state=None)
-    paths = SimpleNamespace(isolation=isolation, runtime_context=lambda: context)
+    profile = tmp_path / "profile"
+    runtime = profile / "runtime" / "openclaw"
+    runtime.mkdir(parents=True)
+    profile.chmod(0o700)
+    config = runtime / "openclaw.json"
+    config.write_text("{}", encoding="utf-8")
+    state = runtime / "state"
+    state.mkdir()
+    context = SimpleNamespace(
+        server_name="agentnexus", openclaw_config=config, openclaw_state=state_override or state
+    )
+    paths = SimpleNamespace(root=profile, isolation=isolation, runtime_context=lambda: context)
     return arena_driver_openclaw.OpenClawArenaDriver().inspect(paths)
 
 
-def test_only_a_reviewed_release_is_inspected(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_only_a_reviewed_release_is_inspected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """The reviewed release passes; another release, or none, is refused as unreviewed."""
-    assert inspect_with(monkeypatch, "2026.9.9").version == "2026.9.9"
+    assert inspect_with(monkeypatch, tmp_path / "valid", "2026.9.9").version == "2026.9.9"
     for version in ("2026.9.8", "2026.10.1", None):
         with pytest.raises(arena_driver.DriverRefusedError) as raised:
-            inspect_with(monkeypatch, version)
+            inspect_with(monkeypatch, tmp_path / f"version-{version}", version)
         assert raised.value.code == "unreviewed"
 
 
-def test_a_shared_profile_is_not_isolated_and_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_shared_profile_is_not_isolated_and_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """The default shared context cannot enable automatic play."""
     with pytest.raises(arena_driver.DriverRefusedError) as raised:
-        inspect_with(monkeypatch, "2026.9.9", isolation="shared")
+        inspect_with(monkeypatch, tmp_path, "2026.9.9", isolation="shared")
+    assert raised.value.code == "not_isolated"
+
+
+def test_an_openclaw_state_outside_its_profile_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A state directory that is not below the profile's own is refused at inspection."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with pytest.raises(arena_driver.DriverRefusedError) as raised:
+        inspect_with(monkeypatch, tmp_path, "2026.9.9", state_override=outside)
     assert raised.value.code == "not_isolated"
 
 
@@ -363,6 +402,144 @@ def test_the_runtime_gets_only_os_essentials_and_a_throwaway_world(tmp_path: Pat
     environment_oracle(openclaw_arena, tmp_path)
 
 
+def test_profile_auth_state_and_per_decision_state_are_separate(tmp_path: Path) -> None:
+    """The runtime sees its owned auth root; the agent exec still gets disposable session state."""
+    profile = tmp_path / "profile"
+    state = profile / "runtime" / "openclaw" / "state"
+    state.mkdir(parents=True)
+    profile.chmod(0o700)
+    profile_config = profile / "runtime" / "openclaw" / "openclaw.json"
+    profile_config.write_text("{}", encoding="utf-8")
+    work = tmp_path / "work"
+    openclaw_arena.make_world(work)
+    environment = openclaw_arena.cli_environment(
+        {},
+        work,
+        work / "arena.json",
+        profile / "runtime" / "openclaw",
+        profile_root=profile,
+        profile_config=profile_config,
+        profile_state=state,
+    )
+    assert environment["OPENCLAW_STATE_DIR"] == str(state)
+    argv = openclaw_arena.exec_arguments([], work / "prompt.txt", 20, work / "arena.json", work)
+    session_state = Path(argv[argv.index("--state-dir") + 1])
+    assert session_state == work / "run"
+    assert session_state != state
+
+
+def test_profile_auth_state_must_be_inside_the_owned_runtime_home(tmp_path: Path) -> None:
+    """A symlink or path outside the Connector-owned profile is refused without opening files."""
+    profile = tmp_path / "profile"
+    runtime = profile / "runtime" / "openclaw"
+    config = runtime / "openclaw.json"
+    state = runtime / "state"
+    state.mkdir(parents=True)
+    profile.chmod(0o700)
+    config.write_text("{}", encoding="utf-8")
+    assert openclaw_arena.profile_context_valid(profile, config, state)
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    assert not openclaw_arena.profile_context_valid(profile, config, outside)
+
+    linked_profile = tmp_path / "linked-profile"
+    linked_runtime = linked_profile / "runtime" / "openclaw"
+    linked_runtime.mkdir(parents=True)
+    linked_profile.chmod(0o700)
+    (linked_runtime / "openclaw.json").write_text("{}", encoding="utf-8")
+    try:
+        (linked_runtime / "state").symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlinks are unavailable on this host: {type(error).__name__}")
+    assert not openclaw_arena.profile_context_valid(
+        linked_profile, linked_runtime / "openclaw.json", linked_runtime / "state"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX profile ownership/mode checks are unavailable")
+def test_profile_auth_state_requires_private_profile_ownership(tmp_path: Path) -> None:
+    """The profile root's owner and private mode govern access to the runtime-owned store."""
+    profile = tmp_path / "profile"
+    runtime = profile / "runtime" / "openclaw"
+    runtime.mkdir(parents=True)
+    profile.chmod(0o700)
+    config = runtime / "openclaw.json"
+    config.write_text("{}", encoding="utf-8")
+    state = runtime / "state"
+    state.mkdir()
+    assert openclaw_arena.profile_context_valid(profile, config, state)
+    profile.chmod(0o755)
+    try:
+        assert not openclaw_arena.profile_context_valid(profile, config, state)
+    finally:
+        profile.chmod(0o700)
+
+
+def test_openclaw_agent_directories_must_stay_in_the_owned_profile(tmp_path: Path) -> None:
+    """The agent directories the runtime reports must all lie below the profile."""
+    profile = tmp_path / "profile"
+    state = profile / "runtime" / "openclaw" / "state"
+    state.mkdir(parents=True)
+    profile.chmod(0o700)
+    owned = state / "agents" / "main" / "agent"
+    escaped = tmp_path / "shared-openclaw-agent"
+    assert openclaw_arena.agent_directories_valid(
+        [{"id": "main", "agentDir": str(owned)}], "main", profile, state
+    )
+    assert not openclaw_arena.agent_directories_valid(
+        [{"id": "main", "agentDir": str(escaped)}], "main", profile, state
+    )
+    link_target = profile / "alternate-agent"
+    link_target.mkdir()
+    linked_path = state / "agents" / "linked" / "agent"
+    try:
+        linked_path.parent.symlink_to(link_target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlinks are unavailable on this host: {type(error).__name__}")
+    assert not openclaw_arena.agent_directories_valid(
+        [{"id": "linked", "agentDir": str(linked_path)}], "main", profile, state
+    )
+
+
+def test_openclaw_agent_directory_path_guard_is_live(tmp_path: Path) -> None:
+    """Break the containment check: the oracle for an escaped agent directory must fail."""
+    profile = tmp_path / "profile"
+    state = profile / "runtime" / "openclaw" / "state"
+    state.mkdir(parents=True)
+    profile.chmod(0o700)
+    entries = [{"id": "main", "agentDir": str(tmp_path / "outside-agent")}]
+
+    def rejects_escape(module: ModuleType) -> None:
+        assert not module.agent_directories_valid(entries, "main", profile, state)
+
+    mutant_path = tmp_path / "mutants"
+    mutant_path.mkdir()
+    shutil.copyfile(
+        Path(openclaw_arena.__file__).with_name("arena_match.py"),
+        mutant_path / "arena_match.py",
+    )
+    mutant = load_mutant(
+        mutant_path,
+        openclaw_arena,
+        "if not path.resolve(strict=False).is_relative_to(root):",
+        "if False:",
+    )
+    expect_guard(rejects_escape, openclaw_arena, mutant)
+
+
+def test_an_escaped_runtime_auth_path_is_refused_before_proof(
+    tmp_path: Path, model: FakeChatModel
+) -> None:
+    """A reported external agent store fails preflight before a model call."""
+    handle = stand_in_handle(tmp_path, model, fault="agent_path_escape")
+    driver = arena_driver_openclaw.OpenClawArenaDriver()
+    with pytest.raises(arena_driver.DriverRefusedError) as raised:
+        arena_driver.check_preflight(driver, handle)
+    assert raised.value.code == "preflight_refused"
+    assert model.requests == []
+
+
 def overlay_oracle(module: ModuleType) -> None:
     """Require the overlay to close the profile to three tools and one server."""
     document = module.overlay_document(
@@ -379,6 +556,10 @@ def overlay_oracle(module: ModuleType) -> None:
     assert servers.get("theirs") == {"enabled": False}, "the profile's server stays on"
     assert servers["arena"]["enabled"] is True
     assert servers["arena"]["toolFilter"] == {"include": sorted(arena_match.TOOLS)}
+    assert set(servers["arena"]["env"]) == {
+        "ARENA_BRIDGE_ADDRESS",
+        "ARENA_BRIDGE_KEY",
+    }
     assert document["update"] == {"checkOnStart": False}
 
 

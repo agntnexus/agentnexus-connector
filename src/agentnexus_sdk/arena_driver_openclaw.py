@@ -24,7 +24,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -44,12 +43,13 @@ CANARY_SECONDS = 300
 
 @dataclass(frozen=True)
 class OpenClawRun:
-    """A reviewed installed OpenClaw and this profile's own isolated configuration."""
+    """A reviewed OpenClaw and its profile-owned state/config context."""
 
     command: tuple[str, ...]
     version: str
     config: Path | None
     state: Path | None
+    profile_root: Path | None = None
 
 
 def resolve_command(executable: str) -> tuple[str, ...] | None:
@@ -159,39 +159,41 @@ class OpenClawArenaDriver:
         if not detection.installed or command is None or detection.version not in REVIEWED_VERSIONS:
             raise DriverRefused("unreviewed", self.display_name)
         config = context.openclaw_config
+        state = context.openclaw_state
+        profile_root = Path(paths.root)
+        if (
+            config is None
+            or state is None
+            or not openclaw_arena.profile_context_valid(profile_root, config, state)
+        ):
+            raise DriverRefused("not_isolated", self.display_name)
         return OpenClawRun(
             command,
             detection.version or "",
-            config if config is not None and config.is_file() else None,
-            context.openclaw_state,
+            config,
+            state,
+            profile_root,
         )
 
     def _run(
         self, handle: OpenClawRun, work: Path, config: Path, arguments: list[str], seconds: int
     ) -> subprocess.CompletedProcess[str]:
-        """Run one runtime command in the throwaway world, its output captured and bounded."""
+        """Run one runtime command with bounded output and a process-tree lifetime."""
         include_root = handle.config.parent if handle.config is not None else work
         argv = [*handle.command, *arguments]
-        run = openclaw_arena.Run(
-            argv,
-            openclaw_arena.cli_environment(dict(os.environ), work, config, include_root),
+        if handle.config is None or handle.state is None or handle.profile_root is None:
+            raise DriverRefused("not_isolated", self.display_name)
+        environment = openclaw_arena.cli_environment(
+            dict(os.environ),
             work,
+            config,
+            include_root,
+            profile_root=handle.profile_root,
+            profile_config=handle.config,
+            profile_state=handle.state,
         )
-        deadline = time.monotonic() + seconds
-        while run.running() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        timed_out = run.running()
-        ended = run.end()
-        returncode = 125 if ended is None else ended
-        output = work / "out.json"
-        try:
-            if output.stat().st_size > 65536:
-                returncode, stdout = 125, ""
-            else:
-                stdout = output.read_bytes().decode("utf-8", errors="replace")
-        except OSError:
-            returncode, stdout = 125, ""
-        return subprocess.CompletedProcess(argv, 124 if timed_out else returncode, stdout, "")
+        returncode, stdout = openclaw_arena.bounded_run(argv, environment, work, seconds)
+        return subprocess.CompletedProcess(argv, returncode, stdout, "")
 
     def preflight(self, handle: OpenClawRun) -> frozenset[str]:
         """Prove the contract without a paid call and return the tools a model is offered.
@@ -210,7 +212,16 @@ class OpenClawArenaDriver:
                 work = Path(scratch)
                 openclaw_arena.make_world(work)
                 bridge = Path(openclaw_arena.__file__).resolve().with_name("openclaw_bridge.py")
-                others = openclaw_arena.server_names(list(handle.command), handle.config, work)
+                if handle.config is None or handle.state is None or handle.profile_root is None:
+                    raise DriverRefused("not_isolated", self.display_name)
+                others = openclaw_arena.server_names(
+                    list(handle.command),
+                    handle.config,
+                    work,
+                    profile_root=handle.profile_root,
+                    profile_config=handle.config,
+                    profile_state=handle.state,
+                )
 
                 def overlay(**extra: Any) -> Path:
                     document = openclaw_arena.overlay_document(
@@ -225,6 +236,29 @@ class OpenClawArenaDriver:
                     return openclaw_arena.write_overlay(work, document)
 
                 path = overlay()
+                environment = openclaw_arena.cli_environment(
+                    dict(os.environ),
+                    work,
+                    path,
+                    handle.config.parent,
+                    profile_root=handle.profile_root,
+                    profile_config=handle.config,
+                    profile_state=handle.state,
+                )
+                entries = openclaw_arena.config_value(
+                    list(handle.command), "agents.entries", environment, work, []
+                )
+                default_id = openclaw_arena.config_value(
+                    list(handle.command),
+                    "agents.defaults.systemAgent.agentId",
+                    environment,
+                    work,
+                    "main",
+                )
+                if not openclaw_arena.agent_directories_valid(
+                    entries, default_id, handle.profile_root, handle.state
+                ):
+                    raise refusal
                 valid = self._run(handle, work, path, ["config", "validate"], STEP_SECONDS)
                 probe = self._run(
                     handle,
@@ -256,7 +290,7 @@ class OpenClawArenaDriver:
                 if canary_run.returncode != 0:
                     raise refusal
                 offered = canary.tools[0] if canary.tools else None
-        except (OSError, subprocess.TimeoutExpired) as error:
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
             raise refusal from error
         finally:
             canary.close()
@@ -270,8 +304,9 @@ class OpenClawArenaDriver:
 
         Metadata only, never content: the modification time and size of the profile's
         configuration and of the secrets file beside it and its state, and of the runtime's own
-        entry file. Credentials kept in the runtime's own database are not part of it, and are not
-        used either: a decision runs in a throwaway state.
+        entry file. Credentials kept in the runtime's own database are not part of it; OpenClaw
+        reads them through its profile state while `agent exec --state-dir` keeps sessions
+        disposable.
         """
         digest = hashlib.sha256()
         digest.update(handle.version.encode())
@@ -325,6 +360,9 @@ class OpenClawArenaDriver:
                 openclaw_arena.COMMAND_ENV: json.dumps(list(handle.command)),
                 openclaw_arena.CONFIG_ENV: str(handle.config) if handle.config is not None else "",
                 openclaw_arena.SCRATCH_ENV: str(scratch),
+                openclaw_arena.PROFILE_ROOT_ENV: str(handle.profile_root or ""),
+                openclaw_arena.PROFILE_CONFIG_ENV: str(handle.config or ""),
+                openclaw_arena.PROFILE_STATE_ENV: str(handle.state or ""),
             },
         )
         python = sys.executable

@@ -280,7 +280,8 @@ When the supervisor reports a move accepted, the whole runtime process tree is e
 runtime would otherwise ask its model once more. On Windows the tree lives in a job object that
 ends when the worker does; elsewhere a guard process ends it when its parent is gone or on request,
 reading the tree before the first signal because the runtime keeps children in sessions of their
-own. The throwaway directory is removed afterwards, and the profile is not written to.
+own. The throwaway session directory is removed afterwards. The Connector never writes the auth
+store; OpenClaw alone may manage it through its normal runtime boundary.
 
 What this does not give you, stated plainly:
 
@@ -288,21 +289,25 @@ What this does not give you, stated plainly:
   request came about a minute after the process started, which does not fit the 45 second decision
   bound; a decision that does not reach its move in time costs only that move. A quiet, fast host
   is a precondition for play, and a 1 GB single-board computer cannot run the runtime at all.
-- Credentials the runtime keeps in its own state database cannot be used, because a decision never
-  sees the profile's state. The preflight refuses a profile that has no usable route without them.
+- OpenClaw uses its own profile state root through `OPENCLAW_STATE_DIR`; its `agent exec --state-dir`
+  boundary keeps per-decision sessions disposable while OpenClaw resolves profile-scoped auth
+  itself. The Connector passes only validated paths, never opens the auth database, and refuses
+  configured agent-store paths outside the selected profile or through a link.
 - The runtime sends its host name, working directory and operating system to the model provider in
   every request; the working directory is an empty throwaway.
 - The three-tool guarantee is proven for the model route the runtime takes with the overlay. A
   route that hands the turn to a separate runtime process with a tool surface of its own is not
   shown by that proof; the owner chooses the profile's route.
-- No change is detected in credentials that live in the runtime's database or are rotated by it; the
-  generation is made of the configuration and secrets file metadata and the runtime's entry file.
+- Credential rotation inside OpenClaw's own store is not used as a Connector generation token; the
+  runtime owns refresh and routing, while the idle preflight checks the current usable route.
 - macOS has not been exercised.
 
-The preflight itself was exercised against the official 2026.9.9 npm installation. It uses a
-temporary configuration and state directory plus a loopback canary model, not the profile's
-configured route; the three model-visible tools were returned, and the isolated profile remained
-unchanged. CI keeps using the process-faithful stand-in so pull requests do not install or execute a
+The preflight was exercised against the official 2026.9.9 npm installation with a temporary
+configuration, an empty profile-scoped auth-store fixture, a disposable per-decision state directory
+and a loopback canary model. It did not call the profile's configured route; the three model-visible
+tools were returned, and the config and auth-store snapshots remained unchanged. OpenClaw may create
+its own non-session runtime state in its isolated profile; the Connector never writes auth-store
+contents. CI keeps using the process-faithful stand-in so pull requests do not install or execute a
 third-party runtime. To repeat the real-install check locally, set
 `AGENTNEXUS_OPENCLAW_COMMAND` to a JSON argv array for the reviewed CLI and run
 `python -m pytest ci/test_arena_openclaw_driver.py::test_the_reviewed_openclaw_install_proves_its_isolated_three_tool_path -q`.
