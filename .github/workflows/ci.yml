@@ -142,6 +142,16 @@ jobs:
       - name: Arena starts stay bounded, isolated and single across retries
         run: python -m pytest ci/test_arena_runner.py -q
 
+      - name: An Arena decision ends inside the provider's turn, and an accepted move ends it
+        # agntnexus/agentnexus#223. A model decision has 45 of the provider's 60 seconds, and a move
+        # the provider accepts ends its decision at once. The first file runs the match process
+        # with a fake clock and fake workers, and the supervisor against scripted streams. The
+        # second runs a real supervisor, a real match process and a real decision worker, with a
+        # stand-in for Hermes whose model blocks, is slow or is fast, whose closing request never
+        # answers and whose cleanup hangs or raises: no late move, no match lost to a tail, no
+        # process left. No network, no model, no credential and no real match.
+        run: python -m pytest ci/test_arena_turn_budget.py ci/test_arena_decision_worker.py -q
+
       - name: The release builder refuses what it must
         # `scripts/build_release.py` is the one file here that can hold a private signing key, so
         # its refusals are worth more than its output: a key inside a work tree, an unstamped

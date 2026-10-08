@@ -14,9 +14,11 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -125,11 +127,16 @@ class StartIntent:
         )
 
 
+#: A decision's timer thread logs beside the worker thread (agntnexus/agentnexus#223), and `print`
+#: writes a line in two steps: one record at a time keeps every line a whole record.
+_LOG = threading.Lock()
+
+
 def diagnostic(intent: StartIntent, event: str, duration_ms: int = 0) -> None:
     """Write a closed local record; identifiers come only from the parent's validated intent."""
     if event not in DIAGNOSTICS or type(duration_ms) is not int or not 0 <= duration_ms <= 3600000:
         raise RunnerRefused("Unknown bounded Arena diagnostic.")
-    with contextlib.suppress(OSError):
+    with contextlib.suppress(OSError), _LOG:
         print(
             json.dumps(
                 {
@@ -143,6 +150,162 @@ def diagnostic(intent: StartIntent, event: str, duration_ms: int = 0) -> None:
             ),
             flush=True,
         )
+
+
+class DecisionWindow:
+    """One model decision's budget on the parent's own clock (agntnexus/agentnexus#223).
+
+    Hermes' `run_budget_seconds` advises the model and never interrupts a blocked call, so a bound
+    held inside the match process could not stop a match process that is blocked. This window is
+    held by the parent, which also holds the signing key: it opens when the match process says a
+    decision began, admits a move only while it is open, before its cutoff and while none has been
+    accepted, and at the cutoff expires exactly once and kills the match process. The match process
+    reports how much of the turn it has used; the cutoff is that turn's bound, not a fresh one.
+
+    The cutoff is for the model, and it ends when the provider accepts the move. From then on the
+    decision is complete and nothing of the turn is left to spend: the window is re-armed for
+    `SETTLE_SECONDS`, which is only a backstop for a match process that cannot report back that the
+    decision returned (it covers a cleanup that is cut off and a worker that is replaced). A move
+    admitted just before the cutoff is already on its way and is bounded by the SDK's own
+    per-phase provider timeouts; the cutoff waits for its answer, because killing the match process
+    cannot recall the move and would only lose the match to a move the provider has accepted.
+    """
+
+    def __init__(self, cut_off: Callable[[int], None]) -> None:
+        """Hold the callback that logs the expiry and ends the child, run at most once."""
+        self._cut_off = cut_off
+        self._lock = threading.Lock()
+        self._timer: threading.Timer | None = None
+        self._cutoff: float | None = None
+        self._deadline: float | None = None
+        self._turn_started = 0.0
+        self._expired = False
+        self._moved = False
+        self._in_flight = False
+        self._due = False
+        self._generation = 0
+
+    @property
+    def is_open(self) -> bool:
+        """True from the child's opening of a decision until its close."""
+        with self._lock:
+            return self._cutoff is not None
+
+    @property
+    def expired(self) -> bool:
+        """True once the decision was cut off; nothing more is served after that."""
+        with self._lock:
+            return self._expired
+
+    @property
+    def moved(self) -> bool:
+        """True once a move of this decision was accepted by the provider."""
+        with self._lock:
+            return self._moved
+
+    def begin_move(self) -> bool:
+        """Admit a move if the decision is open, unexpired, before its cutoff and without a move."""
+        with self._lock:
+            if (
+                self._cutoff is None
+                or self._expired
+                or self._moved
+                or time.monotonic() >= self._cutoff
+            ):
+                return False
+            self._in_flight = True
+            return True
+
+    def end_move(self, *, accepted: bool) -> None:
+        """Record that the admitted move was answered: accepted, refused or not known to land."""
+        with self._lock:
+            self._in_flight = False
+            late = self._due or (self._cutoff is not None and time.monotonic() >= self._cutoff)
+            self._due = False
+        if accepted:
+            self.accept()
+        elif late:
+            self.expire()
+
+    def accept(self) -> None:
+        """Record that the provider accepted a move: the cutoff is over and the match settles."""
+        with self._lock:
+            if self._cutoff is None or self._expired or self._moved:
+                return
+            self._moved, self._due = True, False
+            self._generation += 1
+            generation = self._generation
+            earlier, self._timer = self._timer, None
+            self._cutoff = time.monotonic() + hermes_arena.SETTLE_SECONDS
+            self._timer = threading.Timer(
+                hermes_arena.SETTLE_SECONDS, self.expire, kwargs={"generation": generation}
+            )
+            self._timer.daemon = True
+            self._timer.start()
+        if earlier is not None:
+            earlier.cancel()
+
+    def before_cutoff(self) -> bool:
+        """Return whether this turn's cutoff is still ahead, even after the decision has closed."""
+        with self._lock:
+            return (
+                self._deadline is not None
+                and not self._expired
+                and time.monotonic() < self._deadline
+            )
+
+    def elapsed_ms(self) -> int:
+        """Return how much of the turn has gone, in the bounded whole milliseconds a log allows."""
+        with self._lock:
+            return self._elapsed_ms()
+
+    def _elapsed_ms(self) -> int:
+        return max(0, min(int((time.monotonic() - self._turn_started) * 1000), 3600000))
+
+    def open(self, remaining: float, used: float = 0.0) -> None:
+        """Start the clock: `remaining` seconds are left of a turn of which `used` are gone."""
+        with self._lock:
+            self._generation += 1
+            generation = self._generation
+            now = time.monotonic()
+            self._turn_started, self._cutoff = now - used, now + remaining
+            self._deadline, self._moved = self._cutoff, False
+            self._in_flight = self._due = False
+            if remaining > 0 and not self._expired:
+                self._timer = threading.Timer(
+                    remaining, self.expire, kwargs={"generation": generation}
+                )
+                self._timer.daemon = True
+                self._timer.start()
+                return
+        self.expire()
+
+    def expire(self, duration_ms: int | None = None, *, generation: int | None = None) -> None:
+        """Cut the decision off once; later calls and a timer past its decision do nothing.
+
+        A timer that fires while a move is in flight waits for the answer instead.
+        """
+        with self._lock:
+            if self._expired or (generation is not None and generation != self._generation):
+                return
+            if generation is not None and self._in_flight:
+                self._due = True
+                return
+            self._expired = True
+            elapsed = self._elapsed_ms()
+        self._cut_off(elapsed if duration_ms is None else duration_ms)
+
+    def close(self) -> None:
+        """End the decision: the cutoff no longer applies. An expiry already running finishes."""
+        with self._lock:
+            self._generation += 1
+            self._cutoff = None
+            self._in_flight = self._due = False
+            timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
+            if timer is not threading.current_thread():
+                timer.join(timeout=5)
 
 
 class RunJournal:
@@ -180,8 +343,14 @@ class RunJournal:
         self.connection.close()
 
 
-def hermes_environment(home: Path) -> dict[str, str]:
-    """Pass OS essentials only; select the one profile before Hermes is imported."""
+def hermes_environment(home: Path, scratch: Path) -> dict[str, str]:
+    """Pass OS essentials only; Hermes gets a throwaway home and the profile is named apart.
+
+    Hermes fills its home with state of its own the moment it starts: logs, caches, a state database
+    and a backup of the config it finds there. That must never be the profile (agntnexus/agentnexus
+    #223), so `HERMES_HOME` is a scratch directory that is removed after the run. The profile is
+    passed apart, in `AGENTNEXUS_ARENA_PROFILE`, and the adapter reads two files of it and no more.
+    """
     allowed = {
         "PATH",
         "SYSTEMROOT",
@@ -197,13 +366,23 @@ def hermes_environment(home: Path) -> dict[str, str]:
     }
     environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
     environment.update(
-        HERMES_HOME=str(home),
+        HERMES_HOME=str(scratch),
+        AGENTNEXUS_ARENA_PROFILE=str(home),
         HERMES_SAFE_MODE="1",
         HERMES_IGNORE_RULES="1",
         HERMES_IGNORE_USER_CONFIG="1",
         PYTHONUTF8="1",
     )
     return environment
+
+
+def remove_scratch(path: Path) -> None:
+    """Remove a throwaway Hermes home; a process that is still exiting may hold a file a moment."""
+    for _ in range(10):
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            return
+        time.sleep(0.2)
 
 
 @dataclass(frozen=True)
@@ -253,17 +432,28 @@ class HermesRun:
         result = cls(
             source, adapter._scanner_interpreter(source), adapter._config().resolve().parent
         )
-        probe = subprocess.run(  # noqa: S603 - fixed local runtime or service command
-            result.command("--preflight"),
-            env=hermes_environment(result.home),
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        if probe.returncode != 0 or '"bounded": true' not in probe.stdout:
+        if not result.preflight():
             raise RunnerRefused("Hermes refused the exact three-tool Arena preflight.")
         return result
+
+    def preflight(self) -> bool:
+        """Run the adapter's check of the exact three-tool contract, which makes no inference.
+
+        Importing Hermes fills its home, so the check runs with a throwaway one: the profile is
+        left exactly as it was.
+        """
+        with tempfile.TemporaryDirectory(
+            prefix="agentnexus-hermes-", ignore_cleanup_errors=True
+        ) as scratch:
+            probe = subprocess.run(  # noqa: S603 - fixed local runtime or service command
+                self.command("--preflight"),
+                env=hermes_environment(self.home, Path(scratch)),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        return probe.returncode == 0 and '"bounded": true' in probe.stdout
 
     def command(self, *arguments: str) -> list[str]:
         """Use Hermes' interpreter with this wheel's standalone compatible adapter."""
@@ -293,6 +483,8 @@ def profile_storage(paths: Any) -> None:
 
 class ArenaRunner:
     """Poll as one signed identity; supervise one bounded child through the whole game."""
+
+    scratch: Path | None = None  # the running child's throwaway Hermes home
 
     def __init__(self, paths: Any, providers: str, runtime: HermesRun) -> None:
         """Read only this profile's state and key; provider origins are local configuration."""
@@ -352,11 +544,23 @@ class ArenaRunner:
             raise RunnerRefused("Missing private Arena pipe.")
         output = child.stdout
         diagnostics = 0
-        # Connect Four's run stays within 256; a joined Chess match may send its own whole run's
-        # diagnostics, a finite bound derived from its decisions (agntnexus/agentnexus#202).
-        diagnostic_limit = 256
+        # A run sends at most four diagnostics per decision and one as it ends: a finite bound
+        # derived from the game's decisions (agntnexus/agentnexus#202, #223). Connect Four's is the
+        # default; a joined Chess match takes its own.
+        diagnostic_limit = hermes_arena.diagnostic_bound(hermes_arena.DECISIONS["connect-four"])
+        # The provider's turn is the same 60 seconds in both games today, but the bound is the
+        # game's own once the join names it (agntnexus/agentnexus#223).
+        seconds = hermes_arena.DECISION_SECONDS["connect-four"]
+        window = DecisionWindow(lambda duration_ms: self._cut_off(child, intent, duration_ms))
+        # A move whose outcome is unknown stays staged in the SDK, and the next state read sends it
+        # again. Until something is read or moved successfully, a state read is held to the cutoff
+        # like the move it would send.
+        uncertain = False
         try:
             for line in iter(lambda: output.readline(4097), ""):
+                if window.expired:
+                    # The child was ended at its cutoff; what it left in the pipe is not served.
+                    break
                 if len(line) > 4096:
                     raise RunnerRefused("Hermes sent an oversized Arena request.")
                 request = json.loads(line)
@@ -374,6 +578,19 @@ class ArenaRunner:
                     diagnostics += 1
                     if diagnostics > diagnostic_limit:
                         raise RunnerRefused("Hermes exceeded the bounded Arena diagnostics.")
+                    if request["diagnostic"] == "model_call_started":
+                        # The child says a decision began and how much of the turn it has used.
+                        if window.is_open:
+                            raise RunnerRefused("Hermes opened a decision inside a decision.")
+                        window.open(
+                            seconds - request["duration_ms"] / 1000, request["duration_ms"] / 1000
+                        )
+                    elif request["diagnostic"] in {"model_call_returned", "model_call_exception"}:
+                        window.close()
+                    elif request["diagnostic"] == "decision_budget_expired":
+                        # The child found its own budget spent: one expiry, logged and ended here.
+                        window.expire(request["duration_ms"])
+                        break
                     diagnostic(intent, request["diagnostic"], request["duration_ms"])
                     continue
                 if request == {"finished": True}:
@@ -389,6 +606,22 @@ class ArenaRunner:
                     raise RunnerRefused(
                         "Hermes attempted an operation outside this match."
                     ) from None
+                if operation == "game_move":
+                    # A move is forwarded only inside an open decision and before its cutoff, on
+                    # this process's clock. Late is refused, never repeated and never replaced.
+                    if not window.is_open:
+                        raise RunnerRefused("Hermes attempted a move outside a model decision.")
+                    if window.moved:
+                        raise RunnerRefused("Hermes attempted a second move in one decision.")
+                    if not window.begin_move():
+                        diagnostic(intent, "late_move_refused", window.elapsed_ms())
+                        window.expire()
+                        break
+                elif operation == "game_state" and uncertain and not window.before_cutoff():
+                    # This read would send the staged move after the cutoff: it is that move.
+                    diagnostic(intent, "late_move_refused", window.elapsed_ms())
+                    window.expire()
+                    break
                 command = {**request, "match_id": intent.match_id, "seat": intent.seat}
                 started = time.monotonic()
                 if operation in {"game_join", "game_move"}:
@@ -410,11 +643,19 @@ class ArenaRunner:
                         diagnostic_limit = hermes_arena.diagnostic_bound(
                             hermes_arena.DECISIONS["chess"]
                         )
+                        seconds = hermes_arena.DECISION_SECONDS["chess"]
                     if operation == "game_join" and not self.playing:
                         self._report("playing")
                         self.playing = True
                     if result.get("status") in {"ended", "aborted"}:
                         self.terminal = True
+                    if operation == "game_move":
+                        window.end_move(accepted=True)
+                    if operation == "game_state" and uncertain:
+                        # The read resent the staged move and it landed: that is the acceptance.
+                        window.accept()
+                    if operation in {"game_move", "game_state"}:
+                        uncertain = False
                     response = {"result": result}
                 except games.GameRefusedError as error:
                     diagnostic(
@@ -422,7 +663,17 @@ class ArenaRunner:
                         f"{operation}_refused",
                         max(0, min(int((time.monotonic() - started) * 1000), 3600000)),
                     )
+                    unknown = operation == "game_move" and error.retryable
+                    if operation == "game_move":
+                        window.end_move(accepted=False)
+                    if unknown:
+                        uncertain = True
+                    elif error.code.startswith("provider."):
+                        # The provider answered the staged message for good: nothing is staged.
+                        uncertain = False
                     response = {"result": {"error": error.code}}
+                    if unknown:
+                        response["result"]["uncertain"] = True
                 child.stdin.write(json.dumps(response) + "\n")
                 child.stdin.flush()
         except OSError:
@@ -435,7 +686,23 @@ class ArenaRunner:
             # Thread tracebacks could otherwise copy an unexpected runtime's private error text.
             diagnostic(intent, "runtime_exception")
         finally:
+            window.close()
             self.finished.set()
+
+    def _cut_off(self, child: Any, intent: StartIntent, duration_ms: int) -> None:
+        """End a decision that outlived its budget: kill the child that holds it, then log it once.
+
+        A kill, not a request to stop: a model call blocked in a transport cannot be asked to. It
+        comes first, so a log that cannot be written never leaves a blocked child alive. After it
+        this run sends no move, chooses none and is not retried; a move admitted just before the
+        cutoff is already on its way and is bounded by the SDK's own timeouts. The supervisor's next
+        tick sees a child that ended without a finished game and reports the intent `refused`.
+        """
+        try:
+            with contextlib.suppress(OSError):
+                child.kill()  # decision cutoff
+        finally:
+            diagnostic(intent, "decision_budget_expired", duration_ms)
 
     def _launch(self, intent: StartIntent) -> None:
         """Claim, reserve durably, then spawn; restart uncertainty never launches twice."""
@@ -450,18 +717,23 @@ class ArenaRunner:
             return
         self.finished.clear()
         self.terminal = self.playing = False
-        child = subprocess.Popen(  # noqa: S603 - reviewed interpreter and shipped adapter
-            self.runtime.command(),
-            env=hermes_environment(self.runtime.home),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            cwd=self.paths.root,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
-        )
-        self.child = child
+        scratch = Path(tempfile.mkdtemp(prefix="agentnexus-hermes-"))
+        try:
+            child = subprocess.Popen(  # noqa: S603 - reviewed interpreter and shipped adapter
+                self.runtime.command(),
+                env=hermes_environment(self.runtime.home, scratch),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                cwd=self.paths.root,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+            )
+        except BaseException:
+            remove_scratch(scratch)  # scratch
+            raise
+        self.child, self.scratch = child, scratch
         diagnostic(owned, "run_started")
         self.deadline = time.monotonic() + 3600
         if child.stdin is None:
@@ -499,6 +771,10 @@ class ArenaRunner:
         self.child = None
         self.worker = None
         self.active = None
+        if self.scratch is not None:
+            # Nothing of the run is left running that could still write to it.
+            remove_scratch(self.scratch)  # scratch
+            self.scratch = None
 
     def tick(self) -> None:
         """Heartbeat, enforce authoritative cancellation and expiry, and claim one queued seat."""

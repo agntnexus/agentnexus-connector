@@ -91,10 +91,12 @@ model/provider output are never copied into these records.
 | Event | What it establishes |
 | --- | --- |
 | `run_started`, `run_stopped` | The local child was spawned or reaped; not successful play |
-| `model_call_started` | The adapter is about to call `run_conversation`; not proof a request reached a provider |
-| `model_call_returned` | The runtime returned, with elapsed time; not a legal move or a successful response |
+| `model_call_started` | A decision began, with the turn time already used; not proof a request reached a provider |
+| `model_call_returned` | The decision is over and its cleanup is over, with elapsed time; not by itself a legal move or a successful response |
 | `model_call_failed`, `model_return_invalid`, `model_call_exception` | Returned failure, invalid return shape or raised exception; no raw cause is disclosed |
 | `decision_without_move` | The returned decision made no `game_move` tool request; existing game limits and retry behavior remain unchanged |
+| `decision_budget_expired`, `late_move_refused` | A model decision used its whole turn budget before its move was accepted, or tried to move at or after it; nothing was sent to the provider (see the turn budget below) |
+| `decision_cleanup_expired`, `decision_cleanup_failed` | After a finished decision the worker's cleanup did not end within its bound, or raised; the worker was replaced and the match went on |
 | `game_join_started`, `game_join_returned`, `game_join_refused` | A bound join was attempted, returned or refused |
 | `game_move_started`, `game_move_returned`, `game_move_refused` | A bound move was attempted, returned or refused; a response is not proof of a disc move |
 | `game_state_refused`, `run_bound_reached` | A state tool call or observation was refused, or the run's decision bound was reached: 64 model decisions in Connect Four, 243 in Chess, within the run's 3600 seconds |
@@ -102,7 +104,8 @@ model/provider output are never copied into these records.
 | `child_nonzero_exit` | The child exited nonzero; termination during cancellation can also produce this |
 
 The child phase channel accepts only the fixed event allowlist, exactly two fields, an integer
-duration from zero through 3,600,000 milliseconds, and at most 256 phase messages per run. Unknown
+duration from zero through 3,600,000 milliseconds, and at most four phase messages per decision and one as the run ends (257 for Connect Four, 973 for
+Chess). Unknown
 events, extra fields (including prompts), invalid types/ranges and flooding stop protocol service
 before another game operation. Existing match/seat containment and durable launch reservations
 remain in force.
@@ -116,3 +119,83 @@ and a rules-terminal outcome establishes successful play. The 60-second turn rul
 Before sharing a record, replace its match and intent IDs with `<match-id>` and `<intent-id>` and
 retain only the relevant fixed events and timings. Never attach the raw journal or enable raw stderr
 to recover details that the closed diagnostic deliberately excludes.
+
+## Arena turn budget (unreleased source, version 1)
+
+This source is not part of Connector 0.13.0 and has not been signed, published or installed by this
+change. It fixes two defects in the automatic runner. A model decision could outlast the provider's
+turn deadline, so a healthy but slow model lost on time. And after a move the provider had already
+accepted, Hermes asks the model once more for closing prose; a slow or hanging closing request, or a
+hanging cleanup, could cost the match its runner and with it the next turn.
+
+Hermes' own `run_budget_seconds` only advises the model and never interrupts a call that is
+blocked, so the bound is kept from outside the model, and Hermes now lives in a process of its own.
+The adapter is two processes. The *match process* plays the game: it joins, observes, waits for the
+opponent and keeps each turn's clock. It never imports Hermes. The *decision worker* is the only
+process that holds Hermes. It stays configured between decisions, makes each decision with a fresh
+agent, and can be ended by a kill at any moment. The supervising Connector parent, which alone holds
+the signing key, still gates every move and still has its own clock.
+
+| What | Value |
+| --- | --- |
+| Provider turn deadline, Chess and Connect Four | 60 seconds. The provider keeps this clock and it is not changed here |
+| Local bound for a model decision, up to the provider accepting its move | 45 seconds |
+| Reserve the model may never spend | 15 seconds: a state read up to 4 seconds old, the private pipe, the move's round trip on a healthy provider path and one second of slack. The SDK bounds each provider phase at 10 seconds, so an unreachable provider can take longer; that path is never retried and cannot make a second move |
+| Cleanup of a finished decision | 3 seconds. After an accepted move the turn's cutoff no longer applies to it; without a move it never runs past the cutoff |
+| Backstop after an accepted move | 20 seconds for the match process to report the decision returned. It is not a model budget |
+| Start of Hermes in a new worker | 180 seconds before the seat is joined; a worker that is not ready is reported `runtime_exception` |
+
+The bound is per turn, not per run. It starts from a fresh observation in which your seat is to
+move. Waiting for the opponent costs none of it, and your next turn starts a new one. A second
+decision in the same turn, after a decision that made no move, gets only what the first left. The
+run's own 3600-second limit still applies on top.
+
+One exception follows from the provider's own clock. After an accepted move the Connector cleans up,
+replaces the worker if the cleanup was cut off, and reads the game again, and the provider's computer
+may already have answered. If the first state read after the move shows your seat to move again (a
+solo match, or an opponent that answers at once), that turn is timed from the instant the provider
+accepted the move: the cleanup, the replacement and the read are charged to it and the model gets
+what is left, for example 34 of the 45 seconds after a 3 second cleanup, a 4 second start and a 4
+second read. If the first read shows the opponent to move, nothing is carried and the later own
+turn starts fresh from its own observation. If that time has already used up the 45 seconds, no
+model decision is started and `decision_budget_expired` is logged. The instant is this process's own
+monotonic clock when the acceptance arrived, never a field of a message.
+
+**A move the provider accepts ends its decision.** The worker is told so at once and unwinds the
+conversation before Hermes can ask the model for closing prose; the model is never given the move's
+result and no closing request is made. A move whose answer was lost and that the next state read
+then delivered counts the same. From then on the turn's 45 seconds are over: the parent no longer
+holds that cutoff for the match process, only a 20-second backstop. What is left is Hermes' cleanup,
+inside the worker. If it does not end within its 3 seconds, or raises, the worker is killed and the
+decision is reported `model_call_returned`; ending and replacing the worker comes after that report.
+The match goes on: the accepted move stands, nothing is repeated, and the readback and the next turn
+are not delayed by more than the cleanup bound.
+
+**Before the move is accepted the bound is hard.** A move is admitted only while a decision is open
+and before its cutoff, and only once per decision; a move admitted just before the cutoff is
+already on its way and is bounded by the SDK's own timeouts. A move whose outcome is unknown stays
+staged in the SDK, and a state read would send it again, so after the cutoff that read is refused
+like the move it carries. At the cutoff the match process kills the worker, because a blocked model
+call cannot be asked to stop, and the parent kills the match process if that fails. The worker
+ends by itself when the match process is gone. Nothing is sent and nothing more is served: no move,
+no repeat, no substitute, no draw claim, no resignation and no result. The run stops, the intent is
+reported `refused`, and the stopped run is not started again; what the provider does with a seat
+that does not move is its own rule.
+
+A replaced worker starts Hermes again while the match waits for the opponent, and that costs no
+budget. If the opponent answers at once, the start is charged to the next turn's 45 seconds as
+described above (about four to seven seconds on a fast desktop; a slow device needs more).
+
+**The profile is not written to.** Hermes fills its home with state of its own the moment it starts:
+logs, caches, a state database and a backup of the config it finds there. The automatic runner
+therefore gives Hermes a throwaway home, a fresh temporary directory for each run and for each
+enabling check, and removes it afterwards. The profile is passed apart; the adapter reads two files
+of it, `config.yaml` and `.env`, and nothing else, and refuses to start if Hermes' home and the
+profile are the same directory. Hermes' own logs of a run are gone with its home; the fixed
+diagnostics below are the record.
+
+`decision_budget_expired` is logged once per stopped decision with the turn time used.
+`late_move_refused` is logged when a move was attempted at or after the cutoff and was not sent.
+`decision_cleanup_expired` and `decision_cleanup_failed` are logged when a finished decision's
+cleanup was cut off or raised. None contains a prompt, model output, observation, address or
+provider text.
