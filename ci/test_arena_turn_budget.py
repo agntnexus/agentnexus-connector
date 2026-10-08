@@ -1065,6 +1065,7 @@ def serve_live(
     settle: float,
     slow_move: float = 0.0,
     wait: float = 4.0,
+    module: ModuleType = arena_runner,
 ) -> tuple[FakeChild, list[str], list[str], float]:
     """Serve a scripted child in real time, with real timers, and say what happened.
 
@@ -1075,7 +1076,7 @@ def serve_live(
         hermes_arena, "DECISION_SECONDS", {"chess": cutoff, "connect-four": cutoff}, raising=False
     )
     monkeypatch.setattr(hermes_arena, "SETTLE_SECONDS", settle, raising=False)
-    runner, owned = supervisor()
+    runner, owned = supervisor(module)
     forwarded: list[str] = []
 
     def game(command: dict[str, Any], **kwargs: object) -> dict[str, Any]:
@@ -1084,11 +1085,11 @@ def serve_live(
             time.sleep(slow_move)
         return {"status": "active", "game_version": "connect-four-1-solo"}
 
-    monkeypatch.setattr(arena_runner.bridge, "_run_game_command", game)
+    monkeypatch.setattr(module.bridge, "_run_game_command", game)
     pipe = OpenPipe()
     child = FakeChild(pipe)
     thread = threading.Thread(
-        target=arena_runner.ArenaRunner._serve, args=(runner, child, owned), daemon=True
+        target=module.ArenaRunner._serve, args=(runner, child, owned), daemon=True
     )
     thread.start()
     for delay, line in script:
@@ -1104,26 +1105,34 @@ def serve_live(
     return child, forwarded, events, elapsed
 
 
-def test_an_accepted_move_ends_the_turns_cutoff_for_the_parents_window(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def accepted_move_oracle(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """After the provider accepted the move the 45 seconds are over: the match may settle."""
+    """Require that an accepted move ends the turn's cutoff for the parent's window."""
     child, forwarded, events, _ = serve_live(
         monkeypatch,
         capsys,
         [(0, JOIN), (0, started()), (0.1, MOVE), (1.0, RETURNED), (0, FINISHED)],
         cutoff=0.5,
         settle=5.0,
+        module=module,
     )
     assert forwarded == ["game_join", "game_move"]
     assert child.killed == 0, "the match process was cut off for the turn's cutoff after its move"
     assert "decision_budget_expired" not in events
 
 
-def test_a_move_in_flight_at_the_cutoff_is_not_cut_off(
+def test_an_accepted_move_ends_the_turns_cutoff_for_the_parents_window(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Admitted before the cutoff and still on its way when it comes: the timer waits."""
+    """After the provider accepted the move the 45 seconds are over: the match may settle."""
+    accepted_move_oracle(arena_runner, monkeypatch, capsys)
+
+
+def in_flight_oracle(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Require that a move admitted before the cutoff is not cut off while it is on its way."""
     child, forwarded, events, _ = serve_live(
         monkeypatch,
         capsys,
@@ -1131,16 +1140,24 @@ def test_a_move_in_flight_at_the_cutoff_is_not_cut_off(
         cutoff=0.4,
         settle=5.0,
         slow_move=0.8,
+        module=module,
     )
     assert forwarded == ["game_join", "game_move"]
     assert child.killed == 0, "the match process was killed while its accepted move was in flight"
     assert "decision_budget_expired" not in events
 
 
-def test_a_match_process_that_does_not_report_back_after_an_accepted_move_is_cut_off(
+def test_a_move_in_flight_at_the_cutoff_is_not_cut_off(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The window is not abandoned after the move: a wedged match process is still ended."""
+    """Admitted before the cutoff and still on its way when it comes: the timer waits."""
+    in_flight_oracle(arena_runner, monkeypatch, capsys)
+
+
+def settle_oracle(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Require that a match process which never reports back is still ended at the settle bound."""
     child, _, events, elapsed = serve_live(
         monkeypatch,
         capsys,
@@ -1148,31 +1165,47 @@ def test_a_match_process_that_does_not_report_back_after_an_accepted_move_is_cut
         cutoff=5.0,
         settle=0.4,
         wait=3.0,
+        module=module,
     )
     assert child.killed == 1
     assert events.count("decision_budget_expired") == 1
     assert elapsed < 2.5, "the settle bound was not what ended it"
 
 
-def test_a_staged_move_delivered_by_a_read_is_the_acceptance_for_the_parent_too(
+def test_a_match_process_that_does_not_report_back_after_an_accepted_move_is_cut_off(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The read that resends a staged move lands it: a second move of the decision is refused."""
+    """The window is not abandoned after the move: a wedged match process is still ended."""
+    settle_oracle(arena_runner, monkeypatch, capsys)
+
+
+def staged_acceptance_oracle(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Require that the read which resends a staged move counts as the move's acceptance."""
     _, _, forwarded, events = serve(
         monkeypatch,
         capsys,
         [JOIN, started(), MOVE, STATE, MOVE, FINISHED],
         clock=Clock(),
+        module=module,
         uncertain=True,
     )
     assert [c["operation"] for c in forwarded] == ["game_join", "game_move", "game_state"]
     assert events[-1] == "protocol_refused"
 
 
-def test_a_staged_move_settled_by_the_provider_stops_holding_back_the_reads(
+def test_a_staged_move_delivered_by_a_read_is_the_acceptance_for_the_parent_too(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The provider refused the staged move for good: nothing is staged, a later read is a read."""
+    """The read that resends a staged move lands it: a second move of the decision is refused."""
+    staged_acceptance_oracle(arena_runner, monkeypatch, capsys)
+
+
+def provider_settled_oracle(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Require that a staged move the provider settled for good no longer holds the reads back."""
     clock = Clock()
     base = clock.now
 
@@ -1184,6 +1217,7 @@ def test_a_staged_move_settled_by_the_provider_stops_holding_back_the_reads(
         capsys,
         [JOIN, started(), MOVE, RETURNED, STATE, at, STATE, FINISHED],
         clock=clock,
+        module=module,
         uncertain=True,
         refuse_first_state=True,
     )
@@ -1195,6 +1229,29 @@ def test_a_staged_move_settled_by_the_provider_stops_holding_back_the_reads(
     ]
     assert "late_move_refused" not in events
     assert child.killed == 0
+
+
+def test_a_staged_move_settled_by_the_provider_stops_holding_back_the_reads(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The provider refused the staged move for good: nothing is staged, a later read is a read."""
+    provider_settled_oracle(arena_runner, monkeypatch, capsys)
+
+
+def uncertain_oracle(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Require that the match process is told which move result is not known to have landed."""
+    _, child, _, _ = serve(
+        monkeypatch,
+        capsys,
+        [JOIN, started(), MOVE, RETURNED, FINISHED],
+        clock=Clock(),
+        module=module,
+        uncertain=True,
+    )
+    answers = [json.loads(line) for line in child.stdin.getvalue().splitlines()]
+    assert answers[-1] == {"result": {"error": "games.provider_unavailable", "uncertain": True}}
 
 
 def log_exclusion_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1306,6 +1363,7 @@ def no_restart_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> No
     """Require that no decision starts once the turn's budget is spent."""
     played = play(monkeypatch, "white", no_move(44), module=module, read_seconds=2)
     assert len(played.workers.commands) == 1, "a decision was started after the budget was spent"
+    assert played.events.count("model_call_started") == 1, "a decision was reported as begun"
 
 
 def cleanup_bound_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1319,7 +1377,7 @@ def remnant_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     """Require that a worker whose cleanup was cut off is killed and not left behind."""
     played = play(monkeypatch, "white", move_after(1), module=module, turns=2, close="hang")
     try:
-        assert all(worker.dead for worker in played.workers.spawned), "a worker was left behind"
+        assert all(worker.closed for worker in played.workers.spawned), "a worker was left behind"
     finally:
         for worker in played.workers.spawned:
             worker.kill()
@@ -1331,6 +1389,20 @@ def replaced_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None
     for worker in played.workers.spawned:
         worker.kill()
     assert len(played.match.forwarded) == 2, "the match was lost to a cleanup"
+
+
+def moved_bound_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Require that after an accepted move the turn's cutoff no longer bounds the cleanup."""
+    close = ("after", 1.5)
+    played = play(monkeypatch, "white", move_after(44), module=module, turns=2, close=close)
+    assert "decision_cleanup_expired" not in played.events, "the turn's cutoff bound the cleanup"
+
+
+def turn_bound_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Require that without a move the cleanup stays inside what is left of the turn."""
+    played = play(monkeypatch, "white", no_move(44), module=module, close=("after", 1.5))
+    first = played.events[: played.events.index("model_call_returned")]
+    assert "decision_cleanup_expired" in first, "the cleanup ran past the turn's cutoff"
 
 
 def ordering_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1370,11 +1442,13 @@ def ordering_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None
         ("turn_started = None  # waiting", "pass  # waiting", passed_turn_oracle),
         ("if now >= cutoff_at:", "if False:", no_restart_oracle),
         (
-            "min(time.monotonic() + CLEANUP_SECONDS, cutoff_at)",
-            "time.monotonic() + 3600",
+            "ending = cleanup(worker, bound_at)",
+            "ending = cleanup(worker, time.monotonic() + 3600)",
             cleanup_bound_oracle,
         ),
         ("worker.close()  # cleanup remnant", "pass  # cleanup remnant", remnant_oracle),
+        ('if outcome != "moved":', "if True:", moved_bound_oracle),
+        ('if outcome != "moved":', "if False:", turn_bound_oracle),
         ("worker = spawn_worker(source)  # replaced", "return 3  # replaced", replaced_oracle),
         (
             "ending = cleanup(worker,",
@@ -1395,6 +1469,8 @@ def ordering_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None
         "no-restart",
         "unbounded-cleanup",
         "cleanup-remnant",
+        "moved-cleanup-bound-is-the-turns",
+        "unmoved-cleanup-bound-is-not-the-turns",
         "whole-match-lost",
         "window-closed-before-cleanup",
     ],
@@ -1495,7 +1571,7 @@ def counted_oracle(
     module: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Require that the parent forwards one accepted move per decision."""
-    _, _, forwarded, _ = serve(
+    _, _, forwarded, events = serve(
         monkeypatch,
         capsys,
         [JOIN, started(), MOVE, MOVE, RETURNED, FINISHED],
@@ -1503,6 +1579,7 @@ def counted_oracle(
         module=module,
     )
     assert [c["operation"] for c in forwarded] == ["game_join", "game_move"], "a second move left"
+    assert events[-1] == "protocol_refused", "a second move was not told from a late one"
 
 
 def log_oracle(
@@ -1515,7 +1592,7 @@ def log_oracle(
 @pytest.mark.parametrize(
     ("original", "replacement", "oracle"),
     [
-        ("if not window.allows_move():", "if False:", parent_gate_oracle),
+        ("if not window.begin_move():", "if False:", parent_gate_oracle),
         ("if not window.is_open:", "if False:", parent_window_oracle),
         ('seconds - request["duration_ms"] / 1000', "seconds", parent_elapsed_oracle),
         (
@@ -1526,6 +1603,20 @@ def log_oracle(
         ("if window.expired:", "if False:", buffered_oracle),
         ("not window.before_cutoff()", "False", staged_oracle),
         ("if window.moved:", "if False:", counted_oracle),
+        (
+            "if accepted:\n            self.accept()",
+            "if False:\n            self.accept()",
+            accepted_move_oracle,
+        ),
+        ("if generation is not None and self._in_flight:", "if False:", in_flight_oracle),
+        (
+            "hermes_arena.SETTLE_SECONDS, self.expire, kwargs",
+            "3600, self.expire, kwargs",
+            settle_oracle,
+        ),
+        ('if operation == "game_state" and uncertain:', "if False:", staged_acceptance_oracle),
+        ('elif error.code.startswith("provider."):', "elif False:", provider_settled_oracle),
+        ('response["result"]["uncertain"] = True', "pass", uncertain_oracle),
     ],
 )
 def test_parent_guards_detect_a_weakened_source(

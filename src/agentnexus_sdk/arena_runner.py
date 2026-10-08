@@ -155,15 +155,19 @@ class DecisionWindow:
     """One model decision's budget on the parent's own clock (agntnexus/agentnexus#223).
 
     Hermes' `run_budget_seconds` advises the model and never interrupts a blocked call, so a bound
-    held inside the child could not stop a child that is blocked. This window is held by the parent,
-    which also holds the signing key: it opens when the child says a decision began, admits a move
-    only while it is open, before its cutoff and while none has been accepted, and at the cutoff
-    expires exactly once and kills the child. The child reports how much of the turn it has used;
-    the cutoff is that turn's bound, not a fresh one.
+    held inside the match process could not stop a match process that is blocked. This window is
+    held by the parent, which also holds the signing key: it opens when the match process says a
+    decision began, admits a move only while it is open, before its cutoff and while none has been
+    accepted, and at the cutoff expires exactly once and kills the match process. The match process
+    reports how much of the turn it has used; the cutoff is that turn's bound, not a fresh one.
 
-    The bound is on admission. A move admitted just before the cutoff is already on its way, bounded
-    by the SDK's own per-phase provider timeouts and by the reserve; killing the child cannot
-    recall it, and it does not claim to.
+    The cutoff is for the model, and it ends when the provider accepts the move. From then on the
+    decision is complete and nothing of the turn is left to spend: the window is re-armed for
+    `SETTLE_SECONDS`, which is only a backstop for a match process that cannot report back that the
+    decision returned (it covers a cleanup that is cut off and a worker that is replaced). A move
+    admitted just before the cutoff is already on its way and is bounded by the SDK's own
+    per-phase provider timeouts; the cutoff waits for its answer, because killing the match process
+    cannot recall the move and would only lose the match to a move the provider has accepted.
     """
 
     def __init__(self, cut_off: Callable[[int], None]) -> None:
@@ -176,6 +180,8 @@ class DecisionWindow:
         self._turn_started = 0.0
         self._expired = False
         self._moved = False
+        self._in_flight = False
+        self._due = False
         self._generation = 0
 
     @property
@@ -196,17 +202,47 @@ class DecisionWindow:
         with self._lock:
             return self._moved
 
-    def mark_moved(self) -> None:
-        """Record an accepted move: a decision makes one."""
+    def begin_move(self) -> bool:
+        """Admit a move if the decision is open, unexpired, before its cutoff and without a move."""
         with self._lock:
-            self._moved = True
+            if (
+                self._cutoff is None
+                or self._expired
+                or self._moved
+                or time.monotonic() >= self._cutoff
+            ):
+                return False
+            self._in_flight = True
+            return True
 
-    def allows_move(self) -> bool:
-        """Return whether a move may go now: open, unexpired and before the cutoff."""
+    def end_move(self, *, accepted: bool) -> None:
+        """Record that the admitted move was answered: accepted, refused or not known to land."""
         with self._lock:
-            return (
-                self._cutoff is not None and not self._expired and time.monotonic() < self._cutoff
+            self._in_flight = False
+            late = self._due or (self._cutoff is not None and time.monotonic() >= self._cutoff)
+            self._due = False
+        if accepted:
+            self.accept()
+        elif late:
+            self.expire()
+
+    def accept(self) -> None:
+        """Record that the provider accepted a move: the cutoff is over and the match settles."""
+        with self._lock:
+            if self._cutoff is None or self._expired or self._moved:
+                return
+            self._moved, self._due = True, False
+            self._generation += 1
+            generation = self._generation
+            earlier, self._timer = self._timer, None
+            self._cutoff = time.monotonic() + hermes_arena.SETTLE_SECONDS
+            self._timer = threading.Timer(
+                hermes_arena.SETTLE_SECONDS, self.expire, kwargs={"generation": generation}
             )
+            self._timer.daemon = True
+            self._timer.start()
+        if earlier is not None:
+            earlier.cancel()
 
     def before_cutoff(self) -> bool:
         """Return whether this turn's cutoff is still ahead, even after the decision has closed."""
@@ -233,6 +269,7 @@ class DecisionWindow:
             now = time.monotonic()
             self._turn_started, self._cutoff = now - used, now + remaining
             self._deadline, self._moved = self._cutoff, False
+            self._in_flight = self._due = False
             if remaining > 0 and not self._expired:
                 self._timer = threading.Timer(
                     remaining, self.expire, kwargs={"generation": generation}
@@ -243,9 +280,15 @@ class DecisionWindow:
         self.expire()
 
     def expire(self, duration_ms: int | None = None, *, generation: int | None = None) -> None:
-        """Cut the decision off once; later calls and a timer past its decision do nothing."""
+        """Cut the decision off once; later calls and a timer past its decision do nothing.
+
+        A timer that fires while a move is in flight waits for the answer instead.
+        """
         with self._lock:
             if self._expired or (generation is not None and generation != self._generation):
+                return
+            if generation is not None and self._in_flight:
+                self._due = True
                 return
             self._expired = True
             elapsed = self._elapsed_ms()
@@ -256,6 +299,7 @@ class DecisionWindow:
         with self._lock:
             self._generation += 1
             self._cutoff = None
+            self._in_flight = self._due = False
             timer, self._timer = self._timer, None
         if timer is not None:
             timer.cancel()
@@ -537,12 +581,12 @@ class ArenaRunner:
                     # this process's clock. Late is refused, never repeated and never replaced.
                     if not window.is_open:
                         raise RunnerRefused("Hermes attempted a move outside a model decision.")
-                    if not window.allows_move():
+                    if window.moved:
+                        raise RunnerRefused("Hermes attempted a second move in one decision.")
+                    if not window.begin_move():
                         diagnostic(intent, "late_move_refused", window.elapsed_ms())
                         window.expire()
                         break
-                    if window.moved:
-                        raise RunnerRefused("Hermes attempted a second move in one decision.")
                 elif operation == "game_state" and uncertain and not window.before_cutoff():
                     # This read would send the staged move after the cutoff: it is that move.
                     diagnostic(intent, "late_move_refused", window.elapsed_ms())
@@ -576,7 +620,10 @@ class ArenaRunner:
                     if result.get("status") in {"ended", "aborted"}:
                         self.terminal = True
                     if operation == "game_move":
-                        window.mark_moved()
+                        window.end_move(accepted=True)
+                    if operation == "game_state" and uncertain:
+                        # The read resent the staged move and it landed: that is the acceptance.
+                        window.accept()
                     if operation in {"game_move", "game_state"}:
                         uncertain = False
                     response = {"result": result}
@@ -586,9 +633,17 @@ class ArenaRunner:
                         f"{operation}_refused",
                         max(0, min(int((time.monotonic() - started) * 1000), 3600000)),
                     )
-                    if operation == "game_move" and error.retryable:
+                    unknown = operation == "game_move" and error.retryable
+                    if operation == "game_move":
+                        window.end_move(accepted=False)
+                    if unknown:
                         uncertain = True
+                    elif error.code.startswith("provider."):
+                        # The provider answered the staged message for good: nothing is staged.
+                        uncertain = False
                     response = {"result": {"error": error.code}}
+                    if unknown:
+                        response["result"]["uncertain"] = True
                 child.stdin.write(json.dumps(response) + "\n")
                 child.stdin.flush()
         except OSError:

@@ -154,7 +154,7 @@ class Match:
             if self.lose_answer and not self.lost:
                 # The provider applied the move; the answer never arrived (the SDK keeps it staged).
                 self.lost = True
-                return {"error": "games.provider_unavailable"}
+                return {"error": "games.provider_unavailable", "uncertain": True}
             return self.view()
         self.reads += 1
         self.clock.now += self.read_seconds
@@ -253,7 +253,7 @@ class FakeWorker:
         self.workers, self.clock = workers, workers.clock
         self.inbox: queue.Queue[Any] = queue.Queue()
         self.out: queue.Queue[Any] = queue.Queue()
-        self.dead = self.ended = False
+        self.dead = self.ended = self.closed = False
         self.served = 0
         self.out.put({"ready": True} if workers.ready else HUNG)
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -343,9 +343,10 @@ class FakeWorker:
         self.inbox.put(KILL)
 
     def close(self) -> None:
-        """End the worker if it still runs and wait for its thread."""
+        """End the worker if it still runs, wait for its thread and say it was reaped."""
         self.kill()
         self.thread.join(timeout=5)
+        self.closed = True
 
 
 class Workers:

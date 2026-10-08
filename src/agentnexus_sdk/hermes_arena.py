@@ -7,8 +7,9 @@ Two processes run from this file (agntnexus/agentnexus#223). The *match* process
 game: it joins, observes, waits for the opponent, keeps each turn's clock and talks to the
 supervising parent. It never imports Hermes. The *decision worker* (`--decision`) is the only
 process that does: it keeps Hermes configured between decisions, makes each decision with a fresh
-agent, and can be ended by a kill at any time. A decision that hangs, a closing request that never
-answers or a cleanup that never ends is therefore the worker's loss and never the match's.
+agent, and can be ended by a kill at any time. Once the provider has accepted a move, a closing
+request that never answers or a cleanup that never ends is therefore the worker's loss and never
+the match's. A decision that has not made its move by its bound is killed and the run stops.
 """
 
 from __future__ import annotations
@@ -96,11 +97,17 @@ DECISION_SECONDS = {
 }
 #: The provider accepting a move ends the decision at once: the worker is told to unwind, so Hermes
 #: never asks the model for closing prose. What is left is Hermes' cleanup, which gets this long
-#: (and never longer than the turn) before the worker is killed and replaced. Cleanup normally
-#: takes milliseconds; measured against the reviewed Hermes: 5 ms.
+#: before the worker is killed and replaced. Without a move it never gets longer than the turn;
+#: after an accepted move the turn's cutoff no longer applies to it. Cleanup normally takes
+#: milliseconds; measured against the reviewed Hermes: 5 ms.
 CLEANUP_SECONDS = 3
-#: A fresh worker must have configured Hermes within this long, before the seat is joined.
-READY_SECONDS = 60
+#: After the provider accepted a move the parent keeps a backstop of this long for the match
+#: process to report the decision returned: the cleanup, a kill, the report. It is not a model
+#: budget; the 45 seconds ended with the move.
+SETTLE_SECONDS = 20
+#: A fresh worker must have configured Hermes within this long, before the seat is joined. Hermes
+#: loads slowly on a small device, and a worker that is not ready is reported, not waited for.
+READY_SECONDS = 180
 
 
 def diagnostic_bound(decisions: int) -> int:
@@ -356,12 +363,20 @@ class Worker:
             self.process.kill()
 
     def close(self) -> None:
-        """End the worker if it still runs, reap it and release its pipes and its reader."""
+        """End the worker if it still runs, reap it and release its pipes and its reader.
+
+        A helper process that outlives the worker can hold the worker's stdout open, and its reader
+        thread then stays in a read. Closing a stream a thread is reading waits for that thread, so
+        it is closed only once the reader is done; otherwise the daemon reader ends with the pipe.
+        """
         self.kill()
         with contextlib.suppress(subprocess.TimeoutExpired):
             self.process.wait(timeout=10)
-        self.reader.join(timeout=5)
-        for stream in (self.process.stdin, self.process.stdout):
+        self.reader.join(timeout=1)
+        streams = [self.process.stdin]
+        if not self.reader.is_alive():
+            streams.append(self.process.stdout)
+        for stream in streams:
             if stream is not None:
                 with contextlib.suppress(OSError, ValueError):
                     stream.close()
@@ -570,6 +585,9 @@ def play(output: Any, input_stream: Any) -> int:
         first. Nothing the worker asks is served at or after the cutoff.
         """
         nonlocal move_calls, turn_started
+        seconds = cutoff_at - time.monotonic()
+        if seconds <= 0:
+            return "expired"
         if not worker.send(
             {
                 "decide": {
@@ -577,11 +595,14 @@ def play(output: Any, input_stream: Any) -> int:
                     "seat": request["seat"],
                     "game": game,
                     "state": state,
-                    "seconds": cutoff_at - time.monotonic(),
+                    "seconds": seconds,
                 }
             }
         ):
             return "exception"
+        # A move whose answer was lost stays staged in the SDK, and the next successful state read
+        # is what delivers it: that read is the acceptance.
+        staged = False
         while True:
             remaining = cutoff_at - time.monotonic()
             if remaining <= 0:
@@ -590,12 +611,15 @@ def play(output: Any, input_stream: Any) -> int:
                 message = worker.get(remaining)
             except queue.Empty:
                 return "expired"
+            except ValueError:
+                return "exception"
             if message is None:
                 return "exception"
             if time.monotonic() >= cutoff_at:  # late message
                 # Whatever the worker says at or after the cutoff counts for nothing: a move is not
                 # forwarded, and a decision that only now returns has outlived its turn.
                 if message.get("operation") == "game_move":
+                    worker.kill()
                     diagnostic(output, "late_move_refused", begun)
                 return "expired"
             if "decision" in message:
@@ -619,19 +643,26 @@ def play(output: Any, input_stream: Any) -> int:
             if time.monotonic() >= cutoff_at:  # late request
                 # A request at or after the cutoff is not forwarded: nothing is sent, nothing is
                 # retried and nothing is made up in its place.
-                if operation == "game_move":
+                if operation == "game_move" or (operation == "game_state" and staged):
+                    worker.kill()
                     diagnostic(output, "late_move_refused", begun)
                 return "expired"
             if operation == "game_move":
                 move_calls += 1
             result = ask(operation, arguments)
-            if operation == "game_move" and isinstance(result, dict) and "error" not in result:
-                # The provider accepted the move: this decision is over. The worker unwinds before
-                # Hermes can ask the model for closing prose, and the next turn begins when the
-                # opponent has answered.
+            answered = result if isinstance(result, dict) else {}
+            landing = operation == "game_move" or (operation == "game_state" and staged)
+            if landing and isinstance(result, dict) and "error" not in result:
+                # The provider accepted the move, or the read that sent the staged move again
+                # landed it: this decision is over. The worker unwinds before Hermes can ask the
+                # model for closing prose, and the next turn begins when the opponent has answered.
                 turn_started = None  # accepted
                 worker.send({"complete": True})  # accepted
                 return "moved"
+            if operation == "game_move" and answered.get("uncertain"):
+                staged = True
+            elif staged and str(answered.get("error", "")).startswith("provider."):
+                staged = False  # the provider answered the staged move for good: nothing is staged
             worker.send({"result": result})
 
     def cleanup(worker: Worker, bound_at: float) -> str:
@@ -644,6 +675,8 @@ def play(output: Any, input_stream: Any) -> int:
                 message = worker.get(wait)
             except queue.Empty:
                 return "expired"
+            except ValueError:
+                return "failed"
             if message is None:
                 return "failed"
             if message.get("decision") in {"closed", "close_failed"}:
@@ -655,9 +688,10 @@ def play(output: Any, input_stream: Any) -> int:
         # Hermes must have configured before the seat is joined, as it always had to.
         try:
             ready = worker.get(READY_SECONDS)
-        except queue.Empty:
+        except (queue.Empty, ValueError):
             ready = None
         if ready != {"ready": True}:
+            diagnostic(output, "runtime_exception")
             return 3
         deadline = time.monotonic() + request["seconds"]
         state = ask("game_join", {})
@@ -718,24 +752,34 @@ def play(output: Any, input_stream: Any) -> int:
             before = move_calls
             outcome = decide(worker, state, role, game, begun, cutoff_at)
             if outcome == "expired":
+                # The worker goes first: the parent ends this process on the report.
+                worker.kill()
                 diagnostic(output, "decision_budget_expired", begun)
                 return 3
             if outcome == "exception":
                 diagnostic(output, "model_call_exception", started)
                 return 3
-            # The decision is over. Its cleanup runs in the worker, which is killed and replaced
-            # if it does not end in time: never the match's loss, and never longer than the turn.
-            ending = cleanup(worker, min(time.monotonic() + CLEANUP_SECONDS, cutoff_at))
+            # The decision is over. Its cleanup runs in the worker. After an accepted move it gets
+            # its own bound, because the turn's cutoff is for the model and ended with the move; a
+            # decision without a move stays inside what is left of the turn. A worker that does not
+            # end in time is killed, the decision is reported returned, and only then is it reaped
+            # and replaced: that is not part of the decision.
+            bound_at = time.monotonic() + CLEANUP_SECONDS
+            if outcome != "moved":
+                bound_at = min(bound_at, cutoff_at)
+            ending = cleanup(worker, bound_at)
             if ending != "closed":
+                worker.kill()
                 diagnostic(
                     output,
                     "decision_cleanup_expired"
                     if ending == "expired"
                     else "decision_cleanup_failed",
                 )
+            diagnostic(output, "model_call_returned", started)
+            if ending != "closed":
                 worker.close()  # cleanup remnant
                 worker = spawn_worker(source)  # replaced
-            diagnostic(output, "model_call_returned", started)
             if outcome == "invalid":
                 diagnostic(output, "model_return_invalid", started)
                 return 3

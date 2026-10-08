@@ -141,7 +141,9 @@ the signing key, still gates every move and still has its own clock.
 | Provider turn deadline, Chess and Connect Four | 60 seconds. The provider keeps this clock and it is not changed here |
 | Local bound for a model decision, up to the provider accepting its move | 45 seconds |
 | Reserve the model may never spend | 15 seconds: a state read up to 4 seconds old, the private pipe, the move's round trip on a healthy provider path and one second of slack. The SDK bounds each provider phase at 10 seconds, so an unreachable provider can take longer; that path is never retried and cannot make a second move |
-| Cleanup of a finished decision | 3 seconds, and never longer than what is left of the turn |
+| Cleanup of a finished decision | 3 seconds. After an accepted move the turn's cutoff no longer applies to it; without a move it never runs past the cutoff |
+| Backstop after an accepted move | 20 seconds for the match process to report the decision returned. It is not a model budget |
+| Start of Hermes in a new worker | 180 seconds before the seat is joined; a worker that is not ready is reported `runtime_exception` |
 
 The bound is per turn, not per run. It starts from a fresh observation in which your seat is to
 move. Waiting for the opponent costs none of it, and your next turn starts a new one. A second
@@ -150,10 +152,13 @@ run's own 3600-second limit still applies on top.
 
 **A move the provider accepts ends its decision.** The worker is told so at once and unwinds the
 conversation before Hermes can ask the model for closing prose; the model is never given the move's
-result and no closing request is made. What is left is Hermes' cleanup, inside the worker. If it
-does not end within its bound, or raises, the worker is killed and replaced and the match goes on:
-the accepted move stands, nothing is repeated, and the readback and the next turn are not delayed by
-more than that bound. A decision is reported `model_call_returned` only after its cleanup is over.
+result and no closing request is made. A move whose answer was lost and that the next state read
+then delivered counts the same. From then on the turn's 45 seconds are over: the parent no longer
+holds that cutoff for the match process, only a 20-second backstop. What is left is Hermes' cleanup,
+inside the worker. If it does not end within its 3 seconds, or raises, the worker is killed and the
+decision is reported `model_call_returned`; ending and replacing the worker comes after that report.
+The match goes on: the accepted move stands, nothing is repeated, and the readback and the next turn
+are not delayed by more than the cleanup bound.
 
 **Before the move is accepted the bound is hard.** A move is admitted only while a decision is open
 and before its cutoff, and only once per decision; a move admitted just before the cutoff is
@@ -166,9 +171,9 @@ no repeat, no substitute, no draw claim, no resignation and no result. The run s
 reported `refused`, and the stopped run is not started again; what the provider does with a seat
 that does not move is its own rule.
 
-Each decision pays for what it needs: a worker that has been replaced has to start Hermes again
-before it can answer, which counts against that turn's 45 seconds (about five seconds on a fast
-desktop; a slow device needs more).
+A replaced worker starts Hermes again while the match waits for the opponent, and that costs no
+budget. If the opponent answers at once, the start counts against the next turn's 45 seconds (about
+five to seven seconds on a fast desktop; a slow device needs more).
 
 `decision_budget_expired` is logged once per stopped decision with the turn time used.
 `late_move_refused` is logged when a move was attempted at or after the cutoff and was not sent.
