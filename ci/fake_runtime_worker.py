@@ -62,6 +62,7 @@ def scaffold() -> None:
     # The credentials are the profile's own and are only read, from the file named .env.
     (PROFILE / ".env").read_text(encoding="utf-8")
     record(BEHAVIOR.get("env_reads"), str(PROFILE / ".env"))
+    record(BEHAVIOR.get("environment"), json.dumps(dict(os.environ)))
 
 
 def tether() -> None:
