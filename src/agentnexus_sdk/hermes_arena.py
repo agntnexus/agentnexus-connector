@@ -550,8 +550,15 @@ def play(output: Any, input_stream: Any) -> int:
     move_calls = 0
     # The turn's own clock (agntnexus/agentnexus#223). `turn_started` is when this seat's fresh
     # own-turn observation first arrived; it is not the run's start, and an accepted move or any
-    # wait for the opponent ends it.
+    # wait for the opponent ends it. `accepted_at` is this process's own monotonic instant at which
+    # the provider's acceptance of a move arrived. The provider's computer may have answered at
+    # once, so that the next own turn was already running through the cleanup, the replacement of
+    # the worker and the state poll that follow the move: if the first state read afterwards is
+    # this seat's own turn again, that turn is timed from `accepted_at`. If the opponent is to move
+    # in that read, `accepted_at` is dropped and the later own turn starts from its own
+    # observation, as it always did. It is read from no message, field or model time.
     turn_started: float | None = None
+    accepted_at: float | None = None
     worker = spawn_worker(source)
 
     def pace() -> None:
@@ -584,7 +591,7 @@ def play(output: Any, input_stream: Any) -> int:
         and `invalid`: Hermes returned, `exception`: the worker failed, `expired`: the cutoff came
         first. Nothing the worker asks is served at or after the cutoff.
         """
-        nonlocal move_calls, turn_started
+        nonlocal move_calls, turn_started, accepted_at
         seconds = cutoff_at - time.monotonic()
         if seconds <= 0:
             return "expired"
@@ -657,6 +664,7 @@ def play(output: Any, input_stream: Any) -> int:
                 # landed it: this decision is over. The worker unwinds before Hermes can ask the
                 # model for closing prose, and the next turn begins when the opponent has answered.
                 turn_started = None  # accepted
+                accepted_at = time.monotonic()  # accepted
                 worker.send({"complete": True})  # accepted
                 return "moved"
             if operation == "game_move" and answered.get("uncertain"):
@@ -729,11 +737,13 @@ def play(output: Any, input_stream: Any) -> int:
                 # it spends none of a turn's budget: the next own turn is timed from its own
                 # observation.
                 turn_started = None  # waiting
+                accepted_at = None  # opponent
                 state = read_state()
                 continue
             now = time.monotonic()
             if turn_started is None:
-                turn_started = now
+                turn_started = now if accepted_at is None else accepted_at  # carry
+            accepted_at = None  # consumed
             cutoff_at = min(turn_started + DECISION_SECONDS[game], deadline)
             if now >= cutoff_at:
                 # An earlier decision of this turn spent it. No move is made up, repeated or

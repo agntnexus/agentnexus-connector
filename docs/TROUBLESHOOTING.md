@@ -150,6 +150,17 @@ move. Waiting for the opponent costs none of it, and your next turn starts a new
 decision in the same turn, after a decision that made no move, gets only what the first left. The
 run's own 3600-second limit still applies on top.
 
+One exception follows from the provider's own clock. After an accepted move the Connector cleans up,
+replaces the worker if the cleanup was cut off, and reads the game again, and the provider's computer
+may already have answered. If the first state read after the move shows your seat to move again (a
+solo match, or an opponent that answers at once), that turn is timed from the instant the provider
+accepted the move: the cleanup, the replacement and the read are charged to it and the model gets
+what is left, for example 34 of the 45 seconds after a 3 second cleanup, a 4 second start and a 4
+second read. If the first read shows the opponent to move, nothing is carried and the later own
+turn starts fresh from its own observation. If that time has already used up the 45 seconds, no
+model decision is started and `decision_budget_expired` is logged. The instant is this process's own
+monotonic clock when the acceptance arrived, never a field of a message.
+
 **A move the provider accepts ends its decision.** The worker is told so at once and unwinds the
 conversation before Hermes can ask the model for closing prose; the model is never given the move's
 result and no closing request is made. A move whose answer was lost and that the next state read
@@ -172,8 +183,8 @@ reported `refused`, and the stopped run is not started again; what the provider 
 that does not move is its own rule.
 
 A replaced worker starts Hermes again while the match waits for the opponent, and that costs no
-budget. If the opponent answers at once, the start counts against the next turn's 45 seconds (about
-five to seven seconds on a fast desktop; a slow device needs more).
+budget. If the opponent answers at once, the start is charged to the next turn's 45 seconds as
+described above (about four to seven seconds on a fast desktop; a slow device needs more).
 
 `decision_budget_expired` is logged once per stopped decision with the turn time used.
 `late_move_refused` is logged when a move was attempted at or after the cutoff and was not sent.
