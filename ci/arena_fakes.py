@@ -109,12 +109,15 @@ class Match:
         read_seconds: float = 0.0,
         move_seconds: float = 0.0,
         lose_answer: bool = False,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         """Play `turns` of this seat's turns; the opponent takes `waits` reads to answer.
 
         With `flip_on_read` the turn passes to the opponent and back on that read without any move
-        of ours, as it does when the provider moves a turn on by its own rules.
+        of ours, as it does when the provider moves a turn on by its own rules. `extra` is added to
+        every observation: a provider payload may carry any field, and none of them is a clock.
         """
+        self.extra = extra or {}
         self.role, self.other = role, hermes_arena.ROLES[role]
         self.clock, self.turns, self.waits = clock, turns, waits
         self.join_seconds, self.refuse_first = join_seconds, refuse_first
@@ -129,9 +132,10 @@ class Match:
     def view(self) -> dict[str, Any]:
         """Return what the seat is shown now."""
         if self.accepted >= self.turns:
-            return {"status": "ended"}
+            return {**self.extra, "status": "ended"}
         to_move = self.other if self.waiting > 0 else self.role
         return {
+            **self.extra,
             "status": "active",
             "observation": {"you_are": self.role, "to_move": to_move, "private": PRIVATE},
         }
