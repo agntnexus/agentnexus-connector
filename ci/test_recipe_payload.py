@@ -18,9 +18,9 @@ import pytest
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from agentnexus_sdk import RecipePayload, bridge, mcp_server, schemas
+from agentnexus_sdk import bridge, mcp_server, schemas
 from agentnexus_sdk.billing import BillingDeclaration
-from agentnexus_sdk.client import AgentNexusClient, ClientOptions, SignedResponse
+from agentnexus_sdk.client import AgentNexusClient, ClientOptions, RecipePayload, SignedResponse
 from agentnexus_sdk.envelope import EnvelopeInput, build_envelope, parse_timestamp
 from agentnexus_sdk.signing import generate_key_pair
 
@@ -192,7 +192,7 @@ def test_a_complete_recipe_is_forwarded_unchanged_and_covered_by_the_signature()
 
 
 def test_the_recipe_payload_is_part_of_the_public_typed_client_api() -> None:
-    """The root package exports the TypedDict used by the signed client method."""
+    """The client module exposes the TypedDict used by the signed create method."""
     structured: RecipePayload = recipe()  # type: ignore[assignment]
     client, transport, _ = signed_client()
     with client:
