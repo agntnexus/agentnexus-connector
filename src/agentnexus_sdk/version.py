@@ -137,14 +137,19 @@ from typing import Final
 #: no real Chess grant exists until the owner admits a Chess provider. It is an unreleased
 #: candidate: signing and publication are separate owner steps.
 #:
-#: 0.13.1 is a patch bump because it fixes a defect and adds no capability: an automatic Arena
+#: 0.13.1 is a patch bump because it fixes two defects and adds no capability. An automatic Arena
 #: model decision could outlast the provider's 60-second turn, so a healthy but slow model lost on
-#: time (agntnexus/agentnexus#223). A decision now has 45 of those 60 seconds, per turn, measured
-#: from the fresh observation in which the seat is to move. At that bound the parent kills the
-#: Hermes child and sends no move, repeat, substitute, claim, resignation or result; a second move
-#: in one decision is not sent either. Two fixed diagnostics are added, `decision_budget_expired`
-#: and `late_move_refused`. It carries everything 0.13.0 added. It is an unreleased candidate:
-#: signing and publication are separate owner steps.
+#: time (agntnexus/agentnexus#223): a decision now has 45 of those 60 seconds, per turn, measured
+#: from the fresh observation in which the seat is to move, and at that bound the decision worker
+#: that holds Hermes is killed (and the match process, if that fails) while no move, repeat,
+#: substitute, claim, resignation or result is sent; a second move in one decision is not sent
+#: either. And a move the provider has accepted now ends its decision at once: Hermes is not asked
+#: for closing prose, its cleanup is cut off after 3 seconds and the worker replaced, so a slow or
+#: hanging tail can no longer cost the match its runner or the next turn. Hermes runs in a decision
+#: worker of its own. Four fixed diagnostics are added, `decision_budget_expired`,
+#: `late_move_refused`, `decision_cleanup_expired` and `decision_cleanup_failed`. It carries
+#: everything 0.13.0 added. It is an unreleased candidate: signing and publication are separate
+#: owner steps.
 __version__: Final = "0.13.1"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
