@@ -120,13 +120,14 @@ Before sharing a record, replace its match and intent IDs with `<match-id>` and 
 retain only the relevant fixed events and timings. Never attach the raw journal or enable raw stderr
 to recover details that the closed diagnostic deliberately excludes.
 
-## Arena turn budget (unreleased source, version 1)
+## Arena turn budget (unreleased 0.13.1 source candidate, version 1)
 
 This source is not part of Connector 0.13.0 and has not been signed, published or installed by this
-change. It fixes two defects in the automatic runner. A model decision could outlast the provider's
-turn deadline, so a healthy but slow model lost on time. And after a move the provider had already
-accepted, Hermes asks the model once more for closing prose; a slow or hanging closing request, or a
-hanging cleanup, could cost the match its runner and with it the next turn.
+change; it is the unsigned 0.13.1 candidate. It fixes two defects in the automatic runner. A model
+decision could outlast the provider's turn deadline, so a healthy but slow model lost on time. And
+after a move the provider had already accepted, Hermes asks the model once more for closing prose; a
+slow or hanging closing request, or a hanging cleanup, could cost the match its runner and with it
+the next turn.
 
 Hermes' own `run_budget_seconds` only advises the model and never interrupts a call that is
 blocked, so the bound is kept from outside the model, and Hermes now lives in a process of its own.
