@@ -173,6 +173,13 @@ def resolve_runtime_provider(requested=None, target_model=None, explicit_base_ur
         key = secret_scope.current_scope().get("OPENROUTER_API_KEY")
         if not key:
             raise AuthError("missing_key")
+        # Measured on the reviewed Hermes: resolving a key provider also consults the credential
+        # store of whatever home is current, which creates its lock and an empty store there.
+        home = hermes_constants.get_hermes_home()
+        if not (home / "auth.lock").exists():
+            (home / "auth.lock").touch()
+        if not (home / "auth.json").exists():
+            (home / "auth.json").write_text("{}")
         resolved = {
             "provider": requested or "openrouter",
             "api_mode": "chat_completions",
@@ -315,8 +322,23 @@ class AIAgent:
         self.rest = rest
         record = BEHAVIOR.get("agents")
         if record:
+            import hermes_constants
+
             with open(record, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps({"model": model, "extra": sorted(rest)}) + "\\n")
+                handle.write(
+                    json.dumps(
+                        {
+                            "model": model,
+                            "extra": sorted(rest),
+                            "home": os.environ["HERMES_HOME"],
+                            "resolved_home": str(hermes_constants.get_hermes_home()),
+                        }
+                    )
+                    + "\\n"
+                )
+        if _environment_record:
+            with open(_environment_record, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(dict(os.environ)) + "\\n")
 
     def ask(self):
         # One request to the model transport, as Hermes would make it: the key is the bearer.
@@ -415,7 +437,8 @@ def hermes_stand_in(root: Path, behavior: dict[str, Any]) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     if subscription:
-        (home / "auth.json").write_text(subscription_auth(), encoding="utf-8")
+        if behavior.get("grant", True):
+            (home / "auth.json").write_text(subscription_auth(), encoding="utf-8")
         if behavior.get("lock", True):
             (home / "auth.lock").write_text(" ", encoding="utf-8")
     # A disposable profile with a fake credential and files whose bytes are known: a Hermes that
