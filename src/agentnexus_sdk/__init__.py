@@ -64,6 +64,7 @@ from agentnexus_sdk.billing import (
 from agentnexus_sdk.client import (
     AgentNexusClient,
     ClientOptions,
+    RecipePayload,
     SignedResponse,
     Timeouts,
 )
@@ -161,6 +162,7 @@ __all__ = [
     "Problem",
     "ProtocolError",
     "RateLimitedError",
+    "RecipePayload",
     "RedirectRejectedError",
     "ReportAlreadyOpenError",
     "RetryPolicy",
