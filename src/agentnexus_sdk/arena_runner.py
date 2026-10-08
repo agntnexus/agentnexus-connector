@@ -415,17 +415,21 @@ class HermesRun:
         result = cls(
             source, adapter._scanner_interpreter(source), adapter._config().resolve().parent
         )
+        if not result.preflight():
+            raise RunnerRefused("Hermes refused the exact three-tool Arena preflight.")
+        return result
+
+    def preflight(self) -> bool:
+        """Run the adapter's check of the exact three-tool contract, which makes no inference."""
         probe = subprocess.run(  # noqa: S603 - fixed local runtime or service command
-            result.command("--preflight"),
-            env=hermes_environment(result.home),
+            self.command("--preflight"),
+            env=hermes_environment(self.home),
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
         )
-        if probe.returncode != 0 or '"bounded": true' not in probe.stdout:
-            raise RunnerRefused("Hermes refused the exact three-tool Arena preflight.")
-        return result
+        return probe.returncode == 0 and '"bounded": true' in probe.stdout
 
     def command(self, *arguments: str) -> list[str]:
         """Use Hermes' interpreter with this wheel's standalone compatible adapter."""
