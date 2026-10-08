@@ -25,6 +25,7 @@ from typing import Any
 
 from agentnexus_sdk import bridge, games, hermes_arena
 from agentnexus_sdk.errors import AgentNexusError
+from agentnexus_sdk.mcp_server import MODEL_QUERY_TIMEOUT_SECONDS
 from agentnexus_sdk.profiles import (
     ProfileRecord,
     _is_reparse_point,
@@ -38,6 +39,10 @@ STATUSES = frozenset(
     {"offline", "queued", "starting", "playing", "completed", "refused", "expired", "cancelled"}
 )
 HERMES_REVISION = "287c56e95afe5c528beacb7ca8f7ef0ad6216f2a"
+#: How many recent start intents keep the declaration their claim was made with. A claim is retried
+#: for the one intent at the head of the queue, so a handful is more than a run needs, and the
+#: memory cannot grow with the life of the service.
+DECLARATIONS_KEPT = 8
 DIAGNOSTICS = hermes_arena.DIAGNOSTICS | frozenset(
     {
         "game_join_started",
@@ -481,10 +486,26 @@ def profile_storage(paths: Any) -> None:
             raise RunnerRefused("Arena storage must remain inside this profile without links.")
 
 
+def bounded_runner(command: list[str], **keywords: Any) -> subprocess.CompletedProcess[str]:
+    """Run the runtime's own command, but never for longer than the poll loop can afford.
+
+    `model_status` allows itself 60 seconds, and the API treats this profile as offline after 45
+    without a heartbeat. The question about the declared model is held to the same five seconds the
+    MCP server holds it to, and a runtime that does not answer in time is simply not heard.
+    """
+    keywords["timeout"] = min(
+        float(keywords.get("timeout") or MODEL_QUERY_TIMEOUT_SECONDS), MODEL_QUERY_TIMEOUT_SECONDS
+    )
+    return subprocess.run(command, **keywords)  # noqa: S603 - argv is the adapter's own
+
+
 class ArenaRunner:
     """Poll as one signed identity; supervise one bounded child through the whole game."""
 
     scratch: Path | None = None  # the running child's throwaway Hermes home
+    #: What each recent intent's claim declared, `None` where it declared nothing. Created on first
+    #: use, one per runner: a dict here would be shared by every instance.
+    declared_models: dict[str, str | None] | None = None
 
     def __init__(self, paths: Any, providers: str, runtime: HermesRun) -> None:
         """Read only this profile's state and key; provider origins are local configuration."""
@@ -704,9 +725,50 @@ class ArenaRunner:
         finally:
             diagnostic(intent, "decision_budget_expired", duration_ms)
 
+    def _declared_model(self, intent: StartIntent) -> str | None:
+        """Return the model this profile's runtime declares for a claim, asked of it once.
+
+        The same optional self-declaration a forum contribution carries (RMD-1, D-174), through the
+        same chain and nothing else: the runtime adapter's own `model_status()`, whose `value` is
+        the identifier with the provider annotation already removed, taken only for a profile that
+        has a model and only if `bridge.is_declared_model_valid` accepts it. It is what the runtime
+        says is configured: not detected, not verified, and no statement about which model makes a
+        move. No configuration, credential or key file of the profile is opened here.
+
+        It is settled in the parent, before the claim and before any child exists, so nothing the
+        match process or its model says can reach it. It is frozen per intent: a claim retried in a
+        later tick sends what it first sent and the runtime is not asked again, whatever the first
+        answer was. Any failure at all, `RuntimeIntegrationError` included, means no declaration and
+        is neither logged nor raised: optional metadata must never cost a seat its claim.
+        """
+        if self.declared_models is None:
+            self.declared_models = {}
+        remembered = self.declared_models
+        if intent.intent_id not in remembered:
+            declared: str | None = None
+            try:
+                status = HermesAdapter(
+                    runner=bounded_runner, context=self.paths.runtime_context()
+                ).model_status()
+                if status.configured and status.value is not None:
+                    value = status.value.strip()
+                    declared = value if bridge.is_declared_model_valid(value) else None
+            except Exception:  # optional metadata: whatever fails, the claim goes without it
+                declared = None
+            while len(remembered) >= DECLARATIONS_KEPT:
+                del remembered[next(iter(remembered))]
+            remembered[intent.intent_id] = declared
+        return remembered[intent.intent_id]
+
     def _launch(self, intent: StartIntent) -> None:
         """Claim, reserve durably, then spawn; restart uncertainty never launches twice."""
-        claimed = self._post(f"/{intent.intent_id}/claim", {"runner_id": self.journal.runner_id})
+        # The declaration is settled here, in the parent, before the claim and before any child
+        # exists (D-174). It is left out of the body, never sent as null, when there is none.
+        claim: dict[str, Any] = {"runner_id": self.journal.runner_id}
+        declared = self._declared_model(intent)
+        if declared is not None:
+            claim["declared_model"] = declared
+        claimed = self._post(f"/{intent.intent_id}/claim", claim)
         owned = StartIntent.parse(claimed, agent_id=self.config.agent_id)
         if owned.claimed_by != self.journal.runner_id:
             raise RunnerRefused("Another runner holds this intent.")

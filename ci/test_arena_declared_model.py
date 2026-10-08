@@ -220,13 +220,25 @@ class Scene:
     # -- the stand-ins ---------------------------------------------------------------------------
 
     @contextlib.contextmanager
-    def world(self) -> Iterator[None]:
-        """Put the stand-ins where the runner reaches out, for the length of one call."""
-        temporary = self.tmp_path / "temporary"
-        temporary.mkdir(parents=True, exist_ok=True)
+    def runtime(self) -> Iterator[None]:
+        """Put the stand-in runtime where the runner asks about the model, for one call.
+
+        Anything that asks again, whenever it does, is counted and answered here rather than
+        reaching a real `hermes`.
+        """
         with self.monkeypatch.context() as patch:
             patch.setattr(arena_runner, "HermesAdapter", self.build)
             patch.setattr(arena_runner.subprocess, "run", self.hermes.run)
+            yield
+
+    @contextlib.contextmanager
+    def world(self) -> Iterator[None]:
+        """Put the stand-ins where a launch reaches out, for the length of one call."""
+        temporary = self.tmp_path / "temporary"
+        temporary.mkdir(parents=True, exist_ok=True)
+        with self.runtime(), self.monkeypatch.context() as patch:
+            # Not while a match is served: a decision's timer is a `threading.Timer`, which builds
+            # itself on the module's `Thread`.
             patch.setattr(arena_runner.subprocess, "Popen", self.spawn)
             patch.setattr(arena_runner.threading, "Thread", self.thread)
             patch.setattr(tempfile, "tempdir", str(temporary))
@@ -304,7 +316,7 @@ class Scene:
 
     def declare(self, owned: arena_runner.StartIntent) -> str | None:
         """Ask the real resolver for one intent's declaration, without making any claim."""
-        with self.world():
+        with self.runtime():
             return self.runner._declared_model(owned)
 
     def serve(self, script: str) -> list[dict[str, Any]]:
@@ -317,7 +329,8 @@ class Scene:
 
         self.monkeypatch.setattr(arena_runner.bridge, "_run_game_command", game)
         child = SimpleNamespace(stdout=io.StringIO(script), stdin=io.StringIO())
-        self.runner._serve(child, self.runner.active)
+        with self.runtime():
+            self.runner._serve(child, self.runner.active)
         return forwarded
 
     @property
@@ -394,6 +407,14 @@ def test_the_claim_carries_the_model_the_runtime_declares(
     assert bridge.is_declared_model_valid(declared)
 
 
+def test_the_declaration_is_sent_trimmed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The value that was checked is the value that is sent: no whitespace around it."""
+    padded = ModelStatus(configured=True, known=True, detail=ROW, value="  vendor/padded-model \t")
+    scene = Scene(monkeypatch, tmp_path, adapter=lambda **keywords: Answering(padded))
+    scene.launch()
+    assert scene.claims == [{"runner_id": RUNNER_ID, "declared_model": "vendor/padded-model"}]
+
+
 @pytest.mark.parametrize("case", UNUSABLE)
 def test_the_field_is_left_out_when_the_runtime_names_no_usable_model(
     monkeypatch: pytest.MonkeyPatch,
@@ -438,6 +459,22 @@ def test_the_runtime_is_given_at_most_five_seconds_to_answer(
     assert all(0 < call["timeout"] <= 5.0 for call in scene.hermes.calls)
 
 
+def test_the_bounded_runner_holds_every_call_to_five_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A longer deadline is cut to five seconds, a shorter one is kept, and none is bounded too."""
+    seen: list[float] = []
+
+    def run(command: list[str], **keywords: Any) -> subprocess.CompletedProcess[str]:
+        seen.append(keywords["timeout"])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(arena_runner.subprocess, "run", run)
+    for asked in (60.0, 5.0, 2.0, None):
+        arena_runner.bounded_runner([HERMES], **({} if asked is None else {"timeout": asked}))
+    assert seen == [5.0, 5.0, 2.0, 5.0]
+
+
 def test_a_claim_retried_in_a_later_tick_sends_the_same_declaration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -453,6 +490,8 @@ def test_a_claim_retried_in_a_later_tick_sends_the_same_declaration(
     assert scene.claims == [{"runner_id": RUNNER_ID, "declared_model": "first/model-a"}] * 3
     assert scene.asks == 1 and len(hermes.calls) == 1
     assert scene.events.count("status") == 1
+    polls = [body for suffix, body in scene.posts if suffix == "/poll"]
+    assert polls == [{"runner_id": RUNNER_ID, "availability": "online"}] * 3
 
 
 def test_an_absent_declaration_is_frozen_for_the_intent_as_well(
@@ -518,8 +557,10 @@ def test_the_claim_is_made_before_the_child_exists_and_the_child_is_told_nothing
     start = json.loads(child.stdin.getvalue())
     assert set(start) == {"match_id", "seat", "seconds"}
     reachable = {"arguments": str(arguments), "keywords": str(keywords), "start": str(start)}
-    leaked = [name for name, text in reachable.items() if MODEL in text or "declared" in text]
+    leaked = [name for name, text in reachable.items() if MODEL in text]
     assert leaked == [], "the child was told the declaration"
+    named = [key for key in keywords["env"] if "MODEL" in key.upper()]
+    assert named == [], "the child's environment names a model"
     assert scene.claims == [{"runner_id": RUNNER_ID, "declared_model": MODEL}]
 
 
@@ -601,14 +642,14 @@ def test_no_file_is_opened_to_find_the_model(
     ):
         directory.mkdir(parents=True)
         for name in names:
-            (directory / name).write_text("model: sentinel/from-a-file\n", encoding="utf-8")
+            (directory / name).write_text("model: only-in-a-file/never-read-1\n", encoding="utf-8")
     (root / "keys").mkdir()
     (root / "keys" / "agent.pem").write_text("synthetic-never-read\n", encoding="utf-8")
     opened = watched(monkeypatch, root, home)
     scene.launch()
     assert opened == []
     assert scene.claims == [{"runner_id": RUNNER_ID, "declared_model": MODEL}]
-    assert "sentinel" not in json.dumps(scene.posts)
+    assert "only-in-a-file" not in json.dumps(scene.posts)
 
 
 def test_the_declaration_reaches_no_log_and_adds_no_diagnostic(
