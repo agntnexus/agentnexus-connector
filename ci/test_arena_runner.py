@@ -75,8 +75,12 @@ def test_hermes_environment_inherits_no_other_profiles_credentials(
     monkeypatch.setenv("AGENTNEXUS_AGENT_ID", str(uuid.uuid4()))
     own = tmp_path / "own"
     own.mkdir()
-    environment = arena_runner.hermes_environment(own)
-    assert environment["HERMES_HOME"] == str(own)
+    scratch = tmp_path / "scratch"
+    environment = arena_runner.hermes_environment(own, scratch)
+    # Hermes fills its home with state of its own; that home is a throwaway, never the profile,
+    # which the adapter is only told about so that it can read two files of it.
+    assert environment["HERMES_HOME"] == str(scratch)
+    assert environment["AGENTNEXUS_ARENA_PROFILE"] == str(own)
     assert environment["HERMES_SAFE_MODE"] == "1"
     assert environment["HERMES_IGNORE_RULES"] == "1"
     assert "OPENROUTER_API_KEY" not in environment

@@ -14,12 +14,14 @@ checkout; the pull request reports it.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -30,6 +32,7 @@ from typing import Any
 
 import pytest
 from arena_fakes import (
+    FLAGS,
     MOVES,
     PRIVATE,
     intent,
@@ -153,6 +156,34 @@ if BEHAVIOR.get("tether"):
         os._exit(1)
 
     threading.Thread(target=watch, daemon=True).start()
+HOME = Path(os.environ["HERMES_HOME"])
+
+
+def scaffold():
+    # What the real Hermes 0.21.3 was measured to do the moment it starts: fill its own home with
+    # directories, logs, caches, a state database and a backup of the config it finds there. A file
+    # that already exists is left alone, so the canaries of a profile stay as they are.
+    for name in (
+        "audio_cache", "backups/config", "cache", "cron", "hooks", "image_cache", "logs/curator",
+        "memories", "pairing", "sessions", "skills",
+    ):
+        (HOME / name).mkdir(parents=True, exist_ok=True)
+    for name in ("SOUL.md", "state.db", "cache/schema_columns.json"):
+        if not (HOME / name).exists():
+            (HOME / name).write_bytes(b"stand-in\\n")
+    for name in ("logs/agent.log", "logs/errors.log"):
+        with open(HOME / name, "ab") as handle:
+            handle.write(b"stand-in\\n")
+    config = HOME / "config.yaml"
+    if config.exists():
+        (HOME / "backups/config/config.yaml.good").write_bytes(config.read_bytes())
+    record = BEHAVIOR.get("record")
+    if record:
+        with open(record, "a", encoding="utf-8") as handle:
+            handle.write(str(HOME) + "\\n")
+
+
+scaffold()
 get_tool_definitions = model_tools.get_tool_definitions
 handle_function_call = model_tools.handle_function_call
 
@@ -214,7 +245,56 @@ def hermes_stand_in(root: Path, behavior: dict[str, Any]) -> tuple[Path, Path]:
     (home / "config.yaml").write_text(
         "model:\n  provider: openrouter\n  default: synthetic-model\n", encoding="utf-8"
     )
+    # A disposable profile with a fake credential and files whose bytes are known: a Hermes that
+    # reads or rewrites any of them is seen by the snapshot.
+    for name, text in {
+        ".env": "OPENROUTER_API_KEY=synthetic-disposable-key\n",
+        "SOUL.md": "canary soul, never rewritten\n",
+        "memories/MEMORY.md": "canary memory\n",
+        "memories/USER.md": "canary user\n",
+    }.items():
+        canary = home / name
+        canary.parent.mkdir(parents=True, exist_ok=True)
+        canary.write_text(text, encoding="utf-8")
     return source, home
+
+
+def snapshot(root: Path) -> dict[str, tuple[str, int, str, int]]:
+    """Return path, type, size, SHA-256 and mtime of everything below root, recursively."""
+    result: dict[str, tuple[str, int, str, int]] = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            result[relative] = ("symlink", 0, "", 0)
+        elif path.is_dir():
+            result[relative] = ("dir", 0, "", 0)
+        else:
+            data = path.read_bytes()
+            result[relative] = (
+                "file",
+                len(data),
+                hashlib.sha256(data).hexdigest(),
+                path.stat().st_mtime_ns,
+            )
+    return result
+
+
+def profile_changes(
+    before: dict[str, tuple[str, int, str, int]], after: dict[str, tuple[str, int, str, int]]
+) -> list[str]:
+    """Say what differs between two snapshots: added, removed and changed paths."""
+    return (
+        [f"added {name}" for name in sorted(set(after) - set(before))]
+        + [f"removed {name}" for name in sorted(set(before) - set(after))]
+        + [f"changed {n}" for n in sorted(before.keys() & after.keys()) if before[n] != after[n]]
+    )
+
+
+def hermes_homes(record: Path) -> list[str]:
+    """Return the Hermes homes the stand-in filled, as it recorded them."""
+    if not record.exists():
+        return []
+    return [line for line in record.read_text(encoding="utf-8").splitlines() if line]
 
 
 class Tethers:
@@ -271,6 +351,10 @@ class Process:
     seconds: float
     leftovers: list[str]
     tethers: Tethers
+    profile: Path
+    profile_before: dict[str, tuple[str, int, str, int]]
+    profile_after: dict[str, tuple[str, int, str, int]]
+    homes: list[str]
 
     @property
     def events(self) -> list[str]:
@@ -298,13 +382,21 @@ def run_process(
 ) -> Process:
     """Start the real adapter as a real child of a real supervisor and let it play one turn."""
     tethers = Tethers()
-    source, home = hermes_stand_in(tmp_path, {**behavior, "tether": tethers.port})
+    # Whatever the run creates in a temporary directory is created here, where it can be counted.
+    scratch_parent = tmp_path / "scratch-parent"
+    scratch_parent.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch_parent))
+    homes_record = tmp_path / "hermes-homes.stand-in-record"
+    source, home = hermes_stand_in(
+        tmp_path, {**behavior, "tether": tethers.port, "record": str(homes_record)}
+    )
     arena_file = arena or Path(hermes_arena.__file__)
     launcher = tmp_path / "launcher.py"
     launcher.write_text(LAUNCHER, encoding="utf-8")
     root = tmp_path / "run"
     root.mkdir()
     before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    profile_before = snapshot(home)
     monkeypatch.setattr(
         hermes_arena, "DECISION_SECONDS", {"chess": bound, "connect-four": bound}, raising=False
     )
@@ -371,15 +463,45 @@ def run_process(
     leftovers = [
         name
         for name in sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
-        if name not in before and "__pycache__" not in name
+        if name not in before
+        and "__pycache__" not in name
+        and not name.endswith(".stand-in-record")
     ]
     return Process(
-        runner, child, forwarded, commands, log, raw, reports, seconds, leftovers, tethers
+        runner,
+        child,
+        forwarded,
+        commands,
+        log,
+        raw,
+        reports,
+        seconds,
+        leftovers,
+        tethers,
+        home,
+        profile_before,
+        snapshot(home),
+        hermes_homes(homes_record),
     )
+
+
+def assert_profile_untouched(run: Process) -> None:
+    """Require the disposable profile byte for byte as it was, and Hermes' own home gone.
+
+    The stand-in fills the home it is given the way the real Hermes was measured to. If that home
+    were the profile, the snapshot would differ; and if it is a scratch directory, none may remain.
+    """
+    changes = profile_changes(run.profile_before, run.profile_after)
+    assert changes == [], f"the run changed the Hermes profile: {changes}"
+    assert run.homes, "the stand-in never filled a Hermes home, so nothing was proven"
+    for home in run.homes:
+        assert Path(home) != run.profile, "Hermes ran in the profile"
+        assert not Path(home).exists(), "a temporary Hermes home was left behind"
 
 
 def assert_no_residue(run: Process) -> None:
     """Require the child dead and reaped, its pipes shut and no thread of ours lingering."""
+    assert_profile_untouched(run)
     assert run.child.poll() is not None, "the child process is still running"
     assert run.child.stdin.closed and run.child.stdout.closed
     assert run.runner.worker is None and run.runner.child is None
@@ -549,6 +671,61 @@ def test_a_move_accepted_near_the_cutoff_is_not_lost_to_a_cleanup_that_runs_past
     assert run.events.count("decision_cleanup_expired") == 1
     assert run.runner.terminal and run.runner.playing
     assert_no_residue(run)
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_two_fast_turns_leave_the_profile_exactly_as_it_was(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    role: str,
+) -> None:
+    """Two ordinary turns: the disposable profile has the same paths, types and hashes after."""
+    behavior = {"mode": "fast", "arguments": MOVES[role]}
+    run = run_process(monkeypatch, capsys, tmp_path, role, behavior, bound=10.0, turns=2)
+    assert moves_of(run, role) == [MOVES[role], MOVES[role]]
+    assert run.events.count("model_call_returned") == 2
+    assert_no_residue(run)
+    assert "synthetic-private" not in run.raw and "synthetic-disposable" not in run.raw
+
+
+def test_the_preflight_leaves_the_profile_exactly_as_it_was(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Enabling a profile imports Hermes too: that must not fill the profile either."""
+    scratch_parent = tmp_path / "scratch-parent"
+    scratch_parent.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch_parent))
+    record = tmp_path / "hermes-homes.stand-in-record"
+    source, home = hermes_stand_in(tmp_path, {"mode": "fast", "record": str(record)})
+    before = snapshot(home)
+    run = arena_runner.HermesRun(source, Path(sys.executable), home)
+    assert run.preflight()
+    assert profile_changes(before, snapshot(home)) == []
+    homes = hermes_homes(record)
+    assert homes, "the stand-in never filled a Hermes home, so nothing was proven"
+    assert all(Path(item) != home and not Path(item).exists() for item in homes)
+    assert list(scratch_parent.iterdir()) == []
+
+
+@pytest.mark.parametrize("profile", [None, "same", "unset-home"])
+def test_the_adapter_refuses_to_run_hermes_in_the_profile_it_reads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, profile: str | None
+) -> None:
+    """Hermes' home must be its own: the same directory, or a missing one, is refused."""
+    for name in FLAGS:
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    if profile == "same":
+        monkeypatch.setenv("AGENTNEXUS_ARENA_PROFILE", str(tmp_path))
+    else:
+        monkeypatch.delenv("AGENTNEXUS_ARENA_PROFILE", raising=False)
+    if profile == "unset-home":
+        monkeypatch.setenv("AGENTNEXUS_ARENA_PROFILE", str(tmp_path / "profile"))
+        monkeypatch.delenv("HERMES_HOME")
+    monkeypatch.setattr(sys, "argv", ["hermes_arena.py", str(tmp_path), "--preflight"])
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    assert hermes_arena.main() == 2
 
 
 HELPER = """\
