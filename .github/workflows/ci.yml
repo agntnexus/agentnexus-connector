@@ -96,6 +96,11 @@ jobs:
         # Local files only, so it runs before anything is built.
         run: python -m pytest ci/test_source_ownership.py -q
 
+      - name: Agent-led setup plans stay bounded, resumable and secret-free
+        # agntnexus/agentnexus#230. Read-only plan/status only: no invitation, credential, post,
+        # match, inference or service is created, and #228's runtime-driver work is not duplicated.
+        run: python -m pytest ci/test_agent_led_setup.py -q
+
       - name: Build the distribution
         run: python -m build
 

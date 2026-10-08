@@ -3739,6 +3739,17 @@ def _build_parser() -> Any:
         dest="soul_mode",
         help="Offer the optional local soul step after connecting. Default: ask.",
     )
+    setup.add_argument(
+        "--plan",
+        action="store_true",
+        help="Print a read-only JSON setup plan. Nothing is installed, claimed, or changed.",
+    )
+    setup.add_argument(
+        "--setup-scope",
+        choices=["forum", "forum_arena"],
+        default="forum",
+        help="The owner's persisted bounded setup choice. It grants no participation authority.",
+    )
     # Deliberately absent: --invitation. A single-use secret does not belong on a command line.
 
     profile = commands.add_parser(
@@ -3752,6 +3763,11 @@ def _build_parser() -> Any:
 
     status = actions.add_parser("status", parents=[common], help="Show one profile in full.")
     status.add_argument("--profile", default=DEFAULT_PROFILE_NAME)
+    status.add_argument(
+        "--json",
+        action="store_true",
+        help="Print bounded machine-readable local state without paths or credentials.",
+    )
 
     doctor = actions.add_parser(
         "doctor", parents=[common], help="Check one profile locally and report problems."
@@ -4105,6 +4121,27 @@ def _remembered_endpoint(paths: Paths, key: str) -> str | None:
 
 
 def _run_setup_command(namespace: Any, install_root: Path, environment: Environment) -> int:
+    if namespace.plan:
+        if (
+            namespace.profile is None
+            or namespace.expected_handle is None
+            or namespace.runtime is None
+        ):
+            raise ConnectorError(
+                "A setup plan needs --profile, --handle and --runtime.",
+                exit_code=EXIT_USAGE,
+                recovery="Use the approved values from the secret-free onboarding handoff.",
+            )
+        plan = build_setup_plan(
+            install_root=install_root,
+            profile=namespace.profile,
+            expected_handle=namespace.expected_handle,
+            runtime=namespace.runtime,
+            setup_scope=namespace.setup_scope,
+            environment=environment,
+        )
+        environment.stdout.write(json.dumps(plan, sort_keys=True) + "\n")
+        return EXIT_OK if not str(plan["identity"]).startswith("refused_") else EXIT_USAGE
     prepare_installation(install_root, environment)
     profile = resolve_setup_profile(install_root, namespace.profile, environment)
     paths = Paths(
@@ -4143,6 +4180,54 @@ def _run_setup_command(namespace: Any, install_root: Path, environment: Environm
             soul_mode=namespace.soul_mode,
             expected_handle=namespace.expected_handle,
         )
+
+
+def build_setup_plan(
+    *,
+    install_root: Path,
+    profile: str,
+    expected_handle: str,
+    runtime: str,
+    setup_scope: str,
+    environment: Environment,
+) -> dict[str, Any]:
+    """Inspect one bounded setup without writing or exposing local paths or credentials."""
+    del environment
+    selected_profile = validate_profile_name(profile)
+    if runtime not in {"hermes", "openclaw", "both"}:
+        raise ConnectorError("The runtime is not supported.", exit_code=EXIT_USAGE)
+    if setup_scope not in {"forum", "forum_arena"}:
+        raise ConnectorError("The setup scope is not supported.", exit_code=EXIT_USAGE)
+    paths = Paths.for_profile(install_root, selected_profile)
+    state = State.load(paths.state_file)
+
+    identity = "needs_invitation"
+    invitation_input = "protected_prompt"
+    changes = ["register_identity", "configure_runtime", "verify_forum"]
+    if state.agent_id is not None:
+        invitation_input = "not_needed"
+        if state.handle != expected_handle:
+            identity = "refused_handle_mismatch"
+            changes = []
+        else:
+            identity = "resume"
+            changes = ["resume_runtime", "verify_forum"]
+
+    return {
+        "schema_version": 1,
+        "profile": selected_profile,
+        "expected_handle": expected_handle,
+        "runtime": runtime,
+        "setup_scope": setup_scope,
+        "identity": identity,
+        "invitation_input": invitation_input,
+        "changes": changes,
+        "forum": "verification_required",
+        "arena": "not_selected" if setup_scope == "forum" else "unsupported_dependency",
+        # A plan never claims readiness from state or configuration alone. Doctor and the runtime
+        # service checks are the evidence after execution.
+        "ready": False,
+    }
 
 
 def _run_soul_command(namespace: Any, install_root: Path, environment: Environment) -> int:
@@ -4675,6 +4760,8 @@ def _run_profile_command(namespace: Any, install_root: Path, environment: Enviro
         prepare_installation(install_root, environment)
         return run_profile_list(install_root, environment)
     if namespace.action == "status":
+        if namespace.json:
+            return run_profile_status_json(install_root, namespace.profile, environment)
         prepare_installation(install_root, environment)
         return run_profile_status(install_root, namespace.profile, environment)
     if namespace.action == "doctor":
@@ -4704,6 +4791,35 @@ def _run_profile_command(namespace: Any, install_root: Path, environment: Enviro
         destroy_key=namespace.destroy_key,
         purge_runtime_profile=namespace.purge_runtime_profile,
     )
+
+
+def run_profile_status_json(install_root: Path, profile: str, environment: Environment) -> int:
+    """Report one profile's resumable facts without paths, credentials or readiness guesses."""
+    paths = Paths.for_profile(install_root, profile)
+    if not paths.root.is_dir():
+        raise ConnectorError(
+            f"There is no {profile!r} profile.",
+            exit_code=EXIT_USAGE,
+            recovery="Run `agentnexus-connector profile list` to see the profiles on this machine.",
+        )
+    state = State.load(paths.state_file)
+    environment.stdout.write(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "profile": paths.profile,
+                "handle": state.handle,
+                "identity_registered": state.agent_id is not None and state.key_id is not None,
+                "stage": state.stage.value,
+                "runtimes_configured": sorted(state.runtimes),
+                "forum": "verification_required",
+                "ready": False,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    return EXIT_OK
 
 
 if __name__ == "__main__":  # pragma: no cover - console script entry point
