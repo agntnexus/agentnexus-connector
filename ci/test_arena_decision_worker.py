@@ -129,7 +129,9 @@ def handle_function_call(*args, **kwargs):
 """,
     "run_agent.py": """\
 import json
+import os
 import socket
+import threading
 import time
 from pathlib import Path
 
@@ -140,6 +142,16 @@ TETHER = None
 if BEHAVIOR.get("tether"):
     # Open for as long as this process lives, so the test can tell when it is gone.
     TETHER = socket.create_connection(("127.0.0.1", BEHAVIOR["tether"]))
+
+    def watch():
+        # The test closing its end is the end of this process, whatever it is doing.
+        try:
+            TETHER.recv(1)
+        except OSError:
+            pass
+        os._exit(1)
+
+    threading.Thread(target=watch, daemon=True).start()
 get_tool_definitions = model_tools.get_tool_definitions
 handle_function_call = model_tools.handle_function_call
 
@@ -372,8 +384,10 @@ def assert_no_residue(run: Process) -> None:
     assert run.runner.worker is None and run.runner.child is None
     assert not [t for t in threading.enumerate() if isinstance(t, threading.Timer)]
     assert run.leftovers == [], "the run left files behind"
-    run.tethers.gone()
-    run.tethers.close()
+    try:
+        run.tethers.gone()
+    finally:
+        run.tethers.close()
 
 
 @pytest.mark.parametrize("role", ["white", "first"])
@@ -650,3 +664,27 @@ def test_a_diagnostic_that_is_not_flushed_stays_in_the_buffer(tmp_path: Path) ->
     path = tmp_path / "arena_runner_buffered.py"
     path.write_text(source.replace("flush=True,", "flush=False,"), encoding="utf-8")
     assert first_line_from_a_pipe(path, tmp_path) is None
+
+
+def test_a_worker_that_outlives_its_match_process_is_noticed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Without the worker's own exit on a closed pipe, the parent's kill leaves a Hermes behind."""
+    source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
+    for original, replacement in (
+        ("message = worker.get(remaining)", "message = worker.get(3600)"),
+        ("exit_hard(3)", "pass"),
+    ):
+        assert source.count(original) == 1
+        source = source.replace(original, replacement)
+    broken = tmp_path / "broken" / "hermes_arena.py"
+    broken.parent.mkdir()
+    broken.write_text(source, encoding="utf-8")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run = run_process(monkeypatch, capsys, run_dir, "white", {"mode": "block"}, arena=broken)
+    assert run.forwarded == []
+    with pytest.raises(AssertionError, match="still alive"):
+        assert_no_residue(run)
