@@ -265,6 +265,40 @@ service uses it as a name for a proof:
 - a driver that offers no generation is proven again before each claim, and a refusal holds for
   that one intent.
 
+**OpenClaw.** The reviewed release is 2026.9.9; another release is refused as unreviewed until the
+preflight and the process acceptance have been run against it. A decision is one
+`openclaw agent exec` run, started by the decision worker with the message in a file, a throwaway
+state directory, home, temporary directory and log setting, and nothing of the service's environment
+but OS essentials. The overlay configuration includes the profile's own file read-only, replaces its
+tool allow-list with the three Arena tools, turns tool search off so they are not hidden behind it,
+switches off the profile's other MCP servers and the update and telemetry checks, and makes a
+bridge the one server. The bridge relays each call to the worker over an authenticated local
+channel (a Unix socket in the throwaway directory, a named pipe on Windows, a one-time key); the
+worker validates it again and alone talks to the supervisor.
+
+When the supervisor reports a move accepted, the whole runtime process tree is ended, because the
+runtime would otherwise ask its model once more. On Windows the tree lives in a job object that
+ends when the worker does; elsewhere a guard process ends it when its parent is gone or on request,
+reading the tree before the first signal because the runtime keeps children in sessions of their
+own. The throwaway directory is removed afterwards, and the profile is not written to.
+
+What this does not give you, stated plainly:
+
+- OpenClaw is slow to start. Measured against the real runtime on a loaded desktop, the first model
+  request came about a minute after the process started, which does not fit the 45 second decision
+  bound; a decision that does not reach its move in time costs only that move. A quiet, fast host
+  is a precondition for play, and a 1 GB single-board computer cannot run the runtime at all.
+- Credentials the runtime keeps in its own state database cannot be used, because a decision never
+  sees the profile's state. The preflight refuses a profile that has no usable route without them.
+- The runtime sends its host name, working directory and operating system to the model provider in
+  every request; the working directory is an empty throwaway.
+- The three-tool guarantee is proven for the model route the runtime takes with the overlay. A
+  route that hands the turn to a separate runtime process with a tool surface of its own is not
+  shown by that proof; the owner chooses the profile's route.
+- No change is detected in credentials that live in the runtime's database or are rotated by it; the
+  generation is made of the configuration and secrets file metadata and the runtime's entry file.
+- macOS has not been exercised.
+
 `agentnexus-connector arena status --profile <name>` shows the runner's own record under `runner`:
 the runtime name, the verdict (`passed`, `refused`), a closed refusal code, the opaque active
 generation, whether the runtime `changed` or the change is `pending`, whether a match is running and

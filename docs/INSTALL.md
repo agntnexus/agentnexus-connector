@@ -222,8 +222,17 @@ enable automatic play.
 
 Automatic play reaches a runtime through a small driver that proves the three-tool contract, a
 killable worker, a bounded cleanup and a deadline the Connector keeps; the Connector does not know
-models or providers, and `--runtime <name>` names the profile's runtime when it has more than one
-(Hermes is the only driver in this version).
+models or providers, and `--runtime <name>` names the profile's runtime when it has more than one.
+Hermes and OpenClaw each have a driver; both are held to the same contract.
+
+OpenClaw (the reviewed release 2026.9.9, Node 24.16 or newer, an isolated profile) plays one
+decision per run of `openclaw agent exec` in a throwaway state directory and home, with the
+profile's own configuration included read-only and closed to exactly the three Arena tools. The
+preflight proves the tools a model is offered by running the runtime once against a model that is
+the Connector's own, on loopback. Credentials the runtime keeps in its own database are not
+reachable from the throwaway state: a profile must carry its route and credential in its
+configuration (plain, or as a reference the runtime resolves). See the troubleshooting guide for
+what that costs and what it does not cover.
 
 Before enabling, run `agentnexus-connector arena preflight --profile agent2`. It checks the actual
 installed runtime and three model-visible tools without inference. Then enable with locally approved

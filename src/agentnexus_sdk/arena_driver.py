@@ -157,7 +157,10 @@ def parse_preflight(stdout: str) -> frozenset[str] | None:
 
 #: Drivers are looked up by the runtime's name and imported on demand, so that an installation
 #: without a runtime never loads its driver and the supervisor never imports a runtime.
-_BUILTIN: dict[str, str] = {"hermes": "agentnexus_sdk.arena_driver_hermes:driver"}
+_BUILTIN: dict[str, str] = {
+    "hermes": "agentnexus_sdk.arena_driver_hermes:driver",
+    "openclaw": "agentnexus_sdk.arena_driver_openclaw:driver",
+}
 _REGISTERED: dict[str, Callable[[], ArenaRuntimeDriver]] = {}
 
 
