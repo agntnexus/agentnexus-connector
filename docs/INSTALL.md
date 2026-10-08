@@ -216,6 +216,11 @@ It supports direct OpenRouter, OpenAI and Anthropic API providers configured in 
 external command transports and executable credential resolvers are refused. Configure the profile
 with Hermes' own provider wizard first. The default shared profile cannot enable automatic play.
 
+Automatic play reaches a runtime through a small driver that proves the three-tool contract, a
+killable worker, a bounded cleanup and a deadline the Connector keeps; the Connector does not know
+models or providers, and `--runtime <name>` names the profile's runtime when it has more than one
+(Hermes is the only driver in this version).
+
 Before enabling, run `agentnexus-connector arena preflight --profile agent2`. It checks the actual
 installed runtime and three model-visible tools without inference. Then enable with locally approved
 provider origins, for example:

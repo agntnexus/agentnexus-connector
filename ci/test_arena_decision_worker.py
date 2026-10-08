@@ -17,6 +17,7 @@ import contextlib
 import hashlib
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -41,7 +42,13 @@ from arena_fakes import (
     supervisor,
 )
 
-from agentnexus_sdk import arena_runner, hermes_arena
+from agentnexus_sdk import (
+    arena_driver,
+    arena_driver_hermes,
+    arena_match,
+    arena_runner,
+    hermes_arena,
+)
 
 GAMES = {
     "white": "chess-1-solo",
@@ -59,13 +66,13 @@ LAUNCHER = """\
 import importlib.util
 import sys
 
-arena, source, bound, cleanup = sys.argv[1:5]
-spec = importlib.util.spec_from_file_location("hermes_arena", arena)
+arena, bound, cleanup, *worker = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("arena_match", arena)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 module.DECISION_SECONDS = {"chess": float(bound), "connect-four": float(bound)}
 module.CLEANUP_SECONDS = float(cleanup)
-sys.argv = [arena, source]
+sys.argv = [arena, *worker]
 try:
     raise SystemExit(module.main())
 except Exception:
@@ -304,6 +311,43 @@ def hermes_homes(record: Path) -> list[str]:
     return [line for line in record.read_text(encoding="utf-8").splitlines() if line]
 
 
+class StandInDriver:
+    """The real Hermes driver, with its match process wrapped so that a test can shorten the bounds.
+
+    The command the real driver builds is kept as it is, and three things are substituted: the
+    wrapper that sets the bounds, optionally a mutated copy of the match program and optionally a
+    mutated copy of the Hermes worker.
+    """
+
+    def __init__(
+        self,
+        module: ModuleType,
+        launcher: Path,
+        bound: float,
+        cleanup: float,
+        match_file: Path | None,
+        worker_file: Path | None,
+    ) -> None:
+        """Wrap the driver of this module (the real one, or a mutant of it)."""
+        self.real = module.HermesArenaDriver()
+        self.name, self.display_name = self.real.name, self.real.display_name
+        self.capabilities = self.real.capabilities
+        self.launcher, self.bound, self.cleanup = launcher, bound, cleanup
+        self.match_file, self.worker_file = match_file, worker_file
+
+    def launch(self, handle: Any, scratch: Path) -> Any:
+        """Return the real launch with the test's wrapper and files put in."""
+        launch = self.real.launch(handle, scratch)
+        # [interpreter, -I, match, --, interpreter, -I, worker, source, --decision]
+        command = list(launch.command)
+        assert command[3] == "--" and command[-1] == "--decision"
+        match = self.match_file or Path(command[2])
+        command[2:3] = [str(self.launcher), str(match), str(self.bound), str(self.cleanup)]
+        if self.worker_file is not None:
+            command[command.index("--") + 3] = str(self.worker_file)
+        return arena_driver.Launch(command, launch.environment)
+
+
 class Tethers:
     """The test's ends of the sockets every stand-in Hermes process holds open while it lives."""
 
@@ -386,6 +430,8 @@ def run_process(
     turns: int = 1,
     module: ModuleType = arena_runner,
     arena: Path | None = None,
+    worker: Path | None = None,
+    driver_module: ModuleType = arena_driver_hermes,
     wait: float = 30.0,
 ) -> Process:
     """Start the real adapter as a real child of a real supervisor and let it play one turn."""
@@ -398,7 +444,6 @@ def run_process(
     source, home = hermes_stand_in(
         tmp_path, {**behavior, "tether": tethers.port, "record": str(homes_record)}
     )
-    arena_file = arena or Path(hermes_arena.__file__)
     launcher = tmp_path / "launcher.py"
     launcher.write_text(LAUNCHER, encoding="utf-8")
     root = tmp_path / "run"
@@ -406,25 +451,15 @@ def run_process(
     before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
     profile_before = snapshot(home)
     monkeypatch.setattr(
-        hermes_arena, "DECISION_SECONDS", {"chess": bound, "connect-four": bound}, raising=False
+        arena_match, "DECISION_SECONDS", {"chess": bound, "connect-four": bound}, raising=False
     )
-    monkeypatch.setattr(hermes_arena, "CLEANUP_SECONDS", cleanup, raising=False)
+    monkeypatch.setattr(arena_match, "CLEANUP_SECONDS", cleanup, raising=False)
     runner, owned = supervisor(module)
     runner_id = str(uuid.uuid4())
     runner.journal = SimpleNamespace(runner_id=runner_id, reserve=lambda identifier: True)
     runner.paths = SimpleNamespace(root=root)
-    runner.runtime = SimpleNamespace(
-        home=home,
-        command=lambda: [
-            sys.executable,
-            "-I",
-            str(launcher),
-            str(arena_file),
-            str(source),
-            str(bound),
-            str(cleanup),
-        ],
-    )
+    runner.driver = StandInDriver(driver_module, launcher, bound, cleanup, arena, worker)
+    runner.handle = driver_module.HermesRun(source, Path(sys.executable), home)
     document = {**intent(owned.agent_id), "status": "starting", "claimed_by": runner_id}
     document.update(intent_id=owned.intent_id, match_id=owned.match_id)
     runner._post = lambda suffix, payload: document  # type: ignore[method-assign]
@@ -710,8 +745,8 @@ def preflight_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_pa
     record = work / "hermes-homes.stand-in-record"
     source, home = hermes_stand_in(work, {"mode": "fast", "record": str(record)})
     before = snapshot(home)
-    run = module.HermesRun(source, Path(sys.executable), home)
-    assert run.preflight()
+    handle = module.HermesRun(source, Path(sys.executable), home)
+    assert module.HermesArenaDriver().preflight(handle) == arena_match.TOOLS
     assert profile_changes(before, snapshot(home)) == []
     homes = hermes_homes(record)
     assert homes, "the stand-in never filled a Hermes home, so nothing was proven"
@@ -723,7 +758,7 @@ def test_the_preflight_leaves_the_profile_exactly_as_it_was(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Enabling a profile imports Hermes too: that must not fill the profile either."""
-    preflight_oracle(arena_runner, monkeypatch, tmp_path)
+    preflight_oracle(arena_driver_hermes, monkeypatch, tmp_path)
 
 
 def homes_refusal_oracle(
@@ -784,8 +819,8 @@ def test_ending_a_worker_does_not_wait_for_a_helper_that_holds_its_pipe(
     def popen(command: list[str], **kwargs: Any) -> Any:
         return real([sys.executable, str(script), str(pid_file)], **kwargs)
 
-    monkeypatch.setattr(hermes_arena.subprocess, "Popen", popen)
-    worker = hermes_arena.Worker("source")
+    monkeypatch.setattr(arena_match.subprocess, "Popen", popen)
+    worker = arena_match.Worker(["unused"])
     try:
         deadline = time.monotonic() + 20
         while not pid_file.exists() and time.monotonic() < deadline:
@@ -877,15 +912,37 @@ def test_a_diagnostic_reaches_a_pipe_while_the_service_is_still_running(tmp_path
 # ---------------------------------------------------------------------------------------------
 
 
-def lax_match_process(tmp_path: Path) -> Path:
-    """Return a copy of the adapter whose match process never ends a decision on its own."""
-    source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
-    original = "message = worker.get(remaining)"
-    assert source.count(original) == 1
-    path = tmp_path / "lax" / "hermes_arena.py"
-    path.parent.mkdir()
-    path.write_text(source.replace(original, "message = worker.get(3600)"), encoding="utf-8")
-    return path
+def mutated_programs(
+    folder: Path,
+    *,
+    match: tuple[tuple[str, str], ...] = (),
+    worker: tuple[tuple[str, str], ...] = (),
+) -> tuple[Path, Path]:
+    """Write the match program and the Hermes worker side by side with these lines replaced.
+
+    The worker loads its sibling `arena_match.py` by path, so both files live in one folder. Each
+    replaced line must occur exactly once in its file.
+    """
+    folder.mkdir(parents=True)
+    paths = []
+    for module, name, replacements in (
+        (arena_match, "arena_match.py", match),
+        (hermes_arena, "hermes_arena.py", worker),
+    ):
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        for original, replacement in replacements:
+            assert source.count(original) == 1, original
+            source = source.replace(original, replacement)
+        (folder / name).write_text(source, encoding="utf-8")
+        paths.append(folder / name)
+    return paths[0], paths[1]
+
+
+def lax_match_process(tmp_path: Path) -> tuple[Path, Path]:
+    """Return copies of the programs whose match process never ends a decision on its own."""
+    return mutated_programs(
+        tmp_path / "lax", match=(("message = worker.get(remaining)", "message = worker.get(3600)"),)
+    )
 
 
 def test_the_parent_ends_a_match_process_that_does_not_end_its_own_decision(
@@ -894,10 +951,12 @@ def test_the_parent_ends_a_match_process_that_does_not_end_its_own_decision(
     tmp_path: Path,
 ) -> None:
     """The second line: the parent's window kills the match process, and its worker dies with it."""
-    lax = lax_match_process(tmp_path)
+    lax_match, lax_worker = lax_match_process(tmp_path)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    run = run_process(monkeypatch, capsys, run_dir, "white", {"mode": "block"}, arena=lax)
+    run = run_process(
+        monkeypatch, capsys, run_dir, "white", {"mode": "block"}, arena=lax_match, worker=lax_worker
+    )
     assert run.forwarded == []
     assert run.events.count("decision_budget_expired") == 1
     assert_no_residue(run)
@@ -909,7 +968,7 @@ def test_a_parent_that_does_not_kill_leaves_a_match_process_that_does_not_end_it
     tmp_path: Path,
 ) -> None:
     """Without the parent's kill the second line is gone: the process-level proof notices."""
-    lax = lax_match_process(tmp_path)
+    lax_match, lax_worker = lax_match_process(tmp_path)
     broken = load_mutant(
         tmp_path / "mutant", arena_runner, "child.kill()  # decision cutoff", "pass"
     )
@@ -924,7 +983,8 @@ def test_a_parent_that_does_not_kill_leaves_a_match_process_that_does_not_end_it
                 "white",
                 {"mode": "block"},
                 module=broken,
-                arena=lax,
+                arena=lax_match,
+                worker=lax_worker,
                 wait=6.0,
             )
     finally:
@@ -946,19 +1006,22 @@ def test_a_worker_that_outlives_its_match_process_is_noticed(
     tmp_path: Path,
 ) -> None:
     """Without the worker's own exit on a closed pipe, the parent's kill leaves a Hermes behind."""
-    source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
-    for original, replacement in (
-        ("message = worker.get(remaining)", "message = worker.get(3600)"),
-        ("exit_hard(3)", "pass"),
-    ):
-        assert source.count(original) == 1
-        source = source.replace(original, replacement)
-    broken = tmp_path / "broken" / "hermes_arena.py"
-    broken.parent.mkdir()
-    broken.write_text(source, encoding="utf-8")
+    broken_match, broken_worker = mutated_programs(
+        tmp_path / "broken",
+        match=(("message = worker.get(remaining)", "message = worker.get(3600)"),),
+        worker=(("exit_hard(3)", "pass"),),
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    run = run_process(monkeypatch, capsys, run_dir, "white", {"mode": "block"}, arena=broken)
+    run = run_process(
+        monkeypatch,
+        capsys,
+        run_dir,
+        "white",
+        {"mode": "block"},
+        arena=broken_match,
+        worker=broken_worker,
+    )
     assert run.forwarded == []
     with pytest.raises(AssertionError, match="still alive"):
         assert_no_residue(run)
@@ -999,14 +1062,17 @@ def test_a_supervisor_that_gives_hermes_the_profile_is_refused_by_the_adapter(
 ) -> None:
     """The second line of defence: Hermes is never started in the profile, whatever calls it."""
     broken = load_mutant(
-        tmp_path / "mutant", arena_runner, "HERMES_HOME=str(scratch),", "HERMES_HOME=str(home),"
+        tmp_path / "mutant",
+        arena_driver_hermes,
+        "HERMES_HOME=str(scratch),",
+        "HERMES_HOME=str(home),",
     )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     try:
         behavior = {"mode": "fast", "arguments": MOVES["white"]}
         run = run_process(
-            monkeypatch, capsys, run_dir, "white", behavior, bound=10.0, module=broken
+            monkeypatch, capsys, run_dir, "white", behavior, bound=10.0, driver_module=broken
         )
         assert run.forwarded == [] and run.homes == [], "the adapter went on into Hermes"
         assert "model_call_started" not in run.events
@@ -1023,20 +1089,28 @@ def test_a_supervisor_and_an_adapter_that_both_give_hermes_the_profile_are_notic
 ) -> None:
     """With both lines of defence removed the snapshot sees what Hermes writes into the profile."""
     broken = load_mutant(
-        tmp_path / "mutant", arena_runner, "HERMES_HOME=str(scratch),", "HERMES_HOME=str(home),"
+        tmp_path / "mutant",
+        arena_driver_hermes,
+        "HERMES_HOME=str(scratch),",
+        "HERMES_HOME=str(home),",
     )
-    source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
-    original = "if not homes_are_apart():"
-    assert source.count(original) == 1
-    lax = tmp_path / "lax" / "hermes_arena.py"
-    lax.parent.mkdir()
-    lax.write_text(source.replace(original, "if False:"), encoding="utf-8")
+    lax_match, lax_worker = mutated_programs(
+        tmp_path / "lax", worker=(("if not homes_are_apart():", "if False:"),)
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     try:
         behavior = {"mode": "fast", "arguments": MOVES["white"]}
         run = run_process(
-            monkeypatch, capsys, run_dir, "white", behavior, bound=10.0, module=broken, arena=lax
+            monkeypatch,
+            capsys,
+            run_dir,
+            "white",
+            behavior,
+            bound=10.0,
+            driver_module=broken,
+            arena=lax_match,
+            worker=lax_worker,
         )
         with pytest.raises(AssertionError, match="changed the Hermes profile"):
             assert_profile_untouched(run)
@@ -1051,12 +1125,13 @@ def test_a_preflight_that_gives_hermes_the_profile_is_noticed(
     """The enabling check is held to the same proof as the run."""
     broken = load_mutant(
         tmp_path / "mutant",
-        arena_runner,
-        "env=hermes_environment(self.home, Path(scratch)),",
-        "env=hermes_environment(self.home, self.home),",
+        arena_driver_hermes,
+        "env=hermes_environment(handle.home, Path(scratch)),",
+        "env=hermes_environment(handle.home, handle.home),",
     )
     try:
-        with pytest.raises(AssertionError):
+        # The worker's own refusal of a shared home is the second line: the check fails closed.
+        with pytest.raises(arena_driver.DriverRefusedError):
             preflight_oracle(broken, monkeypatch, tmp_path)
     finally:
         sys.modules.pop(broken.__name__, None)
@@ -1066,6 +1141,8 @@ def test_a_adapter_that_does_not_refuse_a_shared_home_is_noticed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The refusal is load-bearing: without it the start goes on into Hermes."""
+    (tmp_path / "mutant").mkdir()
+    shutil.copy(arena_match.__file__, tmp_path / "mutant" / "arena_match.py")
     mutant = load_mutant(
         tmp_path / "mutant", hermes_arena, "if not homes_are_apart():", "if False:"
     )
@@ -1096,15 +1173,22 @@ def test_an_adapter_that_reads_the_profile_from_the_wrong_place_is_noticed(
     replacement: str,
 ) -> None:
     """The profile is read, and read only for its config and its credentials, from its own path."""
-    source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
-    assert source.count(original) == 1
-    broken = tmp_path / "broken" / "hermes_arena.py"
-    broken.parent.mkdir()
-    broken.write_text(source.replace(original, replacement), encoding="utf-8")
+    broken_match, broken_worker = mutated_programs(
+        tmp_path / "broken", worker=((original, replacement),)
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     behavior = {"mode": "fast", "arguments": MOVES["white"]}
-    run = run_process(monkeypatch, capsys, run_dir, "white", behavior, bound=10.0, arena=broken)
+    run = run_process(
+        monkeypatch,
+        capsys,
+        run_dir,
+        "white",
+        behavior,
+        bound=10.0,
+        arena=broken_match,
+        worker=broken_worker,
+    )
     with pytest.raises(AssertionError):
         assert_profile_untouched(run)
     run.tethers.close()

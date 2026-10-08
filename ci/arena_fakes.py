@@ -1,6 +1,6 @@
 """In-process stand-ins for the decision worker, its parent and a provider seat (#223).
 
-`hermes_arena.main` plays a game through a decision worker: a process that holds Hermes. Here the
+`arena_match.main` plays a game through a decision worker: a process that holds a runtime. Here the
 worker is a function running in a helper thread that speaks the worker's protocol, so the match
 process's own logic (the turn clock, the cutoff, the one-move gate, the cleanup bound, replacing a
 worker) runs unchanged under a fake clock. The real worker is exercised as a real process, against
@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from agentnexus_sdk import arena_runner, hermes_arena
+from agentnexus_sdk import arena_match, arena_runner
 
 PRIVATE = "synthetic-private-observation"
 FLAGS = ("HERMES_SAFE_MODE", "HERMES_IGNORE_RULES", "HERMES_IGNORE_USER_CONFIG")
@@ -118,7 +118,7 @@ class Match:
         every observation: a provider payload may carry any field, and none of them is a clock.
         """
         self.extra = extra or {}
-        self.role, self.other = role, hermes_arena.ROLES[role]
+        self.role, self.other = role, arena_match.ROLES[role]
         self.clock, self.turns, self.waits = clock, turns, waits
         self.join_seconds, self.refuse_first = join_seconds, refuse_first
         self.flip_on_read, self.reads, self.read_seconds = flip_on_read, 0, read_seconds
@@ -449,7 +449,7 @@ def play(
     role: str,
     behavior: Callable[[Decision], Any] | list[Callable[[Decision], Any]],
     *,
-    module: ModuleType = hermes_arena,
+    module: ModuleType = arena_match,
     close: Any = "ok",
     provider: Any = None,
     still: bool = False,
@@ -479,11 +479,7 @@ def play(
     monkeypatch.setattr(
         module, "time", SimpleNamespace(monotonic=clock.monotonic, sleep=clock.sleep)
     )
-    for name in FLAGS:
-        monkeypatch.setenv(name, "1")
-    monkeypatch.setenv("HERMES_HOME", "synthetic-hermes-home")
-    monkeypatch.setenv(hermes_arena.PROFILE_ENV, "synthetic-profile")
-    monkeypatch.setattr(sys, "argv", ["hermes_arena.py", "."])
+    monkeypatch.setattr(sys, "argv", ["arena_match.py", "--", "synthetic-worker"])
     monkeypatch.setattr(sys, "stdin", parent)
     monkeypatch.setattr(sys, "stdout", parent)
     try:

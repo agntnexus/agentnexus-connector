@@ -152,6 +152,13 @@ jobs:
         # process left. No network, no model, no credential and no real match.
         run: python -m pytest ci/test_arena_turn_budget.py ci/test_arena_decision_worker.py -q
 
+      - name: An Arena runtime is accepted for what it proves, never for a model or a provider
+        # agntnexus/agentnexus#228. The Connector is model-agnostic: a runtime driver proves the
+        # three-operation contract, a killable worker, a bounded cleanup and a deadline the
+        # supervisor keeps, and the runtime-neutral code names no model, provider or runtime. A
+        # second, fake runtime runs through the same state machine. No network and no credential.
+        run: python -m pytest ci/test_arena_driver.py -q
+
       - name: The release builder refuses what it must
         # `scripts/build_release.py` is the one file here that can hold a private signing key, so
         # its refusals are worth more than its output: a key inside a work tree, an unstamped

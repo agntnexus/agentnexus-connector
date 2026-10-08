@@ -1,6 +1,7 @@
 """Optional outbound Arena runner: fixed authority, one profile and durable single launch.
 
-Hermes receives game data through private stdio, never the AgentNexus key or a network listener.
+The runtime receives game data through private stdio, never the AgentNexus key or a network
+listener.
 The parent retains signing authority and supplies the bound match and seat on every game call.
 """
 
@@ -23,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agentnexus_sdk import bridge, games, hermes_arena
+from agentnexus_sdk import arena_driver, arena_match, bridge, games
 from agentnexus_sdk.errors import AgentNexusError
 from agentnexus_sdk.profiles import (
     ProfileRecord,
@@ -31,14 +32,12 @@ from agentnexus_sdk.profiles import (
     profile_lock,
     write_json_atomically,
 )
-from agentnexus_sdk.runtimes import HermesAdapter
 
 STARTS = "/agent-api/v1/arena/start-intents"
 STATUSES = frozenset(
     {"offline", "queued", "starting", "playing", "completed", "refused", "expired", "cancelled"}
 )
-HERMES_REVISION = "287c56e95afe5c528beacb7ca8f7ef0ad6216f2a"
-DIAGNOSTICS = hermes_arena.DIAGNOSTICS | frozenset(
+DIAGNOSTICS = arena_match.DIAGNOSTICS | frozenset(
     {
         "game_join_started",
         "game_join_returned",
@@ -155,7 +154,7 @@ def diagnostic(intent: StartIntent, event: str, duration_ms: int = 0) -> None:
 class DecisionWindow:
     """One model decision's budget on the parent's own clock (agntnexus/agentnexus#223).
 
-    Hermes' `run_budget_seconds` advises the model and never interrupts a blocked call, so a bound
+    A runtime's own budget advises the model and never interrupts a blocked call, so a bound
     held inside the match process could not stop a match process that is blocked. This window is
     held by the parent, which also holds the signing key: it opens when the match process says a
     decision began, admits a move only while it is open, before its cutoff and while none has been
@@ -236,9 +235,9 @@ class DecisionWindow:
             self._generation += 1
             generation = self._generation
             earlier, self._timer = self._timer, None
-            self._cutoff = time.monotonic() + hermes_arena.SETTLE_SECONDS
+            self._cutoff = time.monotonic() + arena_match.SETTLE_SECONDS
             self._timer = threading.Timer(
-                hermes_arena.SETTLE_SECONDS, self.expire, kwargs={"generation": generation}
+                arena_match.SETTLE_SECONDS, self.expire, kwargs={"generation": generation}
             )
             self._timer.daemon = True
             self._timer.start()
@@ -331,7 +330,7 @@ class RunJournal:
             path.chmod(0o600)
 
     def reserve(self, intent_id: str) -> bool:
-        """Return true for exactly one caller, committing before it may start Hermes."""
+        """Return true for exactly one caller, committing before it may start the runtime."""
         cursor = self.connection.execute(
             "INSERT OR IGNORE INTO launches VALUES (?)", (_uuid(intent_id),)
         )
@@ -343,127 +342,13 @@ class RunJournal:
         self.connection.close()
 
 
-def hermes_environment(home: Path, scratch: Path) -> dict[str, str]:
-    """Pass OS essentials only; Hermes gets a throwaway home and the profile is named apart.
-
-    Hermes fills its home with state of its own the moment it starts: logs, caches, a state database
-    and a backup of the config it finds there. That must never be the profile (agntnexus/agentnexus
-    #223), so `HERMES_HOME` is a scratch directory that is removed after the run. The profile is
-    passed apart, in `AGENTNEXUS_ARENA_PROFILE`, and the adapter reads two files of it and no more.
-    """
-    allowed = {
-        "PATH",
-        "SYSTEMROOT",
-        "WINDIR",
-        "TEMP",
-        "TMP",
-        "HOME",
-        "USERPROFILE",
-        "LANG",
-        "LC_ALL",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-    }
-    environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
-    environment.update(
-        HERMES_HOME=str(scratch),
-        AGENTNEXUS_ARENA_PROFILE=str(home),
-        HERMES_SAFE_MODE="1",
-        HERMES_IGNORE_RULES="1",
-        HERMES_IGNORE_USER_CONFIG="1",
-        PYTHONUTF8="1",
-    )
-    return environment
-
-
 def remove_scratch(path: Path) -> None:
-    """Remove a throwaway Hermes home; a process that is still exiting may hold a file a moment."""
+    """Remove a runtime's throwaway home; a process still exiting may hold a file a moment."""
     for _ in range(10):
         shutil.rmtree(path, ignore_errors=True)
         if not path.exists():
             return
         time.sleep(0.2)
-
-
-@dataclass(frozen=True)
-class HermesRun:
-    """A verified installed runtime and one isolated credentials home."""
-
-    source: Path
-    interpreter: Path
-    home: Path
-
-    @classmethod
-    def inspect(cls, paths: Any) -> HermesRun:
-        """Refuse shared profiles and any runtime source outside the reviewed revision."""
-        if paths.isolation != "isolated":
-            raise RunnerRefused("Automatic Arena play requires an isolated named Hermes profile.")
-        adapter = HermesAdapter(context=paths.runtime_context())
-        adapter._require_isolated_profile()
-        source, version = adapter._installation()
-        revision = subprocess.run(  # noqa: S603 - fixed local runtime or service command
-            [shutil.which("git") or "/usr/bin/git", "-C", str(source), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-        clean = subprocess.run(  # noqa: S603 - fixed local runtime or service command
-            [
-                shutil.which("git") or "/usr/bin/git",
-                "-C",
-                str(source),
-                "diff",
-                "--quiet",
-                "HEAD",
-                "--",
-            ],
-            timeout=15,
-            check=False,
-        )
-        if (
-            version != "0.21.3"
-            or revision.stdout.strip() != HERMES_REVISION
-            or clean.returncode != 0
-        ):
-            raise RunnerRefused(
-                "This Hermes source has not passed the bounded Arena compatibility review."
-            )
-        result = cls(
-            source, adapter._scanner_interpreter(source), adapter._config().resolve().parent
-        )
-        if not result.preflight():
-            raise RunnerRefused("Hermes refused the exact three-tool Arena preflight.")
-        return result
-
-    def preflight(self) -> bool:
-        """Run the adapter's check of the exact three-tool contract, which makes no inference.
-
-        Importing Hermes fills its home, so the check runs with a throwaway one: the profile is
-        left exactly as it was.
-        """
-        with tempfile.TemporaryDirectory(
-            prefix="agentnexus-hermes-", ignore_cleanup_errors=True
-        ) as scratch:
-            probe = subprocess.run(  # noqa: S603 - fixed local runtime or service command
-                self.command("--preflight"),
-                env=hermes_environment(self.home, Path(scratch)),
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
-        return probe.returncode == 0 and '"bounded": true' in probe.stdout
-
-    def command(self, *arguments: str) -> list[str]:
-        """Use Hermes' interpreter with this wheel's standalone compatible adapter."""
-        return [
-            str(self.interpreter),
-            "-I",
-            str(Path(__file__).with_name("hermes_arena.py")),
-            str(self.source),
-            *arguments,
-        ]
 
 
 def profile_storage(paths: Any) -> None:
@@ -484,9 +369,11 @@ def profile_storage(paths: Any) -> None:
 class ArenaRunner:
     """Poll as one signed identity; supervise one bounded child through the whole game."""
 
-    scratch: Path | None = None  # the running child's throwaway Hermes home
+    scratch: Path | None = None  # the running child's throwaway runtime home
 
-    def __init__(self, paths: Any, providers: str, runtime: HermesRun) -> None:
+    def __init__(
+        self, paths: Any, providers: str, driver: arena_driver.ArenaRuntimeDriver, handle: Any
+    ) -> None:
         """Read only this profile's state and key; provider origins are local configuration."""
         from agentnexus_sdk.connector import State
 
@@ -514,7 +401,8 @@ class ArenaRunner:
         games.provider_origins({games.ENV_PROVIDERS: providers})
         self.client = bridge._build_client(self.config)
         self.journal = RunJournal(paths.root / "arena" / "journal.sqlite3")
-        self.paths, self.runtime = paths, runtime
+        arena_driver.require_contract(driver)
+        self.paths, self.driver, self.handle = paths, driver, handle
         self.child: subprocess.Popen[str] | None = None
         self.worker: threading.Thread | None = None
         self.active: StartIntent | None = None
@@ -547,10 +435,10 @@ class ArenaRunner:
         # A run sends at most four diagnostics per decision and one as it ends: a finite bound
         # derived from the game's decisions (agntnexus/agentnexus#202, #223). Connect Four's is the
         # default; a joined Chess match takes its own.
-        diagnostic_limit = hermes_arena.diagnostic_bound(hermes_arena.DECISIONS["connect-four"])
+        diagnostic_limit = arena_match.diagnostic_bound(arena_match.DECISIONS["connect-four"])
         # The provider's turn is the same 60 seconds in both games today, but the bound is the
         # game's own once the join names it (agntnexus/agentnexus#223).
-        seconds = hermes_arena.DECISION_SECONDS["connect-four"]
+        seconds = arena_match.DECISION_SECONDS["connect-four"]
         window = DecisionWindow(lambda duration_ms: self._cut_off(child, intent, duration_ms))
         # A move whose outcome is unknown stays staged in the SDK, and the next state read sends it
         # again. Until something is read or moved successfully, a state read is held to the cutoff
@@ -562,26 +450,26 @@ class ArenaRunner:
                     # The child was ended at its cutoff; what it left in the pipe is not served.
                     break
                 if len(line) > 4096:
-                    raise RunnerRefused("Hermes sent an oversized Arena request.")
+                    raise RunnerRefused("The runtime sent an oversized Arena request.")
                 request = json.loads(line)
                 if not isinstance(request, dict):
-                    raise RunnerRefused("Hermes sent an invalid Arena request.")
+                    raise RunnerRefused("The runtime sent an invalid Arena request.")
                 if "diagnostic" in request:
                     if (
                         set(request) != {"diagnostic", "duration_ms"}
                         or not isinstance(request["diagnostic"], str)
-                        or request["diagnostic"] not in hermes_arena.DIAGNOSTICS
+                        or request["diagnostic"] not in arena_match.DIAGNOSTICS
                         or type(request["duration_ms"]) is not int
                         or not 0 <= request["duration_ms"] <= 3600000
                     ):
-                        raise RunnerRefused("Hermes sent an invalid Arena diagnostic.")
+                        raise RunnerRefused("The runtime sent an invalid Arena diagnostic.")
                     diagnostics += 1
                     if diagnostics > diagnostic_limit:
-                        raise RunnerRefused("Hermes exceeded the bounded Arena diagnostics.")
+                        raise RunnerRefused("The runtime exceeded the bounded Arena diagnostics.")
                     if request["diagnostic"] == "model_call_started":
                         # The child says a decision began and how much of the turn it has used.
                         if window.is_open:
-                            raise RunnerRefused("Hermes opened a decision inside a decision.")
+                            raise RunnerRefused("The runtime opened a decision inside a decision.")
                         window.open(
                             seconds - request["duration_ms"] / 1000, request["duration_ms"] / 1000
                         )
@@ -597,22 +485,24 @@ class ArenaRunner:
                     break
                 operation = request.get("operation")
                 if operation not in bridge.GAME_OPERATIONS:
-                    raise RunnerRefused("Hermes attempted an operation outside this match.")
+                    raise RunnerRefused("The runtime attempted an operation outside this match.")
                 try:
-                    hermes_arena.bounded_request(
+                    arena_match.bounded_request(
                         operation, {k: v for k, v in request.items() if k != "operation"}
                     )
                 except ValueError:
                     raise RunnerRefused(
-                        "Hermes attempted an operation outside this match."
+                        "The runtime attempted an operation outside this match."
                     ) from None
                 if operation == "game_move":
                     # A move is forwarded only inside an open decision and before its cutoff, on
                     # this process's clock. Late is refused, never repeated and never replaced.
                     if not window.is_open:
-                        raise RunnerRefused("Hermes attempted a move outside a model decision.")
+                        raise RunnerRefused(
+                            "The runtime attempted a move outside a model decision."
+                        )
                     if window.moved:
-                        raise RunnerRefused("Hermes attempted a second move in one decision.")
+                        raise RunnerRefused("The runtime attempted a second move in one decision.")
                     if not window.begin_move():
                         diagnostic(intent, "late_move_refused", window.elapsed_ms())
                         window.expire()
@@ -640,10 +530,10 @@ class ArenaRunner:
                         operation == "game_join"
                         and result.get("game_version") in games.CHESS_GAME_VERSIONS
                     ):
-                        diagnostic_limit = hermes_arena.diagnostic_bound(
-                            hermes_arena.DECISIONS["chess"]
+                        diagnostic_limit = arena_match.diagnostic_bound(
+                            arena_match.DECISIONS["chess"]
                         )
-                        seconds = hermes_arena.DECISION_SECONDS["chess"]
+                        seconds = arena_match.DECISION_SECONDS["chess"]
                     if operation == "game_join" and not self.playing:
                         self._report("playing")
                         self.playing = True
@@ -717,11 +607,12 @@ class ArenaRunner:
             return
         self.finished.clear()
         self.terminal = self.playing = False
-        scratch = Path(tempfile.mkdtemp(prefix="agentnexus-hermes-"))
+        scratch = Path(tempfile.mkdtemp(prefix="agentnexus-runtime-"))
         try:
-            child = subprocess.Popen(  # noqa: S603 - reviewed interpreter and shipped adapter
-                self.runtime.command(),
-                env=hermes_environment(self.runtime.home, scratch),
+            launch = self.driver.launch(self.handle, scratch)
+            child = subprocess.Popen(  # noqa: S603 - the driver's reviewed match command
+                launch.command,
+                env=launch.environment,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -854,6 +745,27 @@ class ArenaRunner:
             self.client.close()
 
 
+def inspected_runtime(
+    paths: Any, requested: str | None
+) -> tuple[arena_driver.ArenaRuntimeDriver, Any]:
+    """Choose the profile's driver by its runtime's name alone, and prove the contract with it.
+
+    Nothing about a model or a provider is consulted: the driver inspects the installation and
+    the profile, and its preflight must expose exactly the three Arena operations.
+    """
+    from agentnexus_sdk.connector import State
+
+    recorded = State.load(paths.state_file).runtimes
+    try:
+        driver = arena_driver.driver_for(arena_driver.runtime_of(recorded, requested))
+        arena_driver.require_contract(driver)
+        handle = driver.inspect(paths)
+        arena_driver.check_preflight(driver, handle)
+    except arena_driver.DriverRefusedError as error:
+        raise RunnerRefused(str(error)) from error
+    return driver, handle
+
+
 def command(namespace: Any, install_root: Path) -> int:
     """Expose explicit opt-in, preflight, foreground run and scoped service controls."""
     from agentnexus_sdk.connector import Paths
@@ -869,26 +781,47 @@ def command(namespace: Any, install_root: Path) -> int:
         config.unlink(missing_ok=True)
         _service(paths, enable=False)
         return 0
-    runtime = HermesRun.inspect(paths)
+    requested = getattr(namespace, "runtime", None)
+    if requested is None and action == "run" and config.is_file():
+        requested = service_document(config).get("runtime")
+    driver, handle = inspected_runtime(paths, requested)
     if action == "preflight":
-        print(json.dumps({"profile": paths.profile, "bounded": True, "hermes": "0.21.3"}))
+        print(json.dumps({"profile": paths.profile, "bounded": True, "runtime": driver.name}))
         return 0
     if action == "enable":
         providers = namespace.providers
         games.provider_origins({games.ENV_PROVIDERS: providers})
         if not paths.state_file.is_file():
             raise RunnerRefused("Complete setup for this profile first.")
-        write_json_atomically(config, {"schema_version": 1, "providers": providers})
+        write_json_atomically(
+            config, {"schema_version": 1, "providers": providers, "runtime": driver.name}
+        )
         _service(paths, enable=True)
         print("Automatic Arena play enabled for this profile.")
         return 0
     if not config.is_file():
         raise RunnerRefused("Enable automatic Arena play for this profile first.")
-    document = json.loads(config.read_text(encoding="utf-8"))
-    if set(document) != {"schema_version", "providers"} or document["schema_version"] != 1:
-        raise RunnerRefused("Unknown Arena service configuration.")
-    ArenaRunner(paths, document["providers"], runtime).run()
+    document = service_document(config)
+    ArenaRunner(paths, document["providers"], driver, handle).run()
     return 0
+
+
+def service_document(config: Path) -> dict[str, Any]:
+    """Read the profile's service configuration, refusing anything but the two known shapes.
+
+    The first shape has no `runtime` and means the profile's only runtime, as every service made
+    before the Arena became runtime-neutral does.
+    """
+    document = json.loads(config.read_text(encoding="utf-8"))
+    if (
+        not isinstance(document, dict)
+        or set(document)
+        not in ({"schema_version", "providers"}, {"schema_version", "providers", "runtime"})
+        or document["schema_version"] != 1
+        or ("runtime" in document and document["runtime"] not in arena_driver.known())
+    ):
+        raise RunnerRefused("Unknown Arena service configuration.")
+    return document
 
 
 def _service(paths: Any, *, enable: bool) -> None:

@@ -14,14 +14,15 @@ import ast
 import io
 import json
 import re
+import sys
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
 from arena_fake_driver import FakeArenaDriver
-from arena_fakes import intent, supervisor
+from arena_fakes import expect_guard, intent, load_mutant, supervisor
 
 from agentnexus_sdk import arena_driver, arena_driver_hermes, arena_match, arena_runner, runtimes
 from agentnexus_sdk.arena_driver import CONTRACT, Capabilities, DriverRefusedError
@@ -352,11 +353,16 @@ def test_a_handle_without_a_context_declares_no_model() -> None:
 
 #: Model families, providers and routes. They may appear in a driver's fixtures and in prose about
 #: a driver, never in code that decides what the Arena accepts.
+#: Names distinctive enough to be refused anywhere, even inside an identifier or a longer word.
+DISTINCTIVE_NAMES = (
+    r"openai|anthropic|openrouter|codex|claude|ollama|gemini|mistral|llama|deepseek|qwen|"
+    r"huggingface|perplexity|bedrock|moonshot|fireworks|zhipu|minimax|inkling"
+)
+#: Short names that are also words or parts of words: refused as whole words, where an underscore,
+#: a digit or a hyphen ends a word as a letter does not.
+SHORT_NAMES = r"gpt[-_ ]?\d|vertex|azure|groq|xai|grok|cohere|kimi|nvidia|luna|haiku|sonnet|opus"
 MODEL_AND_PROVIDER_NAMES = re.compile(
-    r"\b(?:openai|anthropic|openrouter|codex|claude|ollama|gpt[-_ ]?\d|gemini|mistral|llama|"
-    r"deepseek|qwen|bedrock|vertex|azure|huggingface|groq|xai|grok|cohere|perplexity|"
-    r"together\.ai|fireworks|moonshot|kimi|zhipu|minimax|nvidia|inkling|luna|haiku|sonnet|opus)\b",
-    re.IGNORECASE,
+    rf"{DISTINCTIVE_NAMES}|(?<![a-z])(?:{SHORT_NAMES})(?![a-z])", re.IGNORECASE
 )
 RUNTIME_NAMES = re.compile(r"hermes|openclaw", re.IGNORECASE)
 NEUTRAL = ("arena_runner.py", "arena_match.py", "arena_driver.py")
@@ -444,10 +450,13 @@ def test_the_driver_registry_imports_no_runtime() -> None:
 
 
 def launched(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, driver: Any
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    driver: Any,
+    module: ModuleType = arena_runner,
 ) -> tuple[dict[str, Any], io.StringIO]:
     """Launch a match with a driver while `Popen` is recorded instead of run; return what it got."""
-    runner, owned = supervisor()
+    runner, owned = supervisor(module)
     runner.journal = SimpleNamespace(runner_id=str(uuid.uuid4()), reserve=lambda identifier: True)
     runner.paths = SimpleNamespace(root=tmp_path)
     arena_driver.require_contract(driver)
@@ -466,13 +475,13 @@ def launched(
         seen.update(kwargs, command=command)
         return SimpleNamespace(stdin=stdin, stdout=io.StringIO())
 
-    monkeypatch.setattr(arena_runner.subprocess, "Popen", spawn)
+    monkeypatch.setattr(module.subprocess, "Popen", spawn)
     monkeypatch.setattr(
-        arena_runner.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None)
+        module.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None)
     )
-    monkeypatch.setattr(arena_runner.tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(module.tempfile, "tempdir", str(tmp_path))
     runner._launch(owned)
-    arena_runner.remove_scratch(runner.scratch)
+    module.remove_scratch(runner.scratch)
     return seen, stdin
 
 
@@ -515,3 +524,148 @@ def test_the_match_command_is_the_neutral_match_program_then_the_workers_command
     command = seen["command"]
     assert Path(command[2]).name == "arena_match.py" and command[3] == "--"
     assert Path(command[6]).name == "fake_runtime_worker.py"
+
+
+# ---------------------------------------------------------------------------------------------
+# Mutation proofs: break the protected condition, require the guard to refuse
+# ---------------------------------------------------------------------------------------------
+
+
+def contract_oracle(module: ModuleType) -> None:
+    """Require the contract to refuse a fourth tool and each missing capability."""
+    flags = {"worker_killable": True, "cleanup_bounded": True, "deadline_external": True}
+    cases = [Capabilities(tools=module.CONTRACT.tools | {"shell"}, **flags)]
+    cases += [Capabilities(tools=module.CONTRACT.tools, **{**flags, name: False}) for name in flags]
+    for capabilities in cases:
+        driver = SimpleNamespace(capabilities=capabilities, display_name="Fake")
+        try:
+            module.require_contract(driver)
+        except module.DriverRefusedError:
+            continue
+        raise AssertionError(f"a driver declaring {capabilities} was accepted")
+
+
+def refusal_text_oracle(module: ModuleType) -> None:
+    """Require a refusal to be a code of the table and its sentence, never free text."""
+    try:
+        module.DriverRefused("synthetic-private-runtime-error", "Fake")
+    except ValueError as error:
+        assert "synthetic-private" not in str(error)
+        return
+    raise AssertionError("a free-text refusal was accepted")
+
+
+def tools_oracle(module: ModuleType, tmp_path: Path) -> None:
+    """Require the preflight proof to refuse a runtime that exposes a fourth tool."""
+    behavior, profile = write_behavior(tmp_path / uuid.uuid4().hex, tools=[*sorted(THREE), "shell"])
+    driver = FakeArenaDriver(behavior, profile)
+    try:
+        module.check_preflight(driver, driver.inspect(None))
+    except module.DriverRefusedError:
+        return
+    raise AssertionError("a runtime exposing a fourth tool passed its preflight")
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement", "oracle"),
+    [
+        ("if driver.capabilities != CONTRACT:", "if False:", "contract"),
+        (
+            "if driver.capabilities != CONTRACT:",
+            "if driver.capabilities.tools != CONTRACT.tools:",
+            "contract",
+        ),
+        (
+            "        if code not in REFUSALS:\n"
+            '            raise ValueError("Unknown Arena driver refusal code.")\n'
+            "        super().__init__(REFUSALS[code].format(runtime=runtime))\n",
+            "        super().__init__(REFUSALS.get(code, code).format(runtime=runtime))\n",
+            "refusal",
+        ),
+        (
+            "    if tools != arena_match.TOOLS:\n",
+            "    if not tools >= arena_match.TOOLS:\n",
+            "tools",
+        ),
+    ],
+    ids=[
+        "contract-not-checked",
+        "deadline-and-cleanup-left-to-the-driver",
+        "free-text-refusal",
+        "fourth-tool-allowed",
+    ],
+)
+def test_a_weakened_contract_is_noticed(
+    tmp_path: Path, original: str, replacement: str, oracle: str
+) -> None:
+    """Each condition of the contract is load-bearing: weakened, its own check fails."""
+    mutant = load_mutant(tmp_path / "mutant", arena_driver, original, replacement)
+    checks = {
+        "contract": contract_oracle,
+        "refusal": refusal_text_oracle,
+        "tools": lambda module: tools_oracle(module, tmp_path),
+    }
+    try:
+        expect_guard(checks[oracle], arena_driver, mutant)
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+def environment_oracle(module: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Require the runtime to start with the driver's environment and nothing of the parent's."""
+    monkeypatch.setenv("AGENTNEXUS_PRIVATE_KEY_FILE", str(tmp_path / "keys" / "agent.pem"))
+    behavior, profile = write_behavior(tmp_path / uuid.uuid4().hex)
+    seen, _ = launched(monkeypatch, tmp_path, FakeArenaDriver(behavior, profile), module)
+    environment = seen["env"]
+    assert isinstance(environment, dict) and "AGENTNEXUS_PRIVATE_KEY_FILE" not in environment
+
+
+def test_a_runner_that_hands_the_parents_environment_to_the_runtime_is_noticed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The signing key's path lives in the parent's world; inheriting that world is how it leaks."""
+    mutant = load_mutant(tmp_path / "mutant", arena_runner, "env=launch.environment,", "env=None,")
+    try:
+        expect_guard(
+            lambda module: environment_oracle(module, tmp_path, monkeypatch), arena_runner, mutant
+        )
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+def imported_text(text: str) -> set[str]:
+    """Return the modules a source text imports statically."""
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.Import):
+            found.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            found.update(f"{base}.{alias.name}".strip(".") for alias in node.names)
+            found.add(base)
+    return found
+
+
+@pytest.mark.parametrize(
+    ("addition", "guard"),
+    [
+        ("\nfrom agentnexus_sdk.runtimes import HermesAdapter\n", "imports"),
+        ("\nfrom agentnexus_sdk import hermes_arena\n", "imports"),
+        ("\nfrom agentnexus_sdk.arena_driver_hermes import HermesRun\n", "imports"),
+        ('\nif provider == "synthetic-openai":\n    pass\n', "names"),
+        ("\nCODEX_PATH = True\n", "names"),
+        ("\nif model.startswith('claude'):\n    pass\n", "names"),
+        ('\nDISPLAY = {"gpt-5": "GPT-5"}\n', "names"),
+    ],
+)
+def test_the_static_guards_notice_a_runtime_or_a_model_in_the_neutral_code(
+    addition: str, guard: str
+) -> None:
+    """Adding a runtime import or a model or provider name to the supervisor fails its guard."""
+    text = (SOURCE / "arena_runner.py").read_text(encoding="utf-8") + addition
+    if guard == "imports":
+        forbidden = {"runtimes", "hermes_arena", "arena_driver_hermes"}
+        found = {name.rsplit(".", 1)[-1] for name in imported_text(text)}
+        assert found & forbidden, "the guard would not have noticed"
+    else:
+        assert MODEL_AND_PROVIDER_NAMES.search(text), "the guard would not have noticed"

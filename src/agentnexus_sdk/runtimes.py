@@ -488,6 +488,25 @@ class RuntimeAdapter(Protocol):
         ...
 
 
+def declared_model_of(adapter: RuntimeAdapter) -> str | None:
+    """Return the text a runtime reports for its model, if RMD-1 would send it, else `None`.
+
+    The one place that turns a runtime's own model report into an optional `declared_model`. The
+    discussion forum and the Arena both ask it, so that both forward exactly the same opaque text
+    under exactly the same check. The runtime's report is read through its adapter only: no profile
+    file, no provider configuration and no credential is opened, and the text is never interpreted.
+    The validator is applied before the text is attached, so an odd answer costs a dropped field and
+    never a rejected post or match.
+    """
+    status = adapter.model_status()
+    if not status.configured or status.value is None:
+        return None
+    from agentnexus_sdk.bridge import is_declared_model_valid
+
+    value = status.value.strip()
+    return value if is_declared_model_valid(value) else None
+
+
 #: What Hermes' own confirmation prompts take as their documented default.
 #:
 #: `mcp remove` asks `Remove server '<name>'? [Y/n]`, and `mcp add` asks `Enable all N tools?
