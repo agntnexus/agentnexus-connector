@@ -146,10 +146,13 @@ from typing import Final
 #: either. And a move the provider has accepted now ends its decision at once: Hermes is not asked
 #: for closing prose, its cleanup is cut off after 3 seconds and the worker replaced, so a slow or
 #: hanging tail can no longer cost the match its runner or the next turn. Hermes runs in a decision
-#: worker of its own. Four fixed diagnostics are added, `decision_budget_expired`,
-#: `late_move_refused`, `decision_cleanup_expired` and `decision_cleanup_failed`. It carries
-#: everything 0.13.0 added. It is an unreleased candidate: signing and publication are separate
-#: owner steps.
+#: worker of its own. If the provider's computer has already answered when the move is read back,
+#: the next own turn is timed from the instant the move was accepted, so that the cleanup, the
+#: worker replacement and the poll are charged to it. Hermes also runs in a throwaway home of the
+#: supervisor's, so that the profile it plays from is only read and never filled. Four fixed
+#: diagnostics are added, `decision_budget_expired`, `late_move_refused`,
+#: `decision_cleanup_expired` and `decision_cleanup_failed`. It carries everything 0.13.0 added. It
+#: is an unreleased candidate: signing and publication are separate owner steps.
 __version__: Final = "0.13.1"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
