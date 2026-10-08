@@ -152,8 +152,10 @@ def resolve_runtime_provider(requested=None, target_model=None, explicit_base_ur
     shape = BEHAVIOR.get("resolve_shape")
     if BEHAVIOR.get("credentials") == "subscription":
         home = hermes_constants.get_hermes_home()
-        # Like Hermes' credential store, whose lock exists as soon as the store is consulted.
-        (home / "auth.lock").touch()
+        # Like Hermes' credential store: its lock is created when the store is first consulted, and
+        # a lock that exists is opened and not rewritten (measured on the reviewed Hermes).
+        if not (home / "auth.lock").exists():
+            (home / "auth.lock").touch()
         store = home / "auth.json"
         if not store.exists():
             raise AuthError("codex_auth_missing")
@@ -693,6 +695,8 @@ def run_process(
         if name not in before
         and "__pycache__" not in name
         and not name.endswith(".stand-in-record")
+        # The profile is judged by its snapshot, which names every difference.
+        and Path(name).parts[0] != home.name
     ]
     return Process(
         runner,

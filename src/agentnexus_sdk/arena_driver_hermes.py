@@ -36,7 +36,13 @@ def hermes_environment(home: Path, scratch: Path) -> dict[str, str]:
     Hermes fills its home with state of its own the moment it starts: logs, caches, a state database
     and a backup of the config it finds there. That must never be the profile (agntnexus/agentnexus
     #223), so `HERMES_HOME` is a scratch directory that is removed after the run. The profile is
-    passed apart, in `AGENTNEXUS_ARENA_PROFILE`, and the adapter reads two files of it and no more.
+    passed apart, in `AGENTNEXUS_ARENA_PROFILE`, and the worker reads its model section and lets
+    Hermes resolve its provider and credential (#228).
+
+    The user's home directory is not passed on either: Hermes may adopt the login of another tool
+    it finds there when the profile's own grant is unusable, and write it into the profile. `HOME`
+    and `USERPROFILE` name an empty directory inside the throwaway instead, and no variable that
+    selects another tool's home is passed.
     """
     allowed = {
         "PATH",
@@ -44,8 +50,6 @@ def hermes_environment(home: Path, scratch: Path) -> dict[str, str]:
         "WINDIR",
         "TEMP",
         "TMP",
-        "HOME",
-        "USERPROFILE",
         "LANG",
         "LC_ALL",
         "SSL_CERT_FILE",
@@ -54,6 +58,8 @@ def hermes_environment(home: Path, scratch: Path) -> dict[str, str]:
     environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
     environment.update(
         HERMES_HOME=str(scratch),
+        HOME=str(scratch / "home"),
+        USERPROFILE=str(scratch / "home"),
         AGENTNEXUS_ARENA_PROFILE=str(home),
         HERMES_SAFE_MODE="1",
         HERMES_IGNORE_RULES="1",
@@ -140,6 +146,7 @@ class HermesArenaDriver:
         with tempfile.TemporaryDirectory(
             prefix="agentnexus-hermes-", ignore_cleanup_errors=True
         ) as scratch:
+            (Path(scratch) / "home").mkdir()
             probe = subprocess.run(  # noqa: S603 - fixed local runtime or service command
                 handle.command("--preflight"),
                 env=hermes_environment(handle.home, Path(scratch)),
@@ -175,6 +182,7 @@ class HermesArenaDriver:
         """Return the match process command: it runs the Hermes worker as its decision worker."""
         worker = handle.command("--decision")
         match = Path(arena_match.__file__).resolve()
+        (scratch / "home").mkdir(exist_ok=True)
         return Launch(
             command=[str(handle.interpreter), "-I", str(match), "--", *worker],
             environment=hermes_environment(handle.home, scratch),

@@ -676,10 +676,13 @@ def test_a_adapter_that_does_not_refuse_a_shared_home_is_noticed(
 @pytest.mark.parametrize(
     ("original", "replacement"),
     [
-        ("home = Path(os.environ[PROFILE_ENV])", 'home = Path(os.environ["HERMES_HOME"])'),
         (
-            'values = dotenv.dotenv_values(Path(os.environ[PROFILE_ENV]) / ".env"',
-            'values = dotenv.dotenv_values(Path(os.environ["HERMES_HOME"]) / ".env"',
+            'path = Path(os.environ[PROFILE_ENV]) / "config.yaml"',
+            'path = Path(os.environ["HERMES_HOME"]) / "config.yaml"',
+        ),
+        (
+            "profile = Path(os.environ[PROFILE_ENV])",
+            'profile = Path(os.environ["HERMES_HOME"])',
         ),
     ],
     ids=["config-read-from-hermes-home", "credentials-read-from-hermes-home"],
@@ -691,7 +694,7 @@ def test_an_adapter_that_reads_the_profile_from_the_wrong_place_is_noticed(
     original: str,
     replacement: str,
 ) -> None:
-    """The profile is read, and read only for its config and its credentials, from its own path."""
+    """The profile is read for its model and its credentials, and from its own path alone."""
     broken_match, broken_worker = mutated_programs(
         tmp_path / "broken", worker=((original, replacement),)
     )

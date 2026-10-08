@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -324,7 +325,8 @@ def test_the_hermes_driver_contains_no_model_or_provider_name(name: str) -> None
 def test_the_worker_reads_no_credential_file_itself() -> None:
     """Hermes reads its profile's secrets through its own scope: the worker opens no .env."""
     text = (SOURCE / "hermes_arena.py").read_text(encoding="utf-8")
-    assert "dotenv" not in text and ".env" not in text.replace("`.env`", "")
+    assert "dotenv" not in text
+    assert not re.search(r"\.env(?![A-Za-z_])", text), "the worker names a secrets file"
 
 
 def test_the_environment_given_to_hermes_has_no_real_home_and_no_other_logins(
