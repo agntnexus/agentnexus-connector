@@ -19,12 +19,14 @@ Three layers, each against the same behaviour:
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.util
 import io
 import json
 import os
 import queue
+import socket
 import subprocess
 import sys
 import threading
@@ -1014,11 +1016,12 @@ LAUNCHER = """\
 import importlib.util
 import sys
 
-arena, source, bound = sys.argv[1:4]
+arena, source, bound, cleanup = sys.argv[1:5]
 spec = importlib.util.spec_from_file_location("hermes_arena", arena)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 module.DECISION_SECONDS = {"chess": float(bound), "connect-four": float(bound)}
+module.CLEANUP_SECONDS = float(cleanup)
 sys.argv = [arena, source]
 try:
     raise SystemExit(module.main())
@@ -1095,8 +1098,18 @@ from pathlib import Path
 import model_tools
 
 BEHAVIOR = json.loads(Path(__file__).with_name("behavior.json").read_text())
+TETHER = None
+if BEHAVIOR.get("tether"):
+    # Open for as long as this process lives, so the test can tell when it is gone.
+    TETHER = socket.create_connection(("127.0.0.1", BEHAVIOR["tether"]))
 get_tool_definitions = model_tools.get_tool_definitions
 handle_function_call = model_tools.handle_function_call
+
+
+def forever():
+    # A model transport that never answers.
+    left, right = socket.socketpair()
+    left.recv(1)
 
 
 class AIAgent:
@@ -1117,16 +1130,22 @@ class AIAgent:
         print("synthetic-private-model-output")
         mode = BEHAVIOR["mode"]
         if mode == "block":
-            left, right = socket.socketpair()
-            left.recv(1)  # a transport that never answers
+            forever()
         if mode == "slow":
             time.sleep(BEHAVIOR["seconds"])
         if mode in ("fast", "slow"):
             model_tools.handle_function_call("game_move", BEHAVIOR["arguments"])
+            if BEHAVIOR.get("tail") == "hang":
+                # Hermes' ordinary closing request, issued once the tool result is back.
+                forever()
         return {"failed": False}
 
     def close(self):
-        pass
+        how = BEHAVIOR.get("close", "ok")
+        if how == "hang":
+            forever()
+        if how == "raise":
+            raise RuntimeError("synthetic-private-close-failure")
 """,
 }
 
@@ -1147,6 +1166,46 @@ def hermes_stand_in(root: Path, behavior: dict[str, Any]) -> tuple[Path, Path]:
     return source, home
 
 
+class Tethers:
+    """The test's ends of the sockets every stand-in Hermes process holds open while it lives."""
+
+    def __init__(self) -> None:
+        """Listen on loopback; each stand-in process connects once, when it starts."""
+        self.server = socket.socket()
+        self.server.bind(("127.0.0.1", 0))
+        self.server.listen()
+        self.port = self.server.getsockname()[1]
+        self.accepted: list[socket.socket] = []
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self) -> None:
+        with contextlib.suppress(OSError):
+            while True:
+                connection, _ = self.server.accept()
+                self.accepted.append(connection)
+
+    def gone(self, wait: float = 15.0) -> int:
+        """Require every connected process to be gone, and return how many there were."""
+        deadline = time.monotonic() + wait
+        for connection in list(self.accepted):
+            connection.settimeout(max(0.1, deadline - time.monotonic()))
+            try:
+                data = connection.recv(1)
+            except (ConnectionResetError, ConnectionAbortedError):
+                continue
+            except TimeoutError:
+                raise AssertionError("a Hermes process of the run is still alive") from None
+            assert data == b"", "a Hermes process of the run sent data after it should be gone"
+        return len(self.accepted)
+
+    def close(self) -> None:
+        """Stop listening and drop every connection."""
+        self.server.close()
+        for connection in self.accepted:
+            with contextlib.suppress(OSError):
+                connection.close()
+
+
 @dataclass
 class Process:
     """What a real parent and a real child did."""
@@ -1160,6 +1219,7 @@ class Process:
     reports: list[str]
     seconds: float
     leftovers: list[str]
+    tethers: Tethers
 
     @property
     def events(self) -> list[str]:
@@ -1179,12 +1239,15 @@ def run_process(
     behavior: dict[str, Any],
     *,
     bound: float = 1.5,
+    cleanup: float = 0.5,
+    turns: int = 1,
     module: ModuleType = arena_runner,
     arena: Path | None = None,
     wait: float = 30.0,
 ) -> Process:
     """Start the real adapter as a real child of a real supervisor and let it play one turn."""
-    source, home = hermes_stand_in(tmp_path, behavior)
+    tethers = Tethers()
+    source, home = hermes_stand_in(tmp_path, {**behavior, "tether": tethers.port})
     arena_file = arena or Path(hermes_arena.__file__)
     launcher = tmp_path / "launcher.py"
     launcher.write_text(LAUNCHER, encoding="utf-8")
@@ -1194,6 +1257,7 @@ def run_process(
     monkeypatch.setattr(
         hermes_arena, "DECISION_SECONDS", {"chess": bound, "connect-four": bound}, raising=False
     )
+    monkeypatch.setattr(hermes_arena, "CLEANUP_SECONDS", cleanup, raising=False)
     runner, owned = supervisor(module)
     runner_id = str(uuid.uuid4())
     runner.journal = SimpleNamespace(runner_id=runner_id, reserve=lambda identifier: True)
@@ -1207,6 +1271,7 @@ def run_process(
             str(arena_file),
             str(source),
             str(bound),
+            str(cleanup),
         ],
     )
     document = {**intent(owned.agent_id), "status": "starting", "claimed_by": runner_id}
@@ -1221,7 +1286,7 @@ def run_process(
         commands.append(command)
         if command["operation"] == "game_move":
             forwarded.append(command)
-        if forwarded:
+        if len(forwarded) >= turns:
             return {"status": "ended"}
         return {
             "status": "active",
@@ -1257,7 +1322,9 @@ def run_process(
         for name in sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
         if name not in before and "__pycache__" not in name
     ]
-    return Process(runner, child, forwarded, commands, log, raw, reports, seconds, leftovers)
+    return Process(
+        runner, child, forwarded, commands, log, raw, reports, seconds, leftovers, tethers
+    )
 
 
 def assert_no_residue(run: Process) -> None:
@@ -1267,6 +1334,8 @@ def assert_no_residue(run: Process) -> None:
     assert run.runner.worker is None and run.runner.child is None
     assert not [t for t in threading.enumerate() if isinstance(t, threading.Timer)]
     assert run.leftovers == [], "the run left files behind"
+    run.tethers.gone()
+    run.tethers.close()
 
 
 @pytest.mark.parametrize("role", ["white", "first"])
@@ -1325,6 +1394,75 @@ def test_a_fast_model_still_plays_exactly_one_move(
     assert run.events.count("model_call_started") == 1
     assert run.events.count("model_call_returned") == 1
     assert "decision_budget_expired" not in run.events and "late_move_refused" not in run.events
+    assert run.runner.terminal and run.runner.playing
+    assert_no_residue(run)
+    assert "synthetic-private" not in run.raw
+
+
+def moves_of(run: Process, role: str) -> list[dict[str, Any]]:
+    """Return the move payloads the provider received, without the parent's bound match fields."""
+    return [
+        {k: v for k, v in move.items() if k not in {"match_id", "seat", "operation"}}
+        for move in run.forwarded
+    ]
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_a_hanging_closing_request_cannot_hold_the_run_between_two_own_turns(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    role: str,
+) -> None:
+    """An accepted move ends its decision: Hermes' closing request is never waited for.
+
+    Two own turns are separated by an instant reply of the provider's computer. After each move the
+    stand-in Hermes would issue the closing request and block on it for ever; both moves must still
+    be made, one for each turn, and the run must end as a finished game.
+    """
+    behavior = {"mode": "fast", "arguments": MOVES[role], "tail": "hang"}
+    run = run_process(monkeypatch, capsys, tmp_path, role, behavior, bound=10.0, turns=2)
+    assert moves_of(run, role) == [MOVES[role], MOVES[role]], "one move for each of the two turns"
+    assert run.events.count("model_call_started") == 2
+    assert run.events.count("model_call_returned") == 2
+    assert "decision_budget_expired" not in run.events and "late_move_refused" not in run.events
+    assert run.runner.terminal and run.runner.playing
+    assert run.seconds < 8, "the run waited for a closing request instead of the next turn"
+    assert_no_residue(run)
+    assert "synthetic-private" not in run.raw
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_a_hanging_agent_close_after_an_accepted_move_costs_the_match_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    role: str,
+) -> None:
+    """A cleanup that never ends is cut off, reported, and replaced; the match plays on."""
+    behavior = {"mode": "fast", "arguments": MOVES[role], "close": "hang"}
+    run = run_process(monkeypatch, capsys, tmp_path, role, behavior, bound=10.0, turns=2)
+    assert moves_of(run, role) == [MOVES[role], MOVES[role]]
+    assert run.events.count("decision_cleanup_expired") == 2
+    assert "decision_budget_expired" not in run.events
+    assert run.runner.terminal and run.runner.playing
+    assert run.seconds < 9
+    assert_no_residue(run)
+    assert "synthetic-private" not in run.raw
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_an_agent_close_that_raises_is_reported_and_the_match_plays_on(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    role: str,
+) -> None:
+    """A cleanup failure is one fixed diagnostic: no retry of the move, no text of the failure."""
+    behavior = {"mode": "fast", "arguments": MOVES[role], "close": "raise"}
+    run = run_process(monkeypatch, capsys, tmp_path, role, behavior, bound=10.0, turns=2)
+    assert moves_of(run, role) == [MOVES[role], MOVES[role]]
+    assert run.events.count("decision_cleanup_failed") == 2
     assert run.runner.terminal and run.runner.playing
     assert_no_residue(run)
     assert "synthetic-private" not in run.raw
