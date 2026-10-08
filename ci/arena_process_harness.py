@@ -78,14 +78,116 @@ def load_config(*args, **kwargs):
 
 load_config_readonly = load_config
 """,
+    "hermes_cli/auth.py": """\
+class AuthError(Exception):
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+""",
+    "hermes_constants.py": """\
+import os
+from pathlib import Path
+
+OVERRIDES = []
+
+
+def get_hermes_home():
+    return Path(OVERRIDES[-1]) if OVERRIDES else Path(os.environ["HERMES_HOME"])
+
+
+def set_hermes_home_override(path):
+    OVERRIDES.append(str(path))
+    return len(OVERRIDES)
+
+
+def reset_hermes_home_override(token):
+    del OVERRIDES[token - 1 :]
+""",
+    "agent/__init__.py": "",
+    "agent/secret_scope.py": """\
+from pathlib import Path
+
+SCOPES = []
+
+
+def build_profile_secret_scope(path):
+    # Hermes reading its own profile .env: say which file; the credentials never leave Hermes.
+    env = Path(path) / ".env"
+    with open(Path(__file__).resolve().parents[1] / "dotenv-reads.stand-in-record", "a") as handle:
+        handle.write(str(env) + "\\n")
+    values = {}
+    if env.exists():
+        for line in env.read_text().splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                values[key] = value
+    return values
+
+
+def set_secret_scope(scope):
+    SCOPES.append(scope)
+    return len(SCOPES)
+
+
+def reset_secret_scope(token):
+    del SCOPES[token - 1 :]
+
+
+def current_scope():
+    return SCOPES[-1] if SCOPES else {}
+""",
     "hermes_cli/runtime_provider.py": """\
-def resolve_runtime_provider(**kwargs):
-    return {
-        "provider": "openrouter",
-        "base_url": "http://127.0.0.1:9",
-        "api_key": "synthetic-key",
-        "api_mode": "chat_completions",
-    }
+import json
+from pathlib import Path
+
+import hermes_constants
+from agent import secret_scope
+from hermes_cli.auth import AuthError
+
+BEHAVIOR = json.loads(Path(__file__).resolve().parents[1].joinpath("behavior.json").read_text())
+
+
+def resolve_runtime_provider(requested=None, target_model=None, explicit_base_url=None):
+    # Hermes' own resolver: the credential of the configured provider, from where Hermes keeps it.
+    shape = BEHAVIOR.get("resolve_shape")
+    if BEHAVIOR.get("credentials") == "subscription":
+        home = hermes_constants.get_hermes_home()
+        # Like Hermes' credential store, whose lock exists as soon as the store is consulted.
+        (home / "auth.lock").touch()
+        store = home / "auth.json"
+        if not store.exists():
+            raise AuthError("codex_auth_missing")
+        grant = json.loads(store.read_text())["providers"][requested]["tokens"]
+        resolved = {
+            "provider": requested,
+            "api_mode": "codex_responses",
+            "base_url": explicit_base_url,
+            "api_key": grant["access_token"],
+            "source": "device_code",
+            "requested_provider": requested,
+            "credential_pool": object(),
+        }
+    else:
+        key = secret_scope.current_scope().get("OPENROUTER_API_KEY")
+        if not key:
+            raise AuthError("missing_key")
+        resolved = {
+            "provider": requested or "openrouter",
+            "api_mode": "chat_completions",
+            "base_url": "http://127.0.0.1:9",
+            "api_key": key,
+            "source": "env:OPENROUTER_API_KEY",
+            "requested_provider": requested,
+        }
+    if shape == "command":
+        resolved["command"] = "synthetic-external-transport"
+    elif shape == "acp_command":
+        resolved["acp_command"] = "synthetic-external-transport"
+    elif shape == "app_server":
+        resolved["api_mode"] = "codex_app_server"
+    elif shape == "acp_url":
+        resolved["base_url"] = "acp://synthetic"
+    return resolved
 """,
     "tools/__init__.py": "",
     "tools/tool_search.py": """\
@@ -113,14 +215,7 @@ def create_custom_toolset(name, description, tools):
     return None
 """,
     "dotenv.py": """\
-from pathlib import Path
-
-
-def dotenv_values(*args, **kwargs):
-    # Say which file was asked for: the credentials come from the profile, not from Hermes' home.
-    with open(Path(__file__).with_name("dotenv-reads.stand-in-record"), "a") as handle:
-        handle.write(str(args[0]) + "\\n")
-    return {}
+raise ImportError("the Arena worker must not read credentials itself: Hermes does")
 """,
     "model_tools.py": """\
 def get_tool_definitions(*args, **kwargs):
@@ -184,6 +279,10 @@ def scaffold():
 
 
 scaffold()
+_environment_record = BEHAVIOR.get("environment")
+if _environment_record:
+    with open(_environment_record, "a", encoding="utf-8") as _handle:
+        _handle.write(json.dumps(dict(os.environ)) + "\\n")
 get_tool_definitions = model_tools.get_tool_definitions
 handle_function_call = model_tools.handle_function_call
 
@@ -204,9 +303,31 @@ class AIAgent:
         skip_context_files=True,
         skip_memory=True,
         skip_background_review=True,
+        api_key=None,
+        base_url=None,
+        model=None,
         **rest,
     ):
         self.tools = model_tools.get_tool_definitions(enabled_toolsets=enabled_toolsets)
+        self.api_key, self.base_url, self.model = api_key, base_url, model
+        self.rest = rest
+        record = BEHAVIOR.get("agents")
+        if record:
+            with open(record, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"model": model, "extra": sorted(rest)}) + "\\n")
+
+    def ask(self):
+        # One request to the model transport, as Hermes would make it: the key is the bearer.
+        import urllib.request
+
+        names = [item["function"]["name"] for item in self.tools]
+        request = urllib.request.Request(
+            self.base_url + "/responses",
+            data=json.dumps({"tools": names, "model": self.model}).encode(),
+            headers={"Authorization": "Bearer " + self.api_key, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request) as answer:  # blocks for ever if the server does
+            return json.loads(answer.read())
 
     def run_conversation(self, prompt):
         print("synthetic-private-model-output")
@@ -216,13 +337,33 @@ class AIAgent:
         if mode == "slow":
             time.sleep(BEHAVIOR["seconds"])
         if mode in ("fast", "slow"):
-            model_tools.handle_function_call("game_move", BEHAVIOR["arguments"])
+            if BEHAVIOR.get("transport") == "http":
+                call = self.ask()["function_call"]
+                model_tools.handle_function_call(call["name"], call["arguments"])
+                # Hermes would ask the model once more now: the closing request.
+                self.ask()
+            else:
+                model_tools.handle_function_call("game_move", BEHAVIOR["arguments"])
             if BEHAVIOR.get("tail") == "hang":
                 # Hermes' ordinary closing request, issued once the tool result is back.
                 forever()
         return {"failed": False}
 
     def close(self):
+        change = BEHAVIOR.get("owner_changes")
+        if change:
+            # The owner edits the profile while a match runs: a new model, and a rotated grant.
+            profile = Path(change["profile"])
+            (profile / "config.yaml").write_text(change["config"], encoding="utf-8")
+            if change.get("grant"):
+                (profile / "auth.json").write_text(change["grant"], encoding="utf-8")
+        seen = BEHAVIOR.get("home_listing")
+        if seen:
+            held = [str(p.relative_to(HOME)) for p in HOME.rglob("*") if p.is_file()]
+            text = " ".join((HOME / name).read_text(errors="ignore") for name in held)
+            holds = BEHAVIOR.get("token", "?") in text
+            with open(seen, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"files": held, "holds_token": holds}) + "\\n")
         how = BEHAVIOR.get("close", "ok")
         if how == "hang":
             forever()
@@ -230,6 +371,27 @@ class AIAgent:
             raise RuntimeError("synthetic-private-close-failure")
 """,
 }
+
+
+#: The fake grant of a subscription profile. It exists only in a disposable profile.
+SUBSCRIPTION_TOKEN = "synthetic-subscription-access-token-0001"  # noqa: S105 - a fixture
+
+
+def subscription_auth(token: str = SUBSCRIPTION_TOKEN) -> str:
+    """Return an auth store of the shape a Hermes subscription login writes."""
+    return json.dumps(
+        {
+            "version": 1,
+            "providers": {
+                "openai-codex": {
+                    "tokens": {"access_token": token, "refresh_token": "synthetic-refresh-0001"},
+                    "last_refresh": "2026-10-08T00:00:00Z",
+                    "auth_mode": "chatgpt",
+                }
+            },
+            "active_provider": "openai-codex",
+        }
+    )
 
 
 def hermes_stand_in(root: Path, behavior: dict[str, Any]) -> tuple[Path, Path]:
@@ -242,9 +404,18 @@ def hermes_stand_in(root: Path, behavior: dict[str, Any]) -> tuple[Path, Path]:
     (source / "behavior.json").write_text(json.dumps(behavior), encoding="utf-8")
     home = root / "home"
     home.mkdir()
+    subscription = behavior.get("credentials") == "subscription"
     (home / "config.yaml").write_text(
-        "model:\n  provider: openrouter\n  default: synthetic-model\n", encoding="utf-8"
+        "model:\n  provider: openai-codex\n  default: synthetic-subscription-model\n"
+        f"  base_url: {behavior['server_url']}\n  context_length: 272000\n"
+        if subscription
+        else "model:\n  provider: openrouter\n  default: synthetic-model\n",
+        encoding="utf-8",
     )
+    if subscription:
+        (home / "auth.json").write_text(subscription_auth(), encoding="utf-8")
+        if behavior.get("lock", True):
+            (home / "auth.lock").write_text(" ", encoding="utf-8")
     # A disposable profile with a fake credential and files whose bytes are known: a Hermes that
     # reads or rewrites any of them is seen by the snapshot.
     for name, text in {
@@ -542,13 +713,17 @@ def run_process(
     )
 
 
-def assert_profile_untouched(run: Process) -> None:
+def assert_profile_untouched(run: Process, allowed: frozenset[str] = frozenset()) -> None:
     """Require the disposable profile byte for byte as it was, and Hermes' own home gone.
 
     The stand-in fills the home it is given the way the real Hermes was measured to. If that home
     were the profile, the snapshot would differ; and if it is a scratch directory, none may remain.
     """
-    changes = profile_changes(run.profile_before, run.profile_after)
+    changes = [
+        change
+        for change in profile_changes(run.profile_before, run.profile_after)
+        if change.split(" ", 1)[1] not in allowed
+    ]
     assert changes == [], f"the run changed the Hermes profile: {changes}"
     assert run.homes, "the stand-in never filled a Hermes home, so nothing was proven"
     for home in run.homes:
@@ -559,9 +734,9 @@ def assert_profile_untouched(run: Process) -> None:
     assert set(run.env_reads) == {str(run.profile / ".env")}, "credentials came from elsewhere"
 
 
-def assert_no_residue(run: Process) -> None:
+def assert_no_residue(run: Process, allowed: frozenset[str] = frozenset()) -> None:
     """Require the child dead and reaped, its pipes shut and no thread of ours lingering."""
-    assert_profile_untouched(run)
+    assert_profile_untouched(run, allowed)
     assert run.child.poll() is not None, "the child process is still running"
     assert run.child.stdin.closed and run.child.stdout.closed
     assert run.runner.worker is None and run.runner.child is None
