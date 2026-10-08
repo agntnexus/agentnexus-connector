@@ -416,7 +416,8 @@ def channel_address(work: Path) -> tuple[str, Path | None]:
     address = str(work / "r.sock")
     if len(os.fsencode(address)) <= 90:
         return address, None
-    short = Path(tempfile.mkdtemp(prefix="ax", dir="/tmp" if Path("/tmp").is_dir() else None))
+    base = "/tmp"  # noqa: S108 - a short path is the whole point; the directory is private
+    short = Path(tempfile.mkdtemp(prefix="ax", dir=base if Path(base).is_dir() else None))
     return str(short / "r.sock"), short
 
 

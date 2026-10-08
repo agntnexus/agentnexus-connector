@@ -11,6 +11,7 @@ import io
 import json
 import os
 import queue
+import signal
 import shutil
 import subprocess
 import sys
@@ -20,7 +21,7 @@ from typing import Any
 
 import pytest
 from arena_fakes import expect_guard, load_mutant
-from arena_openclaw_support import stand_in_handle
+from arena_openclaw_support import stand_in_handle, survivors
 from arena_process_harness import profile_changes, snapshot
 from fake_chat_model import FakeChatModel
 
@@ -72,6 +73,14 @@ def test_the_reviewed_openclaw_install_proves_its_isolated_three_tool_path(
     """Exercise the installed CLI only with a disposable profile and loopback canary model."""
     command = json.loads(os.environ["AGENTNEXUS_OPENCLAW_COMMAND"])
     assert isinstance(command, list) and command and all(isinstance(part, str) for part in command)
+    version = subprocess.run(
+        [*command, "--version"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert version.returncode == 0 and "OpenClaw 2026.9.9" in version.stdout
     config = tmp_path / "profile" / "openclaw.json"
     config.parent.mkdir()
     config.write_text(json.dumps(model.profile_config()), encoding="utf-8")
@@ -109,6 +118,28 @@ def test_a_runtime_that_fails_after_reporting_its_tools_is_refused(
     assert raised.value.code == "preflight_refused"
 
 
+def test_the_preflight_exit_status_guard_is_live(
+    tmp_path: Path, model: FakeChatModel
+) -> None:
+    """Removing the invocation-success check makes the failed-runtime oracle fail."""
+
+    def refuses_failed_runtime(module: ModuleType) -> None:
+        handle = stand_in_handle(
+            tmp_path / module.__name__.replace(".", "_"), model, fault="cleanup_fail"
+        )
+        with pytest.raises(arena_driver.DriverRefusedError) as raised:
+            arena_driver.check_preflight(module.OpenClawArenaDriver(), handle)
+        assert raised.value.code == "preflight_refused"
+
+    mutant = load_mutant(
+        tmp_path / "mutants",
+        arena_driver_openclaw,
+        "                if canary_run.returncode != 0:\n                    raise refusal\n",
+        "                if False:\n                    raise refusal\n",
+    )
+    expect_guard(refuses_failed_runtime, arena_driver_openclaw, mutant)
+
+
 def test_a_profile_with_no_usable_route_is_refused_before_any_claim(
     tmp_path: Path, model: FakeChatModel
 ) -> None:
@@ -119,6 +150,32 @@ def test_a_profile_with_no_usable_route_is_refused_before_any_claim(
         arena_driver.check_preflight(driver, handle)
     assert raised.value.code == "preflight_refused"
     assert str(raised.value) == "OpenClaw refused the exact three-tool Arena preflight."
+
+
+def test_a_timed_out_preflight_reaps_the_runtime_process_tree(
+    tmp_path: Path, model: FakeChatModel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A preflight timeout must not leave the runtime or its MCP child running."""
+    monkeypatch.setattr(arena_driver_openclaw, "STEP_SECONDS", 20)
+    monkeypatch.setattr(arena_driver_openclaw, "CANARY_SECONDS", 2)
+    handle = stand_in_handle(tmp_path, model, fault="hang,leak_child,ignore_sigterm")
+    driver = arena_driver_openclaw.OpenClawArenaDriver()
+    try:
+        with pytest.raises(arena_driver.DriverRefusedError):
+            arena_driver.check_preflight(driver, handle)
+        leaked = survivors(tmp_path, wait=2.0)
+        assert leaked == [], f"preflight left runtime processes alive: {leaked}"
+    finally:
+        for pid in survivors(tmp_path, wait=0.1):
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+            else:
+                os.kill(pid, signal.SIGKILL)
 
 
 def inspect_with(
