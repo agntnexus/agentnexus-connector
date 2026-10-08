@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -525,6 +526,71 @@ def test_an_agent_close_that_raises_is_reported_and_the_match_plays_on(
     assert run.runner.terminal and run.runner.playing
     assert_no_residue(run)
     assert "synthetic-private" not in run.raw
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_a_move_accepted_near_the_cutoff_is_not_lost_to_a_cleanup_that_runs_past_it(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    role: str,
+) -> None:
+    """The cutoff is for the model; once the move is accepted a slow cleanup cannot end the run.
+
+    The move is accepted at 2.2 s of a 2.5 s turn and the cleanup never ends. It is cut off at its
+    own bound, after the turn's cutoff, and the parent's window must not have been waiting for that.
+    """
+    behavior = {"mode": "slow", "seconds": 2.2, "arguments": MOVES[role], "close": "hang"}
+    run = run_process(
+        monkeypatch, capsys, tmp_path, role, behavior, bound=2.5, cleanup=1.0, turns=1
+    )
+    assert moves_of(run, role) == [MOVES[role]]
+    assert "decision_budget_expired" not in run.events
+    assert run.events.count("decision_cleanup_expired") == 1
+    assert run.runner.terminal and run.runner.playing
+    assert_no_residue(run)
+
+
+HELPER = """\
+import os
+import subprocess
+import sys
+import time
+
+# A helper that inherits the worker's stdout pipe and outlives it, as a Hermes helper process could.
+helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(40)"])
+open(sys.argv[1], "w").write(str(helper.pid))
+time.sleep(120)
+"""
+
+
+def test_ending_a_worker_does_not_wait_for_a_helper_that_holds_its_pipe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The reader of a pipe that never closes must not make ending the worker take for ever."""
+    script = tmp_path / "worker_with_helper.py"
+    script.write_text(HELPER, encoding="utf-8")
+    pid_file = tmp_path / "helper.pid"
+    real = subprocess.Popen
+
+    def popen(command: list[str], **kwargs: Any) -> Any:
+        return real([sys.executable, str(script), str(pid_file)], **kwargs)
+
+    monkeypatch.setattr(hermes_arena.subprocess, "Popen", popen)
+    worker = hermes_arena.Worker("source")
+    try:
+        deadline = time.monotonic() + 20
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.3)
+        begun = time.monotonic()
+        worker.close()
+        elapsed = time.monotonic() - begun
+        assert elapsed < 12, f"ending the worker took {elapsed:.1f} s behind a helper's pipe"
+    finally:
+        if pid_file.exists():
+            with contextlib.suppress(OSError):
+                os.kill(int(pid_file.read_text()), getattr(signal, "SIGKILL", signal.SIGTERM))
 
 
 # ---------------------------------------------------------------------------------------------

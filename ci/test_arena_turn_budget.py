@@ -513,21 +513,6 @@ def test_a_cleanup_just_inside_its_bound_is_accepted_and_one_at_or_after_it_is_n
 
 
 @pytest.mark.parametrize("role", ["white", "first"])
-@pytest.mark.parametrize(
-    ("after", "expired"), [(0.999, False), (1.0, True), (1.5, True), (30.0, True)]
-)
-def test_a_cleanup_is_bound_by_the_turn_when_the_decision_ends_near_its_cutoff(
-    monkeypatch: pytest.MonkeyPatch, role: str, after: float, expired: bool
-) -> None:
-    """A move at 44 s leaves 1 s of the turn: the cleanup gets that, not the full bound."""
-    played = play(monkeypatch, role, move_after(44), turns=2, close=("after", after))
-    assert played.error is None and played.code == 0
-    assert len(played.match.forwarded) == 2, "the accepted move stands whatever the cleanup does"
-    assert ("decision_cleanup_expired" in played.events) is expired
-    assert "decision_budget_expired" not in played.events
-
-
-@pytest.mark.parametrize("role", ["white", "first"])
 def test_a_request_a_finished_decision_leaves_behind_is_not_served(
     monkeypatch: pytest.MonkeyPatch, role: str
 ) -> None:
@@ -545,7 +530,156 @@ def test_a_worker_that_is_not_ready_ends_the_run_before_the_seat_is_joined(
     played = play(monkeypatch, role, move_after(1), ready=False)
     assert played.code == 3
     assert played.operations == []
+    assert played.events == ["runtime_exception"]
     assert all(worker.dead for worker in played.workers.spawned)
+
+
+# ---------------------------------------------------------------------------------------------
+# What an accepted move changes: no turn cutoff after it, a staged move through a read, the order
+# ---------------------------------------------------------------------------------------------
+
+
+def test_the_settle_and_ready_bounds_are_named_and_sized() -> None:
+    """After an accepted move the match gets time to settle; a worker gets time to start."""
+    settle = hermes_arena.SETTLE_SECONDS
+    assert settle >= hermes_arena.CLEANUP_SECONDS + 15, "cleanup, a kill, a reap and a respawn"
+    assert hermes_arena.READY_SECONDS >= 120, (
+        "Hermes may need a long time to start on a slow device"
+    )
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_a_staged_move_delivered_by_a_read_ends_the_decision(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """The provider applied the move but its answer was lost; the read that resends it lands it.
+
+    The SDK keeps an unresolved move staged and sends it again on the next state read. That read is
+    then the acceptance: the decision is over, and the model must not go on to a closing request or
+    to a second move.
+    """
+    reached: list[int] = []
+
+    def move_then_read(decision: Decision) -> Any:
+        lost = decision.call("game_move")
+        assert lost == {"error": "games.provider_unavailable", "uncertain": True}
+        decision.call("game_state", {})
+        reached.append(decision.index)  # only reached if the read's result came back
+        decision.block()
+
+    played = play(monkeypatch, role, move_then_read, turns=2, waits=2, lose_answer=True)
+    for worker in played.workers.spawned:
+        worker.kill()
+    assert reached == [], "the decision went on after the staged move landed"
+    assert played.error is None and played.code == 0
+    assert len(played.match.forwarded) == 2
+    assert "decision_cleanup_expired" not in played.events
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_a_move_accepted_after_the_cutoff_by_a_slow_round_trip_still_ends_the_decision(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """Admitted just before the cutoff, accepted just after: the cutoff no longer applies to it."""
+    played = play(monkeypatch, role, move_after(LIMIT - 0.2), turns=2, move_seconds=0.5)
+    assert played.error is None and played.code == 0
+    assert len(played.match.forwarded) == 2
+    assert "decision_cleanup_expired" not in played.events
+    assert "decision_budget_expired" not in played.events
+    assert len(played.workers.spawned) == 1, "a healthy worker was cut off for the turn's cutoff"
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+@pytest.mark.parametrize(
+    ("after", "expired"),
+    [
+        (0.999, False),
+        (1.0, False),
+        (1.5, False),
+        (hermes_arena.CLEANUP_SECONDS - 0.001, False),
+        (float(hermes_arena.CLEANUP_SECONDS), True),
+        (hermes_arena.CLEANUP_SECONDS + 0.001, True),
+        (60.0, True),
+    ],
+)
+def test_after_an_accepted_move_the_cleanup_bound_is_its_own_and_not_the_turns(
+    monkeypatch: pytest.MonkeyPatch, role: str, after: float, expired: bool
+) -> None:
+    """A move accepted at 44 s leaves the cleanup its full bound, not the turn's last second."""
+    played = play(monkeypatch, role, move_after(44), turns=2, close=("after", after))
+    assert played.error is None and played.code == 0
+    assert len(played.match.forwarded) == 2, "the accepted move stands whatever the cleanup does"
+    assert ("decision_cleanup_expired" in played.events) is expired
+    assert "decision_budget_expired" not in played.events
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+@pytest.mark.parametrize("after", [0.999, 1.0, 1.5])
+def test_without_a_move_the_cleanup_is_bound_by_what_is_left_of_the_turn(
+    monkeypatch: pytest.MonkeyPatch, role: str, after: float
+) -> None:
+    """While no move is accepted the parent's window is the turn's: cleanup stays inside it."""
+    played = play(monkeypatch, role, no_move(44), close=("after", after))
+    first = played.events[: played.events.index("model_call_returned")]
+    assert ("decision_cleanup_expired" in first) is (after >= 1.0)
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_the_worker_is_killed_before_the_expiry_is_reported(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """The parent ends the match process the moment it reads the report: the worker goes first."""
+
+    def blocks(decision: Decision) -> Any:
+        decision.block()
+
+    played = play(monkeypatch, role, blocks)
+    assert played.at_event["decision_budget_expired"]["dead"] == [True]
+    late = play(monkeypatch, role, move_after(LIMIT + 5))
+    assert late.at_event["late_move_refused"]["dead"] == [True]
+    assert late.at_event["decision_budget_expired"]["dead"] == [True]
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_a_decision_is_reported_returned_before_its_worker_is_reaped_and_replaced(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """Ending and replacing a stuck worker is not part of the decision: it follows the report."""
+    played = play(monkeypatch, role, move_after(1), turns=2, close="hang")
+    seen = played.at_event["model_call_returned"]
+    assert seen["dead"] == [True], "the stuck worker was not killed before the report"
+    assert seen["spawned"] == 1, "the replacement was started before the decision was reported"
+    assert len(played.workers.spawned) == 3
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_a_garbled_cleanup_is_a_failed_cleanup_and_the_match_goes_on(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """A worker line that is no protocol line, after an accepted move, loses the match nothing."""
+    played = play(monkeypatch, role, move_after(1), turns=2, close="garbled")
+    for worker in played.workers.spawned:
+        worker.kill()
+    assert played.error is None and played.code == 0
+    assert len(played.match.forwarded) == 2
+    assert played.events.count("decision_cleanup_failed") == 2
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_a_garbled_decision_is_a_fixed_failure_of_the_run(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """Before a move is accepted a worker that garbles its protocol ends the run, fail closed."""
+
+    def garbles(decision: Decision) -> Any:
+        decision.garble()
+
+    played = play(monkeypatch, role, garbles)
+    for worker in played.workers.spawned:
+        worker.kill()
+    assert played.error is None and played.code == 3
+    assert played.events == ["model_call_started", "model_call_exception"]
+    assert played.match.forwarded == []
 
 
 # ---------------------------------------------------------------------------------------------
@@ -627,15 +761,20 @@ def serve(
     clock: Clock | None = None,
     module: ModuleType = arena_runner,
     uncertain: bool = False,
+    refuse_first_state: bool = False,
 ) -> tuple[Any, FakeChild, list[dict[str, Any]], list[str]]:
     """Serve one scripted child and return the runner, child, forwarded commands and log events."""
     runner, owned = supervisor(module)
     forwarded: list[dict[str, Any]] = []
+    refused: list[int] = []
 
     def game(command: dict[str, Any], **kwargs: object) -> dict[str, Any]:
         forwarded.append(command)
         if uncertain and command["operation"] == "game_move":
             raise games.GameRefusedError("games.provider_unavailable", "lost", retryable=True)
+        if refuse_first_state and command["operation"] == "game_state" and not refused:
+            refused.append(1)
+            raise games.GameRefusedError("provider.move_not_legal", "refused")
         return {"status": "active", "game_version": "connect-four-1-solo"}
 
     monkeypatch.setattr(module.bridge, "_run_game_command", game)
@@ -758,7 +897,7 @@ def test_an_uncertain_move_is_forwarded_once_and_is_not_a_success(
     raw = capsys.readouterr().out
     assert calls == ["game_join", "game_move"], "the runner repeated or re-sent the move"
     answers = [json.loads(line) for line in child.stdin.getvalue().splitlines()]
-    assert answers[-1] == {"result": {"error": "games.provider_unavailable"}}
+    assert answers[-1] == {"result": {"error": "games.provider_unavailable", "uncertain": True}}
     assert not runner.terminal and "synthetic-private" not in raw
 
 
@@ -915,6 +1054,147 @@ def test_a_second_move_in_one_decision_is_refused_by_the_parent_too(
     )
     assert [c["operation"] for c in forwarded] == ["game_join", "game_move"]
     assert events[-1] == "protocol_refused"
+
+
+def serve_live(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    script: list[tuple[float, str]],
+    *,
+    cutoff: float,
+    settle: float,
+    slow_move: float = 0.0,
+    wait: float = 4.0,
+) -> tuple[FakeChild, list[str], list[str], float]:
+    """Serve a scripted child in real time, with real timers, and say what happened.
+
+    Each line is fed after its delay. Returns the child, the operations forwarded, the log events
+    and the seconds from the last line to the end of the serve.
+    """
+    monkeypatch.setattr(
+        hermes_arena, "DECISION_SECONDS", {"chess": cutoff, "connect-four": cutoff}, raising=False
+    )
+    monkeypatch.setattr(hermes_arena, "SETTLE_SECONDS", settle, raising=False)
+    runner, owned = supervisor()
+    forwarded: list[str] = []
+
+    def game(command: dict[str, Any], **kwargs: object) -> dict[str, Any]:
+        forwarded.append(command["operation"])
+        if command["operation"] == "game_move":
+            time.sleep(slow_move)
+        return {"status": "active", "game_version": "connect-four-1-solo"}
+
+    monkeypatch.setattr(arena_runner.bridge, "_run_game_command", game)
+    pipe = OpenPipe()
+    child = FakeChild(pipe)
+    thread = threading.Thread(
+        target=arena_runner.ArenaRunner._serve, args=(runner, child, owned), daemon=True
+    )
+    thread.start()
+    for delay, line in script:
+        time.sleep(delay)
+        pipe.feed(line)
+    fed = time.monotonic()
+    finished = runner.finished.wait(timeout=wait)
+    elapsed = time.monotonic() - fed
+    if not finished:
+        child.kill()  # the test's own cleanup of a serve the code under test failed to end
+    thread.join(timeout=5)
+    events = [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines()]
+    return child, forwarded, events, elapsed
+
+
+def test_an_accepted_move_ends_the_turns_cutoff_for_the_parents_window(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """After the provider accepted the move the 45 seconds are over: the match may settle."""
+    child, forwarded, events, _ = serve_live(
+        monkeypatch,
+        capsys,
+        [(0, JOIN), (0, started()), (0.1, MOVE), (1.0, RETURNED), (0, FINISHED)],
+        cutoff=0.5,
+        settle=5.0,
+    )
+    assert forwarded == ["game_join", "game_move"]
+    assert child.killed == 0, "the match process was cut off for the turn's cutoff after its move"
+    assert "decision_budget_expired" not in events
+
+
+def test_a_move_in_flight_at_the_cutoff_is_not_cut_off(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Admitted before the cutoff and still on its way when it comes: the timer waits."""
+    child, forwarded, events, _ = serve_live(
+        monkeypatch,
+        capsys,
+        [(0, JOIN), (0, started()), (0.1, MOVE), (1.5, RETURNED), (0, FINISHED)],
+        cutoff=0.4,
+        settle=5.0,
+        slow_move=0.8,
+    )
+    assert forwarded == ["game_join", "game_move"]
+    assert child.killed == 0, "the match process was killed while its accepted move was in flight"
+    assert "decision_budget_expired" not in events
+
+
+def test_a_match_process_that_does_not_report_back_after_an_accepted_move_is_cut_off(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The window is not abandoned after the move: a wedged match process is still ended."""
+    child, _, events, elapsed = serve_live(
+        monkeypatch,
+        capsys,
+        [(0, JOIN), (0, started()), (0.1, MOVE)],
+        cutoff=5.0,
+        settle=0.4,
+        wait=3.0,
+    )
+    assert child.killed == 1
+    assert events.count("decision_budget_expired") == 1
+    assert elapsed < 2.5, "the settle bound was not what ended it"
+
+
+def test_a_staged_move_delivered_by_a_read_is_the_acceptance_for_the_parent_too(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The read that resends a staged move lands it: a second move of the decision is refused."""
+    _, _, forwarded, events = serve(
+        monkeypatch,
+        capsys,
+        [JOIN, started(), MOVE, STATE, MOVE, FINISHED],
+        clock=Clock(),
+        uncertain=True,
+    )
+    assert [c["operation"] for c in forwarded] == ["game_join", "game_move", "game_state"]
+    assert events[-1] == "protocol_refused"
+
+
+def test_a_staged_move_settled_by_the_provider_stops_holding_back_the_reads(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The provider refused the staged move for good: nothing is staged, a later read is a read."""
+    clock = Clock()
+    base = clock.now
+
+    def at() -> None:
+        clock.now = base + LIMIT + 10
+
+    _, child, forwarded, events = serve(
+        monkeypatch,
+        capsys,
+        [JOIN, started(), MOVE, RETURNED, STATE, at, STATE, FINISHED],
+        clock=clock,
+        uncertain=True,
+        refuse_first_state=True,
+    )
+    assert [c["operation"] for c in forwarded] == [
+        "game_join",
+        "game_move",
+        "game_state",
+        "game_state",
+    ]
+    assert "late_move_refused" not in events
+    assert child.killed == 0
 
 
 def log_exclusion_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -37,6 +37,7 @@ MOVES: dict[str, dict[str, Any]] = {
 }
 HUNG = object()
 KILL = object()
+BAD = object()
 
 
 class Clock:
@@ -68,6 +69,7 @@ class FakeParent:
         self.messages: list[dict[str, Any]] = []
         self.raw = ""
         self._partial = ""
+        self.on_diagnostic: Callable[[str], None] | None = None
 
     def write(self, text: str) -> int:
         """Take what the match process writes; a request is answered, a diagnostic recorded."""
@@ -77,6 +79,8 @@ class FakeParent:
             line, self._partial = self._partial.split("\n", 1)
             message = json.loads(line)
             self.messages.append(message)
+            if "diagnostic" in message and self.on_diagnostic is not None:
+                self.on_diagnostic(message["diagnostic"])
             if "diagnostic" not in message and message != {"finished": True}:
                 self.replies.append(json.dumps({"result": self.answer(message)}) + "\n")
         return len(text)
@@ -103,6 +107,8 @@ class Match:
         refuse_first: bool = False,
         flip_on_read: int | None = None,
         read_seconds: float = 0.0,
+        move_seconds: float = 0.0,
+        lose_answer: bool = False,
     ) -> None:
         """Play `turns` of this seat's turns; the opponent takes `waits` reads to answer.
 
@@ -113,6 +119,7 @@ class Match:
         self.clock, self.turns, self.waits = clock, turns, waits
         self.join_seconds, self.refuse_first = join_seconds, refuse_first
         self.flip_on_read, self.reads, self.read_seconds = flip_on_read, 0, read_seconds
+        self.move_seconds, self.lose_answer, self.lost = move_seconds, lose_answer, False
         self.accepted = 0
         self.refused = False
         self.waiting = 0
@@ -138,11 +145,16 @@ class Match:
             return self.view()
         if operation == "game_move":
             self.forwarded.append(message)
+            self.clock.now += self.move_seconds
             if self.refuse_first and not self.refused:
                 self.refused = True
                 return {"error": "provider.move_not_legal"}
             self.accepted += 1
             self.waiting = self.waits
+            if self.lose_answer and not self.lost:
+                # The provider applied the move; the answer never arrived (the SDK keeps it staged).
+                self.lost = True
+                return {"error": "games.provider_unavailable"}
             return self.view()
         self.reads += 1
         self.clock.now += self.read_seconds
@@ -220,6 +232,11 @@ class Decision:
             raise Complete
         return reply["result"]
 
+    def garble(self) -> None:
+        """Say something that is not a protocol line, then never return."""
+        self.worker.out.put(BAD)
+        self.block()
+
     def block(self) -> None:
         """Never return, as a transport or cleanup that never answers; only a kill ends it."""
         self.worker.out.put(HUNG)
@@ -278,9 +295,13 @@ class FakeWorker:
         if how == "hang":
             decision.block()
         if isinstance(how, tuple):  # ("after", seconds): the cleanup takes this long
-            self.clock.now += how[1]
+            self.out.put(how)
+            return
         if how == "chatty":  # a request after the decision is over: it must not be served
             self.out.put({"operation": "game_move", **MOVES[decision.role]})
+        if how == "garbled":  # the cleanup says something that is not a protocol line
+            self.out.put(BAD)
+            decision.block()
         failed = how == "raise"
         self.out.put({"decision": "close_failed" if failed else "closed"})
 
@@ -301,6 +322,12 @@ class FakeWorker:
         if item is HUNG:
             self.clock.now += max(0.0, timeout)
             raise queue.Empty
+        if item is BAD:
+            raise ValueError("Invalid protocol line.")
+        if isinstance(item, tuple):
+            # The cleanup took this long, counted when the match process reads that it ended.
+            self.clock.now += item[1]
+            return {"decision": "closed"}
         if item is None:
             self.ended = True
             return None
@@ -331,9 +358,11 @@ class Workers:
         close: Any = "ok",
         *,
         ready: bool = True,
+        spawn_seconds: float = 0.0,
     ) -> None:
         """Take a behaviour for each decision (the last repeats) and a cleanup ending for each."""
         self.clock, self.behavior, self.close_mode, self.ready = clock, behavior, close, ready
+        self.spawn_seconds = spawn_seconds
         self.spawned: list[FakeWorker] = []
         self.commands: list[dict[str, Any]] = []
         self.decisions = 0
@@ -351,7 +380,9 @@ class Workers:
         return self.close_mode
 
     def __call__(self, source: str) -> FakeWorker:
-        """Start a worker, as `spawn_worker` does."""
+        """Start a worker, as `spawn_worker` does; a replacement takes `spawn_seconds`."""
+        if self.spawned:
+            self.clock.now += self.spawn_seconds
         worker = FakeWorker(self)
         self.spawned.append(worker)
         return worker
@@ -390,6 +421,7 @@ class Played:
     clock: Clock
     workers: Workers
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    at_event: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def events(self) -> list[str]:
@@ -417,14 +449,27 @@ def play(
     provider: Any = None,
     still: bool = False,
     ready: bool = True,
+    spawn_seconds: float = 0.0,
     **options: Any,
 ) -> Played:
     """Run the match process against a scripted seat, a fake clock and fake workers."""
     clock = Clock(still=still)
     seat = provider or Match(role, clock, **options)
     parent = FakeParent(seat.answer)
-    workers = Workers(clock, behavior, close, ready=ready)
+    workers = Workers(clock, behavior, close, ready=ready, spawn_seconds=spawn_seconds)
     played = Played(None, None, seat, parent, clock, workers)
+
+    def observe(event: str) -> None:
+        played.at_event.setdefault(
+            event,
+            {
+                "dead": [worker.dead for worker in workers.spawned],
+                "spawned": len(workers.spawned),
+                "now": clock.now,
+            },
+        )
+
+    parent.on_diagnostic = observe
     monkeypatch.setattr(module, "spawn_worker", workers)
     monkeypatch.setattr(
         module, "time", SimpleNamespace(monotonic=clock.monotonic, sleep=clock.sleep)
