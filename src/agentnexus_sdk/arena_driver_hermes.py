@@ -7,6 +7,7 @@ else. The decision worker (`hermes_arena.py`) is the only program that imports H
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -161,9 +162,28 @@ class HermesArenaDriver:
         return tools
 
     def generation(self, handle: HermesRun) -> str | None:
-        """Offer no generation yet: the supervisor proves the contract again when it must."""
-        del handle
-        return None
+        """Return an opaque token that changes when what Hermes plays with does.
+
+        Metadata only, never content: the modification time and size of the profile's model
+        configuration and of its secrets file, and of the installation's revision markers. The
+        profile's credential store is left out, because Hermes rewrites it at every refresh. The
+        files may hold credentials, so none of them is read here.
+        """
+        digest = hashlib.sha256()
+        for label, path in (
+            ("model", handle.home / "config.yaml"),
+            ("secrets", handle.home / ".env"),
+            ("revision", handle.source / ".git" / "HEAD"),
+            ("project", handle.source / "pyproject.toml"),
+        ):
+            try:
+                info = path.stat()
+            except OSError:
+                marker = "absent"
+            else:
+                marker = f"{info.st_mtime_ns}:{info.st_size}"
+            digest.update(f"{label}={marker};".encode())
+        return digest.hexdigest()[:32]
 
     def declared_model(self, handle: HermesRun) -> str | None:
         """Return what Hermes reports for the profile, through the one RMD-1 path, or `None`.
