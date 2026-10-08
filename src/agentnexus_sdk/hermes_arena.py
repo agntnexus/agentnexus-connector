@@ -10,6 +10,9 @@ process that does: it keeps Hermes configured between decisions, makes each deci
 agent, and can be ended by a kill at any time. Once the provider has accepted a move, a closing
 request that never answers or a cleanup that never ends is therefore the worker's loss and never
 the match's. A decision that has not made its move by its bound is killed and the run stops.
+
+Hermes runs in a throwaway home of the supervisor's (`HERMES_HOME`); the profile whose config and
+credentials it plays with is named apart (`AGENTNEXUS_ARENA_PROFILE`) and only read.
 """
 
 from __future__ import annotations
@@ -30,6 +33,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+#: The profile whose `config.yaml` and `.env` this adapter reads and nothing else. Hermes' own home
+#: (`HERMES_HOME`) is a throwaway directory of the supervisor's, because Hermes fills its home with
+#: state of its own the moment it starts (agntnexus/agentnexus#223).
+PROFILE_ENV = "AGENTNEXUS_ARENA_PROFILE"
 TOOLS = frozenset({"game_join", "game_state", "game_move"})
 DIAGNOSTICS = frozenset(
     {
@@ -173,7 +180,7 @@ def configure(handler: Any) -> tuple[Any, dict[str, Any]]:
     config: Any = importlib.import_module("hermes_cli.config")
     safe = copy.deepcopy(config.DEFAULT_CONFIG)
     # Model choice is local; executable credential commands and custom transports are refused.
-    home = Path(os.environ["HERMES_HOME"])
+    home = Path(os.environ[PROFILE_ENV])
     yaml = importlib.import_module("yaml")
     local = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")) or {}
     model = local.get("model", {})
@@ -390,7 +397,7 @@ def spawn_worker(source: str) -> Worker:
 def load_credentials(model: dict[str, Any]) -> dict[str, Any]:
     """Load only this profile's direct API keys and resolve the one reviewed model transport."""
     dotenv = importlib.import_module("dotenv")
-    values = dotenv.dotenv_values(Path(os.environ["HERMES_HOME"]) / ".env", interpolate=False)
+    values = dotenv.dotenv_values(Path(os.environ[PROFILE_ENV]) / ".env", interpolate=False)
     for key in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
         if values.get(key):
             os.environ[key] = values[key]
@@ -550,8 +557,15 @@ def play(output: Any, input_stream: Any) -> int:
     move_calls = 0
     # The turn's own clock (agntnexus/agentnexus#223). `turn_started` is when this seat's fresh
     # own-turn observation first arrived; it is not the run's start, and an accepted move or any
-    # wait for the opponent ends it.
+    # wait for the opponent ends it. `accepted_at` is this process's own monotonic instant at which
+    # the provider's acceptance of a move arrived. The provider's computer may have answered at
+    # once, so that the next own turn was already running through the cleanup, the replacement of
+    # the worker and the state poll that follow the move: if the first state read afterwards is
+    # this seat's own turn again, that turn is timed from `accepted_at`. If the opponent is to move
+    # in that read, `accepted_at` is dropped and the later own turn starts from its own
+    # observation, as it always did. It is read from no message, field or model time.
     turn_started: float | None = None
+    accepted_at: float | None = None
     worker = spawn_worker(source)
 
     def pace() -> None:
@@ -584,7 +598,7 @@ def play(output: Any, input_stream: Any) -> int:
         and `invalid`: Hermes returned, `exception`: the worker failed, `expired`: the cutoff came
         first. Nothing the worker asks is served at or after the cutoff.
         """
-        nonlocal move_calls, turn_started
+        nonlocal move_calls, turn_started, accepted_at
         seconds = cutoff_at - time.monotonic()
         if seconds <= 0:
             return "expired"
@@ -657,6 +671,7 @@ def play(output: Any, input_stream: Any) -> int:
                 # landed it: this decision is over. The worker unwinds before Hermes can ask the
                 # model for closing prose, and the next turn begins when the opponent has answered.
                 turn_started = None  # accepted
+                accepted_at = time.monotonic()  # accepted
                 worker.send({"complete": True})  # accepted
                 return "moved"
             if operation == "game_move" and answered.get("uncertain"):
@@ -729,11 +744,13 @@ def play(output: Any, input_stream: Any) -> int:
                 # it spends none of a turn's budget: the next own turn is timed from its own
                 # observation.
                 turn_started = None  # waiting
+                accepted_at = None  # opponent
                 state = read_state()
                 continue
             now = time.monotonic()
             if turn_started is None:
-                turn_started = now
+                turn_started = now if accepted_at is None else accepted_at  # carry
+            accepted_at = None  # consumed
             cutoff_at = min(turn_started + DECISION_SECONDS[game], deadline)
             if now >= cutoff_at:
                 # An earlier decision of this turn spent it. No move is made up, repeated or
@@ -795,6 +812,14 @@ def play(output: Any, input_stream: Any) -> int:
         worker.close()
 
 
+def homes_are_apart() -> bool:
+    """Return whether Hermes has a home of its own, which is not the profile this adapter reads."""
+    home, profile = os.environ.get("HERMES_HOME"), os.environ.get(PROFILE_ENV)
+    if not home or not profile:
+        return False
+    return os.path.normcase(os.path.realpath(home)) != os.path.normcase(os.path.realpath(profile))
+
+
 def main() -> int:
     """Preflight without inference, serve decisions as the worker, or play one supervised game."""
     if len(sys.argv) not in {2, 3}:
@@ -803,6 +828,9 @@ def main() -> int:
         os.environ.get(name) != "1"
         for name in ("HERMES_SAFE_MODE", "HERMES_IGNORE_RULES", "HERMES_IGNORE_USER_CONFIG")
     ):
+        return 2
+    if not homes_are_apart():
+        # Hermes would fill the profile it plays from. Refuse before it is imported.
         return 2
     sys.path.insert(0, str(Path(sys.argv[1]).resolve()))
     flag = sys.argv[2] if len(sys.argv) == 3 else None

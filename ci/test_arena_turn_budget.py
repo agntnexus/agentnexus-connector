@@ -41,6 +41,7 @@ from arena_fakes import (
     PRIVATE,
     Clock,
     Decision,
+    Scripted,
     expect_guard,
     load_mutant,
     move_after,
@@ -504,8 +505,12 @@ def test_a_cleanup_that_raises_is_reported_and_the_move_is_never_repeated(
 def test_a_cleanup_just_inside_its_bound_is_accepted_and_one_at_or_after_it_is_not(
     monkeypatch: pytest.MonkeyPatch, role: str, after: float, expired: bool
 ) -> None:
-    """Below the bound the worker is reused; at it and after it, it is cut off. Never a failure."""
-    played = play(monkeypatch, role, move_after(1), turns=2, close=("after", after))
+    """Below the bound the worker is reused; at it and after it, it is cut off. Never a failure.
+
+    The opponent answers after the move, so that the cleanup falls into its turn and not into ours:
+    what a cleanup costs the next own turn is the subject of the carry tests.
+    """
+    played = play(monkeypatch, role, move_after(1), turns=2, waits=1, close=("after", after))
     assert played.error is None and played.code == 0
     assert len(played.match.forwarded) == 2
     assert ("decision_cleanup_expired" in played.events) is expired
@@ -605,8 +610,11 @@ def test_a_move_accepted_after_the_cutoff_by_a_slow_round_trip_still_ends_the_de
 def test_after_an_accepted_move_the_cleanup_bound_is_its_own_and_not_the_turns(
     monkeypatch: pytest.MonkeyPatch, role: str, after: float, expired: bool
 ) -> None:
-    """A move accepted at 44 s leaves the cleanup its full bound, not the turn's last second."""
-    played = play(monkeypatch, role, move_after(44), turns=2, close=("after", after))
+    """A move accepted at 44 s leaves the cleanup its full bound, not the turn's last second.
+
+    The opponent answers after the move, so that the cleanup falls into its turn and not into ours.
+    """
+    played = play(monkeypatch, role, move_after(44), turns=2, waits=1, close=("after", after))
     assert played.error is None and played.code == 0
     assert len(played.match.forwarded) == 2, "the accepted move stands whatever the cleanup does"
     assert ("decision_cleanup_expired" in played.events) is expired
@@ -680,6 +688,326 @@ def test_a_garbled_decision_is_a_fixed_failure_of_the_run(
     assert played.error is None and played.code == 3
     assert played.events == ["model_call_started", "model_call_exception"]
     assert played.match.forwarded == []
+
+
+# ---------------------------------------------------------------------------------------------
+# The next turn's clock: the computer may answer while the cleanup is still running
+# ---------------------------------------------------------------------------------------------
+
+#: What happens between an accepted move and the next state read, at its bounds: the cleanup is cut
+#: off at 3 s, the replacement worker takes about 4 s to be ready (measured), and a state read takes
+#: up to 4 s. The provider's own clock for the next turn runs through all of it.
+CLEANUP_BOUND = 3.0
+RESTART = 4.0
+AFTER_MOVE = CLEANUP_BOUND + RESTART + POLL
+
+
+def solo(
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+    behavior: Any,
+    **options: Any,
+) -> Any:
+    """Play two own turns against a computer that answers at once: our seat is to move again."""
+    return play(
+        monkeypatch,
+        role,
+        behavior,
+        turns=2,
+        waits=0,
+        close=["hang", "ok"],
+        spawn_seconds=RESTART,
+        read_seconds=POLL,
+        **options,
+    )
+
+
+def immediate_reply_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Require that cleanup, restart and poll time are charged to the turn the reply began."""
+    played = solo(monkeypatch, "white", [move_after(5), move_after(1)], module=module)
+    assert played.error is None and played.code == 0
+    assert played.budgets[1] == pytest.approx(LIMIT - AFTER_MOVE), "the new turn got a fresh budget"
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_an_immediate_computer_reply_charges_cleanup_restart_and_poll_to_the_new_turn(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """Accepted at t=0, cleanup 3 s, restart 4 s, poll 4 s, own turn seen at t=11: 34 s are left."""
+    played = solo(monkeypatch, role, [move_after(5), move_after(1)])
+    assert played.error is None and played.code == 0
+    assert len(played.match.forwarded) == 2
+    assert played.budgets[0] == pytest.approx(LIMIT)
+    assert played.budgets[1] == pytest.approx(LIMIT - AFTER_MOVE), "the new turn got a fresh budget"
+    started = [m for m in played.diagnostics if m["diagnostic"] == "model_call_started"]
+    assert [m["duration_ms"] for m in started] == [0, round(AFTER_MOVE * 1000)], (
+        "the parent was not told how much of the turn the post-move work had used"
+    )
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+@pytest.mark.parametrize(
+    ("after", "forwarded"),
+    [
+        (LIMIT - AFTER_MOVE - 0.001, 2),
+        (LIMIT - AFTER_MOVE, 1),
+        (LIMIT - AFTER_MOVE + 1.0, 1),
+        (LIMIT - AFTER_MOVE + 30.0, 1),
+    ],
+)
+def test_a_move_after_the_providers_true_cutoff_is_not_forwarded_after_an_immediate_reply(
+    monkeypatch: pytest.MonkeyPatch, role: str, after: float, forwarded: int
+) -> None:
+    """A model that moves 46 s after the acceptance is late whatever budget it believes it has."""
+    played = solo(monkeypatch, role, [move_after(5), move_after(after)])
+    assert len(played.match.forwarded) == forwarded
+    if forwarded == 2:
+        assert played.error is None and played.code == 0
+        assert "late_move_refused" not in played.events
+        return
+    assert played.error is None and played.code == 3
+    assert played.events.count("late_move_refused") == 1
+    assert played.events.count("decision_budget_expired") == 1
+    assert played.events[-1] == "decision_budget_expired"
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+@pytest.mark.parametrize("waits", [1, 2, 3])
+def test_an_opponent_turn_seen_first_leaves_the_next_own_turn_a_fresh_budget(
+    monkeypatch: pytest.MonkeyPatch, role: str, waits: int
+) -> None:
+    """Replacement time that fell into the opponent's turn is not charged to the later own turn."""
+    played = play(
+        monkeypatch,
+        role,
+        [move_after(5), move_after(1)],
+        turns=2,
+        waits=waits,
+        close=["hang", "ok"],
+        spawn_seconds=RESTART,
+        read_seconds=POLL,
+    )
+    assert played.error is None and played.code == 0
+    assert len(played.match.forwarded) == 2
+    assert played.budgets == [pytest.approx(LIMIT), pytest.approx(LIMIT)]
+    started = [m for m in played.diagnostics if m["diagnostic"] == "model_call_started"]
+    assert [m["duration_ms"] for m in started] == [0, 0]
+
+
+def opponent_first_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Require that an opponent's turn seen first clears what the accepted move carried."""
+    played = play(
+        monkeypatch,
+        "white",
+        [move_after(5), move_after(1)],
+        module=module,
+        turns=2,
+        waits=2,
+        close=["hang", "ok"],
+        spawn_seconds=RESTART,
+        read_seconds=POLL,
+    )
+    assert played.budgets[1] == pytest.approx(LIMIT), "the carry reached a later own turn"
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_an_ended_game_after_the_move_starts_no_decision(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """After the last move the readback says ended: no budget, no worker decision, finished."""
+    played = play(
+        monkeypatch,
+        role,
+        move_after(5),
+        turns=1,
+        close="hang",
+        spawn_seconds=RESTART,
+        read_seconds=POLL,
+    )
+    assert played.error is None and played.code == 0
+    assert len(played.workers.commands) == 1
+    assert played.events.count("model_call_started") == 1
+    assert played.parent.messages[-1] == {"finished": True}
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+@pytest.mark.parametrize("status", ["ended", "aborted"])
+def test_a_game_the_provider_ended_or_aborted_after_the_move_starts_no_decision(
+    monkeypatch: pytest.MonkeyPatch, role: str, status: str
+) -> None:
+    """Whatever ends the game, the readback after the move is the end: no budget, no decision."""
+    own = {
+        "status": "active",
+        "observation": {"you_are": role, "to_move": role, "private": PRIVATE},
+    }
+    seat = Scripted([own, own, {"status": status}])
+    played = play(
+        monkeypatch,
+        role,
+        move_after(5),
+        provider=seat,
+        close="hang",
+        spawn_seconds=RESTART,
+        read_seconds=POLL,
+    )
+    assert played.error is None and played.code == 0
+    assert len(played.workers.commands) == 1 and len(seat.forwarded) == 1
+    assert played.parent.messages[-1] == {"finished": True}
+
+
+def ended_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Require that an ended game, read after the move, is the end and not another turn."""
+    played = play(
+        monkeypatch,
+        "white",
+        move_after(5),
+        module=module,
+        turns=1,
+        close="hang",
+        spawn_seconds=RESTART,
+        read_seconds=POLL,
+    )
+    assert played.error is None and played.code == 0, "an ended game was not the end"
+    assert len(played.workers.commands) == 1
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_a_refused_readback_after_the_move_starts_no_decision_and_no_budget(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """A readback that is refused proves no own turn: the run fails closed, as it always did."""
+    own = {
+        "status": "active",
+        "observation": {"you_are": role, "to_move": role, "private": PRIVATE},
+    }
+    seat = Scripted([own, own, {"error": "games.provider_unavailable"}])
+    played = play(
+        monkeypatch,
+        role,
+        move_after(5),
+        provider=seat,
+        close="hang",
+        spawn_seconds=RESTART,
+        read_seconds=POLL,
+    )
+    assert played.error is None and played.code == 3
+    assert played.events[-1] == "game_state_refused"
+    assert len(played.workers.commands) == 1
+    assert len(seat.forwarded) == 1
+
+
+def refused_readback_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Require that a refused readback is never taken for the start of a turn."""
+    own = {
+        "status": "active",
+        "observation": {"you_are": "white", "to_move": "white", "private": PRIVATE},
+    }
+    seat = Scripted([own, own, {"error": "games.provider_unavailable"}] + [own] * 8)
+    played = play(
+        monkeypatch,
+        "white",
+        move_after(5),
+        module=module,
+        provider=seat,
+        close="hang",
+        spawn_seconds=RESTART,
+        read_seconds=POLL,
+    )
+    assert played.error is None and played.code == 3, "a refused readback went on"
+    assert len(played.workers.commands) == 1, "a decision was started on a refused readback"
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_cleanup_and_restart_that_already_spent_the_turn_start_no_decision(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """An immediate reply and a restart of 44 s leave nothing: no decision, one fixed report."""
+    played = play(
+        monkeypatch,
+        role,
+        move_after(5),
+        turns=2,
+        waits=0,
+        close="hang",
+        spawn_seconds=44.0,
+        read_seconds=POLL,
+    )
+    assert played.error is None and played.code == 3
+    assert len(played.workers.commands) == 1
+    assert len(played.match.forwarded) == 1
+    assert played.events.count("model_call_started") == 1
+    assert played.events[-1] == "decision_budget_expired"
+
+
+HOSTILE_PAYLOAD = {
+    "accepted_at": 0,
+    "turn_started": 0,
+    "elapsed": 0,
+    "elapsed_ms": 0,
+    "deadline": 10**9,
+    "duration_ms": 0,
+    "seconds": 3600,
+    "now": 0,
+}
+
+
+def payload_clock_oracle(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch, role: str = "white"
+) -> None:
+    """Require that no provider field, model time or run time moves the instant the carry starts.
+
+    The provider payload carries every field a hostile one could: none of them is read. The move
+    takes 2 s to answer and the carry starts when the answer arrived, so the same 11 s are charged.
+    """
+    played = solo(
+        monkeypatch,
+        role,
+        [move_after(5), move_after(1)],
+        module=module,
+        extra=HOSTILE_PAYLOAD,
+        move_seconds=2.0,
+    )
+    assert played.error is None and played.code == 0, "a provider field was taken for a clock"
+    assert played.budgets[1] == pytest.approx(LIMIT - AFTER_MOVE)
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_the_acceptance_instant_comes_from_the_match_process_clock_alone(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """No provider field, no model time and no run time can move the carry's starting instant."""
+    payload_clock_oracle(hermes_arena, monkeypatch, role)
+
+
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_a_staged_move_landed_by_a_read_starts_the_carry_at_that_reads_answer(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """The acceptance is the answer of the read that delivered the move; the poll after counts."""
+
+    def move_then_read(decision: Decision) -> Any:
+        decision.call("game_move")
+        decision.call("game_state", {})
+        decision.block()
+
+    played = play(
+        monkeypatch,
+        role,
+        [move_then_read, move_after(1)],
+        turns=2,
+        waits=0,
+        lose_answer=True,
+        read_seconds=POLL,
+    )
+    for worker in played.workers.spawned:
+        worker.kill()
+    assert played.error is None and played.code == 0
+    assert played.budgets[1] == pytest.approx(LIMIT - POLL)
+
+
+def early_clear_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Require that the carry survives until the first readback has been looked at."""
+    immediate_reply_oracle(module, monkeypatch)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -810,6 +1138,8 @@ def test_a_move_inside_an_open_decision_is_forwarded_once(
         (0, LIMIT + 30, 0),
         (30000, 15.0 - 0.001, 1),
         (30000, 15.0, 0),
+        (11000, 34.0 - 0.001, 1),
+        (11000, 34.0, 0),
         (44000, 1.0 - 0.001, 1),
         (44000, 1.0, 0),
     ],
@@ -1447,6 +1777,49 @@ def ordering_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None
             cleanup_bound_oracle,
         ),
         ("worker.close()  # cleanup remnant", "pass  # cleanup remnant", remnant_oracle),
+        ("accepted_at = time.monotonic()  # accepted", "pass  # accepted", immediate_reply_oracle),
+        (
+            "turn_started = now if accepted_at is None else accepted_at  # carry",
+            "turn_started = now  # carry",
+            immediate_reply_oracle,
+        ),
+        ("accepted_at = None  # opponent", "pass  # opponent", opponent_first_oracle),
+        (
+            'diagnostic(output, "model_call_returned", started)',
+            'diagnostic(output, "model_call_returned", started)\n            accepted_at = None',
+            early_clear_oracle,
+        ),
+        (
+            "ending = cleanup(worker, bound_at)",
+            "ending = cleanup(worker, bound_at)\n            accepted_at = time.monotonic()",
+            immediate_reply_oracle,
+        ),
+        (
+            "worker = spawn_worker(source)  # replaced",
+            "worker = spawn_worker(source); accepted_at = time.monotonic()  # replaced",
+            immediate_reply_oracle,
+        ),
+        (
+            'state = read_state()\n        diagnostic(output, "run_bound_reached")',
+            "state = read_state()\n            accepted_at = time.monotonic()\n"
+            '        diagnostic(output, "run_bound_reached")',
+            immediate_reply_oracle,
+        ),
+        (
+            "accepted_at = time.monotonic()  # accepted",
+            'accepted_at = result.get("accepted_at", time.monotonic())  # accepted',
+            payload_clock_oracle,
+        ),
+        ('if state.get("status") in {"ended", "aborted"}:', "if False:", ended_oracle),
+        (
+            'diagnostic(output, "game_state_refused")\n                return 3\n'
+            '            if state["status"] != "active"',
+            'diagnostic(output, "game_state_refused")\n                accepted_at = None\n'
+            '                state = {"status": "active", '
+            '"observation": {"you_are": role, "to_move": role}}\n'
+            '                continue\n            if state["status"] != "active"',
+            refused_readback_oracle,
+        ),
         ('if outcome != "moved":', "if True:", moved_bound_oracle),
         ('if outcome != "moved":', "if False:", turn_bound_oracle),
         ("worker = spawn_worker(source)  # replaced", "return 3  # replaced", replaced_oracle),
@@ -1469,6 +1842,16 @@ def ordering_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None
         "no-restart",
         "unbounded-cleanup",
         "cleanup-remnant",
+        "carry-discarded",
+        "carry-reset-to-now",
+        "carry-kept-across-an-opponent-turn",
+        "carry-cleared-too-early",
+        "cleanup-time-not-counted",
+        "restart-time-not-counted",
+        "poll-time-not-counted",
+        "carry-from-a-provider-field",
+        "ended-game-starts-a-turn",
+        "refused-readback-starts-a-fresh-turn",
         "moved-cleanup-bound-is-the-turns",
         "unmoved-cleanup-bound-is-not-the-turns",
         "whole-match-lost",
