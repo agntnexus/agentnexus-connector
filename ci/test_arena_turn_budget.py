@@ -830,6 +830,31 @@ def test_an_ended_game_after_the_move_starts_no_decision(
     assert played.parent.messages[-1] == {"finished": True}
 
 
+@pytest.mark.parametrize("role", ["white", "first"])
+@pytest.mark.parametrize("status", ["ended", "aborted"])
+def test_a_game_the_provider_ended_or_aborted_after_the_move_starts_no_decision(
+    monkeypatch: pytest.MonkeyPatch, role: str, status: str
+) -> None:
+    """Whatever ends the game, the readback after the move is the end: no budget, no decision."""
+    own = {
+        "status": "active",
+        "observation": {"you_are": role, "to_move": role, "private": PRIVATE},
+    }
+    seat = Scripted([own, own, {"status": status}])
+    played = play(
+        monkeypatch,
+        role,
+        move_after(5),
+        provider=seat,
+        close="hang",
+        spawn_seconds=RESTART,
+        read_seconds=POLL,
+    )
+    assert played.error is None and played.code == 0
+    assert len(played.workers.commands) == 1 and len(seat.forwarded) == 1
+    assert played.parent.messages[-1] == {"finished": True}
+
+
 def ended_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     """Require that an ended game, read after the move, is the end and not another turn."""
     played = play(
