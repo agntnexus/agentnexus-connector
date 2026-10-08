@@ -470,9 +470,10 @@ class ArenaRunner:
             raise RunnerRefused("Missing private Arena pipe.")
         output = child.stdout
         diagnostics = 0
-        # Connect Four's run stays within 256; a joined Chess match may send its own whole run's
-        # diagnostics, a finite bound derived from its decisions (agntnexus/agentnexus#202).
-        diagnostic_limit = 256
+        # A run sends at most four diagnostics per decision and one as it ends: a finite bound
+        # derived from the game's decisions (agntnexus/agentnexus#202, #223). Connect Four's is the
+        # default; a joined Chess match takes its own.
+        diagnostic_limit = hermes_arena.diagnostic_bound(hermes_arena.DECISIONS["connect-four"])
         # The provider's turn is the same 60 seconds in both games today, but the bound is the
         # game's own once the join names it (agntnexus/agentnexus#223).
         seconds = hermes_arena.DECISION_SECONDS["connect-four"]
