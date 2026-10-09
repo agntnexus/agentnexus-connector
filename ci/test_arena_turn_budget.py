@@ -2100,3 +2100,93 @@ def test_stopping_a_run_says_so_before_it_ends_the_tree(monkeypatch: pytest.Monk
     )
     runner.stop_child()
     assert seen == [True]
+
+
+def test_a_stop_cannot_begin_between_the_check_and_the_forward(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exact interleaving: a stop that starts inside the forward waits for it, then forwards none.
+
+    The stop begins while the move is being forwarded, after the check that let it through. It
+    cannot take effect until the forward is over, and the next move, in the next decision, is not
+    forwarded at all. Ending the process alone would not order the two.
+    """
+    runner, owned = supervisor()
+    runner.child = SimpleNamespace(
+        poll=lambda: 0, kill=lambda: None, wait=lambda **kwargs: None, stdin=None, stdout=None
+    )
+    runner.worker = None
+    runner.active = None
+    monkeypatch.setattr(arena_runner.arena_match, "end_tree", lambda process: True)
+    served: list[str] = []
+    inside: list[bool] = []
+    stopper: list[threading.Thread] = []
+
+    def game(command: dict[str, Any], **kwargs: object) -> dict[str, Any]:
+        served.append(command["operation"])
+        if command["operation"] == "game_move":
+            stopper.append(threading.Thread(target=runner.stop_child))
+            stopper[0].start()
+            time.sleep(0.3)
+            inside.append(runner.stopping)
+        return {"status": "active", "game_version": "connect-four-1-solo"}
+
+    monkeypatch.setattr(arena_runner.bridge, "_run_game_command", game)
+
+    def wait_for_the_stop() -> None:
+        stopper[0].join(timeout=10)
+
+    items: list[str | Callable[[], None]] = [
+        JOIN,
+        started(),
+        MOVE,
+        RETURNED,
+        started(),
+        wait_for_the_stop,
+        MOVE,
+        FINISHED,
+    ]
+    arena_runner.ArenaRunner._serve(runner, FakeChild(Pipe(items)), owned)
+    capsys.readouterr()
+    assert inside == [False], "a stop took effect while a move was being forwarded"
+    assert runner.stopping is True
+    assert served == ["game_join", "game_move"], served
+
+
+def test_a_parent_whose_stop_does_not_wait_for_the_forward_is_noticed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Mutation: with the gate removed, the stop takes effect inside the forward."""
+    mutant = load_mutant(
+        tmp_path,
+        arena_runner,
+        "with self._gate:  # forward gate",
+        "with contextlib.nullcontext():  # forward gate",
+    )
+    try:
+        runner, owned = supervisor(mutant)
+        runner.child = SimpleNamespace(
+            poll=lambda: 0, kill=lambda: None, wait=lambda **kwargs: None, stdin=None, stdout=None
+        )
+        runner.worker = None
+        runner.active = None
+        monkeypatch.setattr(mutant.arena_match, "end_tree", lambda process: True)
+        inside: list[bool] = []
+        stopper: list[threading.Thread] = []
+
+        def game(command: dict[str, Any], **kwargs: object) -> dict[str, Any]:
+            if command["operation"] == "game_move":
+                stopper.append(threading.Thread(target=runner.stop_child))
+                stopper[0].start()
+                time.sleep(0.3)
+                inside.append(runner.stopping)
+            return {"status": "active", "game_version": "connect-four-1-solo"}
+
+        monkeypatch.setattr(mutant.bridge, "_run_game_command", game)
+        items: list[str | Callable[[], None]] = [JOIN, started(), MOVE, RETURNED, FINISHED]
+        mutant.ArenaRunner._serve(runner, FakeChild(Pipe(items)), owned)
+        capsys.readouterr()
+        stopper[0].join(timeout=10)
+        assert inside == [True], "the weakened parent still ordered the stop after the forward"
+    finally:
+        sys.modules.pop(mutant.__name__, None)

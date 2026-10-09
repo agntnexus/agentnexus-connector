@@ -12,9 +12,13 @@ constants cannot also change what these tests demand.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shlex
+import socket
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -304,3 +308,205 @@ def test_both_paths_refuse_before_any_runner_exists_when_the_budget_is_not_guara
         messages.append(str(caught.value))
     assert messages[0] == messages[1]
     assert "turn budget" in messages[0]
+
+
+# ---------------------------------------------------------------------------------------------
+# Containment that cannot be proven fails closed (agntnexus/agentnexus#223, POSIX process trees)
+# ---------------------------------------------------------------------------------------------
+
+POSIX = sys.platform != "win32"
+SLEEPER = "import time; time.sleep(30)"
+DETACHER = """\
+import socket, subprocess, sys, time
+port = int(sys.argv[1])
+CHILD = (
+    "import socket, sys, time\\n"
+    "s = socket.create_connection(('127.0.0.1', int(sys.argv[1])))\\n"
+    "time.sleep(30)\\n"
+)
+subprocess.Popen([sys.executable, "-c", CHILD, str(port)], start_new_session=True)
+s = socket.create_connection(("127.0.0.1", port))
+time.sleep(30)
+"""
+
+
+class Listener:
+    """The test's end of the sockets a process tree holds open while it lives."""
+
+    def __init__(self) -> None:
+        """Listen on loopback and accept in the background."""
+        self.server = socket.socket()
+        self.server.bind(("127.0.0.1", 0))
+        self.server.listen()
+        self.port = self.server.getsockname()[1]
+        self.accepted: list[socket.socket] = []
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self) -> None:
+        with contextlib.suppress(OSError):
+            while True:
+                self.accepted.append(self.server.accept()[0])
+
+    def wait_for(self, count: int) -> None:
+        """Wait until this many processes have connected."""
+        deadline = time.monotonic() + 30
+        while len(self.accepted) < count and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert len(self.accepted) == count
+
+    def survivors(self, wait: float = 5.0) -> int:
+        """Count the connections that did not close within the wait."""
+        alive = 0
+        for connection in self.accepted:
+            connection.settimeout(wait)
+            try:
+                if connection.recv(1) != b"":
+                    alive += 1
+            except TimeoutError:
+                alive += 1
+            except ConnectionResetError:
+                pass
+        return alive
+
+    def close(self) -> None:
+        """Drop everything."""
+        for connection in self.accepted:
+            connection.close()
+        self.server.close()
+
+
+@pytest.mark.parametrize("failure", ["missing", "timeout", "status", "empty"])
+def test_a_process_table_that_cannot_be_read_raises(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """No empty answer stands in for the table: an unreadable table is an error."""
+
+    def run(*args: Any, **kwargs: Any) -> Any:
+        if failure == "missing":
+            raise FileNotFoundError("ps")
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired("ps", 10)
+        return SimpleNamespace(returncode=1 if failure == "status" else 0, stdout="")
+
+    monkeypatch.setattr(arena_match.subprocess, "run", run)
+    with pytest.raises(OSError, match="process table"):
+        arena_match.process_table()
+
+
+def test_the_process_table_maps_every_parent_to_its_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The walk below a root finds children and grandchildren, detached or not."""
+    table = "  1     0\n 10     1\n 11    10\n 12    11\n 20     1\n"
+    monkeypatch.setattr(
+        arena_match.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=table),
+    )
+    assert arena_match.descendants(10) == {11, 12}
+
+
+def no_table() -> dict[int, list[int]]:
+    """Stand in for a process table that cannot be read."""
+    raise OSError("process table")
+
+
+@pytest.mark.skipif(not POSIX, reason="session groups and the process table are POSIX")
+def test_a_tree_kill_that_cannot_read_the_table_says_it_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The group is still killed, but the answer is `False`: containment was not proven."""
+    process = arena_match.start_in_tree([sys.executable, "-c", SLEEPER])
+    monkeypatch.setattr(arena_match, "process_table", no_table)
+    assert arena_match.end_tree(process) is False
+    process.wait(timeout=10)
+
+
+@pytest.mark.skipif(not POSIX, reason="session groups and the process table are POSIX")
+def test_a_tree_kill_with_a_readable_table_says_it_is_complete() -> None:
+    """The control: the same kill with a table is complete."""
+    process = arena_match.start_in_tree([sys.executable, "-c", SLEEPER])
+    assert arena_match.end_tree(process) is True
+    process.wait(timeout=10)
+
+
+@pytest.mark.skipif(not POSIX, reason="session groups and the process table are POSIX")
+def test_a_child_in_a_session_of_its_own_does_not_survive_the_tree_kill(tmp_path: Path) -> None:
+    """A detached child is outside the process group; the table walk reaches it."""
+    listener = Listener()
+    script = tmp_path / "detacher.py"
+    script.write_text(DETACHER, encoding="utf-8")
+    process = arena_match.start_in_tree([sys.executable, str(script), str(listener.port)])
+    try:
+        listener.wait_for(2)
+        assert arena_match.end_tree(process) is True
+        assert listener.survivors() == 0, "a child outside the process group survived"
+    finally:
+        listener.close()
+
+
+@pytest.mark.skipif(not POSIX, reason="session groups and the process table are POSIX")
+def test_a_tree_kill_that_skips_the_table_leaves_the_detached_child(tmp_path: Path) -> None:
+    """Mutation: with the descendants not read, the detached child outlives the kill."""
+    mutant = load_mutant(
+        tmp_path / "mutant",
+        arena_match,
+        "members = self.known | descendants(self.pid)",
+        "members = set(self.known)",
+    )
+    listener = Listener()
+    script = tmp_path / "detacher.py"
+    script.write_text(DETACHER.replace("sleep(30)", "sleep(12)"), encoding="utf-8")
+    process = mutant.start_in_tree([sys.executable, str(script), str(listener.port)])
+    try:
+        listener.wait_for(2)
+        mutant.end_tree(process)
+        assert listener.survivors(wait=3.0) >= 1, "the weakened kill still reached the child"
+    finally:
+        listener.close()
+        sys.modules.pop(mutant.__name__, None)
+
+
+@pytest.mark.skipif(not POSIX, reason="session groups and the process table are POSIX")
+def test_without_a_process_table_the_capability_proof_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A machine that cannot list processes cannot prove containment, so it is not trusted."""
+    monkeypatch.setattr(arena_match, "process_table", no_table)
+    assert arena_match.prove_tree() is False
+
+
+def test_the_capability_proof_holds_a_detached_grandchild_too() -> None:
+    """The proof's tree contains a process in a session of its own; the real kill ends it."""
+    assert arena_match.prove_tree() is True
+    assert "start_new_session" in Path(arena_match.__file__).read_text(encoding="utf-8")
+
+
+def test_a_stop_that_could_not_prove_containment_blocks_every_later_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After an incomplete kill the runner claims nothing more, whatever the budget says."""
+    runner, owned, calls = launching(monkeypatch)
+    runner.child = SimpleNamespace(
+        poll=lambda: 0, kill=lambda: None, wait=lambda **kwargs: None, stdin=None, stdout=None
+    )
+    runner.worker = None
+    runner.active = None
+    monkeypatch.setattr(arena_match, "end_tree", lambda process: False)
+    runner.stop_child()
+    with pytest.raises(arena_runner.RunnerRefused, match="contain"):
+        arena_runner.ArenaRunner._launch(runner, owned)
+    assert calls == []
+
+
+def test_a_cutoff_that_could_not_prove_containment_blocks_every_later_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The decision cutoff is a kill too: an incomplete one blocks the next claim as well."""
+    runner, owned, calls = launching(monkeypatch)
+    monkeypatch.setattr(arena_match, "end_tree", lambda process: False)
+    monkeypatch.setattr(arena_runner, "diagnostic", lambda *args, **kwargs: None)
+    runner._cut_off(SimpleNamespace(), owned, 1)
+    with pytest.raises(arena_runner.RunnerRefused, match="contain"):
+        arena_runner.ArenaRunner._launch(runner, owned)
+    assert calls == []
