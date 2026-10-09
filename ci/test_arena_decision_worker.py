@@ -191,6 +191,35 @@ def scaffold():
 
 
 scaffold()
+if BEHAVIOR.get("helper"):
+    # A process the runtime started on its own (a tool server, a transport helper): it holds a
+    # tether too, so the test can tell whether it outlived the decision that was cut off.
+    import subprocess
+    import sys
+
+    HELPER = "\\n".join(
+        [
+            "import os, socket, sys, threading",
+            "s = socket.create_connection(('127.0.0.1', int(sys.argv[1])))",
+            "def watch():",
+            "    try:",
+            "        s.recv(1)",
+            "    except OSError:",
+            "        pass",
+            "    os._exit(1)",
+            "threading.Thread(target=watch, daemon=True).start()",
+            "print('up', flush=True)",
+            "threading.Event().wait()",
+        ]
+    )
+    # "inherit": it keeps the pipes of this process open, as a helper of a real runtime may.
+    quiet = {} if BEHAVIOR["helper"] == "inherit" else {
+        "stdin": subprocess.DEVNULL, "stderr": subprocess.DEVNULL
+    }
+    helper = subprocess.Popen(
+        [sys.executable, "-c", HELPER, str(BEHAVIOR["tether"])], stdout=subprocess.PIPE, **quiet
+    )
+    helper.stdout.readline()  # the helper is connected before the decision starts
 get_tool_definitions = model_tools.get_tool_definitions
 handle_function_call = model_tools.handle_function_call
 
@@ -1108,3 +1137,54 @@ def test_an_adapter_that_reads_the_profile_from_the_wrong_place_is_noticed(
     with pytest.raises(AssertionError):
         assert_profile_untouched(run)
     run.tethers.close()
+
+
+# ---------------------------------------------------------------------------------------------
+# The whole tree ends with the decision (agntnexus/agentnexus#223, complete process tree)
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("helper", ["detached", "inherit"])
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_the_cutoff_ends_every_process_the_runtime_started(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    role: str,
+    helper: str,
+) -> None:
+    """A model blocked at the cutoff: the worker and the helper it started are both gone."""
+    behavior = {"mode": "block", "helper": helper}
+    run = run_process(monkeypatch, capsys, tmp_path, role, behavior)
+    assert run.forwarded == []
+    assert run.events.count("decision_budget_expired") == 1
+    assert_no_residue(run)  # the helper holds a tether: it must be gone too
+
+
+def test_a_cleanup_that_is_cut_off_ends_the_whole_tree_of_the_worker_it_replaces(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The replaced worker's helper does not accumulate: every worker's tree ends with it."""
+    behavior = {"mode": "fast", "arguments": MOVES["white"], "close": "hang", "helper": "detached"}
+    run = run_process(monkeypatch, capsys, tmp_path, "white", behavior, bound=10.0, turns=2)
+    assert moves_of(run, "white") == [MOVES["white"], MOVES["white"]]
+    assert run.events.count("decision_cleanup_expired") == 2
+    assert_no_residue(run)
+
+
+def test_the_parent_ends_the_whole_tree_of_a_match_process_it_cuts_off(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The second line: the match process, its worker and the worker's helper all die."""
+    lax = lax_match_process(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    behavior = {"mode": "block", "helper": "detached"}
+    run = run_process(monkeypatch, capsys, run_dir, "white", behavior, arena=lax)
+    assert run.forwarded == []
+    assert run.events.count("decision_budget_expired") == 1
+    assert_no_residue(run)
