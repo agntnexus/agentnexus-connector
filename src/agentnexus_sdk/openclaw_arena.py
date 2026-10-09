@@ -88,6 +88,9 @@ SID = re.compile(r"S-1-\d+(?:-\d+)+")
 SYSTEM_SID = "S-1-5-18"
 ADMINISTRATORS_SID = "S-1-5-32-544"
 ACE_ALLOWED, ACE_DENIED = 0, 1
+#: Placeholders for the object's own owner (OWNER RIGHTS, CREATOR OWNER): the owner is checked to be
+#: the user, so a grant to it is a grant to the user.
+OWNER_PLACEHOLDERS = frozenset({"S-1-3-4", "S-1-3-0"})
 
 
 def acl_is_private(owner: str, entries: list[tuple[int, str]] | None, user: str) -> bool:
@@ -101,7 +104,7 @@ def acl_is_private(owner: str, entries: list[tuple[int, str]] | None, user: str)
     """
     if entries is None or not SID.fullmatch(user) or owner != user:
         return False
-    allowed = {user, SYSTEM_SID, ADMINISTRATORS_SID}
+    allowed = {user, SYSTEM_SID, ADMINISTRATORS_SID} | OWNER_PLACEHOLDERS
     for kind, sid in entries:
         if kind == ACE_DENIED:
             continue

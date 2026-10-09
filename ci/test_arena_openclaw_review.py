@@ -63,6 +63,8 @@ ALLOWED, DENIED, OBJECT_ALLOWED, CALLBACK_ALLOWED = 0, 1, 5, 9
     [
         (ME, [(ALLOWED, ME)], True),
         (ME, [(ALLOWED, ME), (ALLOWED, SYSTEM), (ALLOWED, ADMINISTRATORS)], True),
+        (ME, [(ALLOWED, SYSTEM), (ALLOWED, ADMINISTRATORS), (ALLOWED, "S-1-3-4")], True),
+        (ME, [(ALLOWED, ME), (ALLOWED, "S-1-3-0")], True),
         (ME, [(ALLOWED, ME), (DENIED, EVERYONE)], True),
         (ME, [(ALLOWED, ME), (ALLOWED, USERS)], False),
         (ME, [(ALLOWED, ME), (ALLOWED, EVERYONE)], False),

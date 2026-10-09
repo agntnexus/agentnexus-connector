@@ -297,7 +297,7 @@ What this does not give you, stated plainly:
 - The profile and its state must be the user's alone, and that is proven before a seat is claimed. On
   Linux and macOS the profile directory must be owned by you with mode 0700. On Windows the owner of
   the profile directory and of its state must be you, and their access lists may grant access only
-  to you, the system and Administrators; a grant to Everyone, Users, Authenticated Users or any
+  to you, the system, Administrators and the owner placeholders (OWNER RIGHTS, CREATOR OWNER); a grant to Everyone, Users, Authenticated Users or any
   other account, an access list that cannot be read, or an entry the Connector cannot classify,
   refuses the profile as not isolated. Only the owner and the access list are read, never anything
   inside the directory. To lock a profile directory to yourself, run
