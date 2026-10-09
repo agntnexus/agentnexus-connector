@@ -251,13 +251,57 @@ def config_disturbed(
     tmp_path: Path,
     fault: str,
     plan: str = "move",
+    *,
+    no_env: bool = False,
 ) -> tuple[Any, FakeChatModel]:
     """Play one match in which the stand-in runtime changes the profile's file at this moment."""
     server = FakeChatModel(plan)
-    run = play(monkeypatch, capsys, tmp_path, server, fault=fault)
+    behavior = behavior_of(server, tmp_path, fault)
+    behavior["no_profile_env"] = no_env
+    run = run_process(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        "white",
+        behavior,
+        runtime="openclaw",
+        bound=25.0,
+        wait=60.0,
+    )
     return run, server
 
 
+@pytest.mark.windows_security
+@pytest.mark.parametrize(
+    ("fault", "no_env"),
+    [
+        ("create_env=request", True),
+        ("create_env=tool", True),
+        ("remove_env=version", False),
+        ("remove_env=tool", False),
+        ("replace_env=tool", False),
+    ],
+)
+def test_a_profile_env_created_removed_or_replaced_during_the_match_forwards_no_move(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    fault: str,
+    no_env: bool,
+) -> None:
+    """The optional `.env` is pinned like the configuration, presence and absence included."""
+    run, server = config_disturbed(monkeypatch, capsys, tmp_path, fault, no_env=no_env)
+    try:
+        assert run.forwarded == [], "a move was forwarded after the profile .env changed"
+        assert "game_move_started" not in run.events
+        assert survivors(tmp_path) == []
+        assert not run.runner.terminal
+    finally:
+        server.close()
+        run.tethers.close()
+
+
+@pytest.mark.windows_security
 @pytest.mark.parametrize(
     ("fault", "asked_the_model"),
     [
@@ -304,6 +348,7 @@ def test_a_link_put_in_place_of_the_configuration_forwards_no_move(
         run.tethers.close()
 
 
+@pytest.mark.windows_security
 def test_a_change_after_the_first_move_stops_the_match_before_its_second(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -346,7 +391,9 @@ def test_the_launch_pins_metadata_and_copies_nothing(tmp_path: Path) -> None:
         assert launch.pin and text not in launch.pin
         assert launch.environment[openclaw_arena.PIN_ENV] == launch.pin
         assert all(text not in value for value in launch.environment.values())
-        assert set(json.loads(launch.pin)) == {
+        pinned = json.loads(launch.pin)
+        assert set(pinned) == {"config", "env"}
+        assert set(pinned["config"]) == {
             "path",
             "device",
             "inode",
@@ -354,6 +401,7 @@ def test_the_launch_pins_metadata_and_copies_nothing(tmp_path: Path) -> None:
             "modified_ns",
             "changed_ns",
             "kind",
+            "owner",
         }
     finally:
         server.close()

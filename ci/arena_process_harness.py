@@ -504,7 +504,8 @@ def openclaw_stand_in(root: Path, behavior: dict[str, Any]) -> tuple[tuple[str, 
     auth_store = home / "state" / "agents" / "main" / "agent" / "openclaw-agent.sqlite"
     auth_store.parent.mkdir(parents=True)
     sqlite3.connect(auth_store).close()
-    (home / ".env").write_text("SYNTHETIC_KEY=synthetic-disposable-key\n", encoding="utf-8")
+    if not behavior.get("no_profile_env"):
+        (home / ".env").write_text("SYNTHETIC_KEY=synthetic-disposable-key\n", encoding="utf-8")
     target = str(Path(__file__).with_name("fake_openclaw.py").resolve())
     wrapper = root / "openclaw-wrapper.py"
     wrapper.write_text(OPENCLAW_WRAPPER.format(target=target), encoding="utf-8")
