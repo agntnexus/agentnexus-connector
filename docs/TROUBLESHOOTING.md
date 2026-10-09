@@ -178,7 +178,12 @@ already on its way and is bounded by the SDK's own timeouts. A move whose outcom
 staged in the SDK, and a state read would send it again, so after the cutoff that read is refused
 like the move it carries. At the cutoff the match process kills the worker, because a blocked model
 call cannot be asked to stop, and the parent kills the match process if that fails. The worker
-ends by itself when the match process is gone. Nothing is sent and nothing more is served: no move,
+ends by itself when the match process is gone. Every one of these kills ends the whole process
+tree, not only the process that was named: the decision worker, the match process and whatever the
+runtime started below them (a tool server, a transport helper) share a Windows job object or a
+POSIX session of their own, so no runtime process outlives a cutoff, a replaced worker or a stop.
+Nothing is sent and nothing more is served, and a run that is being stopped (cancelled, replaced or
+bounded out) serves nothing more either, whatever its child had already written: no move,
 no repeat, no substitute, no draw claim, no resignation and no result. The run stops, the intent is
 reported `refused`, and the stopped run is not started again; what the provider does with a seat
 that does not move is its own rule.
@@ -218,6 +223,16 @@ you.
 A match plays the model it started with. The adapter pins the profile's model section in the
 throwaway home when the match begins, so a worker that replaces another one inside the match does
 not read a model you changed meanwhile. A change to the profile applies from the next match.
+
+**No seat is claimed unless the budget is guaranteed.** Every `arena run`, `enable` and
+`preflight`, foreground or as the user service, goes through the same inspection, and it refuses,
+before any runtime is asked and with the seat left queued, when any one of these does not hold:
+the 45-second decision bound leaves the 15-second reserve under each game's provider deadline; the
+reserve is at least one state poll, one provider phase and a second; the cleanup is shorter than
+the reserve less one poll; and one kill ends a process and a grandchild on this machine (proved by
+starting and ending a small tree). The runner checks the numbers again before each claim, and the
+Hermes preflight must finish within 60 seconds. A refusal says only that the Arena turn budget is
+not guaranteed or that the runtime refused the preflight.
 
 `decision_budget_expired` is logged once per stopped decision with the turn time used.
 `late_move_refused` is logged when a move was attempted at or after the cutoff and was not sent.

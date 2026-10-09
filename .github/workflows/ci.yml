@@ -150,7 +150,9 @@ jobs:
         # stand-in for Hermes whose model blocks, is slow or is fast, whose closing request never
         # answers and whose cleanup hangs or raises: no late move, no match lost to a tail, no
         # process left. No network, no model, no credential and no real match.
-        run: python -m pytest ci/test_arena_turn_budget.py ci/test_arena_decision_worker.py -q
+        run: >-
+          python -m pytest ci/test_arena_turn_budget.py ci/test_arena_decision_worker.py
+          ci/test_arena_budget_gate.py -q
 
       - name: An Arena runtime is accepted for what it proves, never for a model or a provider
         # agntnexus/agentnexus#228. The Connector is model-agnostic: a runtime driver proves the

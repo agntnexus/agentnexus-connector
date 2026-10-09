@@ -2090,7 +2090,7 @@ def test_stopping_a_run_says_so_before_it_ends_the_tree(monkeypatch: pytest.Monk
     """The flag is up before the child dies, so nothing it left behind is served."""
     runner = object.__new__(arena_runner.ArenaRunner)
     runner.child = SimpleNamespace(
-        poll=lambda: 0, wait=lambda **kwargs: None, stdin=None, stdout=None
+        poll=lambda: 0, kill=lambda: None, wait=lambda **kwargs: None, stdin=None, stdout=None
     )
     runner.worker = None
     runner.active = None

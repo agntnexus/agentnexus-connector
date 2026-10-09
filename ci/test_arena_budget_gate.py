@@ -235,7 +235,7 @@ def test_an_inspection_without_the_budget_gate_is_noticed(
         paths = SimpleNamespace(state_file=tmp_path / "no-such-state")
         with pytest.raises(Exception) as caught:
             mutant.inspected_runtime(paths, None)
-        assert not isinstance(caught.value, mutant.RunnerRefused)
+        assert "turn budget" not in str(caught.value)
     finally:
         sys.modules.pop(mutant.__name__, None)
 
