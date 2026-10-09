@@ -714,3 +714,96 @@ def test_an_adapter_that_reads_the_profile_from_the_wrong_place_is_noticed(
     with pytest.raises(AssertionError):
         assert_profile_untouched(run)
     run.tethers.close()
+
+
+# ---------------------------------------------------------------------------------------------
+# The whole tree ends with the decision (agntnexus/agentnexus#223, complete process tree)
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("helper", ["detached", "inherit"])
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_the_cutoff_ends_every_process_the_runtime_started(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    role: str,
+    helper: str,
+) -> None:
+    """A model blocked at the cutoff: the worker and the helper it started are both gone."""
+    behavior = {"mode": "block", "helper": helper}
+    run = run_process(monkeypatch, capsys, tmp_path, role, behavior)
+    assert run.forwarded == []
+    assert run.events.count("decision_budget_expired") == 1
+    assert_no_residue(run)  # the helper holds a tether: it must be gone too
+
+
+def test_a_cleanup_that_is_cut_off_ends_the_whole_tree_of_the_worker_it_replaces(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The replaced worker's helper does not accumulate: every worker's tree ends with it."""
+    behavior = {"mode": "fast", "arguments": MOVES["white"], "close": "hang", "helper": "detached"}
+    run = run_process(monkeypatch, capsys, tmp_path, "white", behavior, bound=10.0, turns=2)
+    assert moves_of(run, "white") == [MOVES["white"], MOVES["white"]]
+    assert run.events.count("decision_cleanup_expired") == 2
+    assert_no_residue(run)
+
+
+def test_the_parent_ends_the_whole_tree_of_a_match_process_it_cuts_off(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The second line: the match process, its worker and the worker's helper all die."""
+    lax_match, lax_worker = lax_match_process(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    behavior = {"mode": "block", "helper": "detached"}
+    run = run_process(
+        monkeypatch, capsys, run_dir, "white", behavior, arena=lax_match, worker=lax_worker
+    )
+    assert run.forwarded == []
+    assert run.events.count("decision_budget_expired") == 1
+    assert_no_residue(run)
+
+
+def test_a_worker_and_a_match_process_started_outside_a_tree_leave_the_helper_behind(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Mutation: with no tree under the worker or the match process, a kill reaches only one."""
+    untreed_match, untreed_worker = mutated_programs(
+        tmp_path / "untreed",
+        match=(
+            ("message = worker.get(remaining)", "message = worker.get(3600)"),
+            ("self.process = start_in_tree(", "self.process = subprocess.Popen("),
+        ),
+    )
+    broken = load_mutant(
+        tmp_path / "mutant",
+        arena_runner,
+        "child = arena_match.start_in_tree(",
+        "child = subprocess.Popen(",
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    behavior = {"mode": "block", "helper": "detached"}
+    try:
+        run = run_process(
+            monkeypatch,
+            capsys,
+            run_dir,
+            "white",
+            behavior,
+            module=broken,
+            arena=untreed_match,
+            worker=untreed_worker,
+        )
+        assert run.forwarded == []
+        with pytest.raises(AssertionError, match="still alive"):
+            assert_no_residue(run)
+    finally:
+        sys.modules.pop(broken.__name__, None)
