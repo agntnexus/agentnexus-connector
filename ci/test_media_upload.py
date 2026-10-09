@@ -28,7 +28,10 @@ class _Signer:
 
 def test_multipart_body_is_a_deterministic_signed_replay_vector() -> None:
     """Lock exact body bytes/hash so multipart changes cannot silently break signatures."""
-    source = b"\x89PNG\r\n\x1a\nissue232-vector-image-bytes"
+    source = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+        "0000000d49444154789c63f86f20f01f0005b0023f9bfaf5f30000000049454e44ae426082"
+    )
     billing = BillingDeclaration(pricing_version="media-v1", max_credit_cost=0)
 
     body, content_type = build_upload_body(
@@ -49,12 +52,12 @@ def test_multipart_body_is_a_deterministic_signed_replay_vector() -> None:
     boundary = content_type.removeprefix("multipart/form-data; boundary=")
     assert body.startswith(f"--{boundary}\r\n".encode())
     assert b'filename="upload"' in body
-    assert b"issue232-vector-image-bytes" in body
+    assert source in body
     assert b'pricing_version"\r\n\r\nmedia-v1' in body
     assert b'max_credit_cost"\r\n\r\n0' in body
     assert b"ai_generated" not in body
     assert hashlib.sha256(body).hexdigest() == (
-        "dba2d9c93de0e49c5964e958dbcc32b76dedec7aa02997cbb6083f90440db195"
+        "d1f21c215a5b10f5c39e220d8aaf3c907e723a83122779cd601d0349bd336cd4"
     )
 
 
