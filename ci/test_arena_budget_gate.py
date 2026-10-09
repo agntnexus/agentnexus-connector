@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from arena_fakes import load_mutant, supervisor
+from arena_fakes import expect_guard, load_mutant, supervisor
 
 from agentnexus_sdk import arena_driver_hermes, arena_match, arena_runner, connector
 
@@ -376,24 +376,74 @@ class Listener:
         self.server.close()
 
 
-@pytest.mark.parametrize("failure", ["missing", "timeout", "status", "empty"])
+GOOD_TABLE = "  1     0\n 10     1\n 11    10\n 12    11\n 20     1\n"
+PARTLY_BROKEN = {
+    "garbage-line": GOOD_TABLE + "GARBAGE\n",
+    "garbage-between-parent-and-grandchild": "  1     0\n 10     1\n GARBAGE\n 12    11\n",
+    "too-many-columns": GOOD_TABLE + " 13    12  extra\n",
+    "too-few-columns": GOOD_TABLE + " 13\n",
+    "negative-pid": GOOD_TABLE + " -13    12\n",
+    "signed-pid": GOOD_TABLE + " +13    12\n",
+    "non-integer-parent": GOOD_TABLE + " 13    1x\n",
+    "float-pid": GOOD_TABLE + " 13.5    12\n",
+}
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="the process table is the POSIX way to find a tree"
+)
+@pytest.mark.parametrize("failure", ["missing", "timeout", "status", "empty", *PARTLY_BROKEN])
 def test_a_process_table_that_cannot_be_read_raises(
     monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    """No empty answer stands in for the table: an unreadable table is an error."""
+    """No empty answer stands in for the table, and no line is skipped: it is an error."""
 
     def run(*args: Any, **kwargs: Any) -> Any:
         if failure == "missing":
             raise FileNotFoundError("ps")
         if failure == "timeout":
             raise subprocess.TimeoutExpired("ps", 10)
-        return SimpleNamespace(returncode=1 if failure == "status" else 0, stdout="")
+        text = PARTLY_BROKEN.get(failure, "")
+        return SimpleNamespace(returncode=1 if failure == "status" else 0, stdout=text)
 
     monkeypatch.setattr(arena_match.subprocess, "run", run)
     with pytest.raises(OSError, match="process table"):
         arena_match.process_table()
 
 
+def test_a_table_that_skips_a_broken_line_is_noticed(tmp_path: Path) -> None:
+    """Mutation: if a malformed line is skipped, the same oracle accepts a partly broken table."""
+    mutant = load_mutant(
+        tmp_path / "mutant",
+        arena_match,
+        'raise OSError("The process table could not be read.")  # malformed line',
+        "continue  # malformed line",
+    )
+    try:
+
+        def oracle(module: Any) -> None:
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(
+                    module.subprocess,
+                    "run",
+                    lambda *a, **k: SimpleNamespace(
+                        returncode=0, stdout=PARTLY_BROKEN["garbage-between-parent-and-grandchild"]
+                    ),
+                )
+                try:
+                    module.process_table()
+                except OSError:
+                    return
+                raise AssertionError("a table with a broken line was accepted")
+
+        expect_guard(oracle, arena_match, mutant)
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="the process table is the POSIX way to find a tree"
+)
 def test_the_process_table_maps_every_parent_to_its_children(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
