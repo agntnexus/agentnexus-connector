@@ -810,16 +810,24 @@ time.sleep(120)
 def test_ending_a_worker_does_not_wait_for_a_helper_that_holds_its_pipe(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The reader of a pipe that never closes must not make ending the worker take for ever."""
+    """The reader of a pipe that never closes must not make ending the worker take for ever.
+
+    The helper escapes the tree here (the kill reaches the worker alone), as a helper that left its
+    session and was orphaned would; a helper inside the tree dies with the worker and is proved by
+    the process-tree tests.
+    """
     script = tmp_path / "worker_with_helper.py"
     script.write_text(HELPER, encoding="utf-8")
     pid_file = tmp_path / "helper.pid"
     real = subprocess.Popen
 
     def popen(command: list[str], **kwargs: Any) -> Any:
+        if "--decision" not in command:
+            return real(command, **kwargs)
         return real([sys.executable, str(script), str(pid_file)], **kwargs)
 
     monkeypatch.setattr(hermes_arena.subprocess, "Popen", popen)
+    monkeypatch.setattr(hermes_arena, "end_tree", lambda process: process.kill())
     worker = hermes_arena.Worker("source")
     try:
         deadline = time.monotonic() + 20
