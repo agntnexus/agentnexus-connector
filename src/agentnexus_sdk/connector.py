@@ -4330,9 +4330,7 @@ def _target_profile_plan(
     else:
         disposition = per_runtime[primary]["disposition"]
         reason = (
-            per_runtime[primary]["reason"]
-            if len(per_runtime) == 1
-            else "per_runtime_dispositions"
+            per_runtime[primary]["reason"] if len(per_runtime) == 1 else "per_runtime_dispositions"
         )
     return {
         "name": paths.profile,
@@ -4376,9 +4374,7 @@ def _refused_setup_plan(
             "name": profile,
             "disposition": "refused",
             "reason": reason,
-            "runtimes": {
-                name: {"disposition": "refused", "reason": reason} for name in names
-            },
+            "runtimes": {name: {"disposition": "refused", "reason": reason} for name in names},
         },
         "invitation_input": "not_requested",
         "changes": [],

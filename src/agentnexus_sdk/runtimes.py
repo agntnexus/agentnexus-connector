@@ -668,14 +668,10 @@ class HermesAdapter:
             "XDG_DATA_HOME",
             "XDG_STATE_HOME",
         }
-        environment = {
-            key: value for key, value in os.environ.items() if key.upper() in allowed
-        }
+        environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
         # Resolve the actual installation home with the clean manager environment, then pin it for
         # the official create command. The path stays local and is never emitted in the plan.
-        environment["HERMES_HOME"] = str(
-            self._config(shared=True, environment=environment).parent
-        )
+        environment["HERMES_HOME"] = str(self._config(shared=True, environment=environment).parent)
         return environment
 
     def _command(self, executable: str, *arguments: str) -> list[str]:
@@ -703,9 +699,7 @@ class HermesAdapter:
             verified_against="a real Hermes v0.20.6 installation",
         )
 
-    def _config(
-        self, *, shared: bool = False, environment: dict[str, str] | None = None
-    ) -> Path:
+    def _config(self, *, shared: bool = False, environment: dict[str, str] | None = None) -> Path:
         """Where Hermes keeps the file this adapter inspects, backs up, and checks after writing.
 
         Asked of Hermes rather than guessed, and asked *for this profile*: `hermes -p X config
@@ -849,9 +843,7 @@ class HermesAdapter:
                 recovery="Nothing was changed. Review the read-only target-profile plan again.",
             )
         if not inspection.safe or (
-            inspection.exists
-            and inspection.active is not False
-            and action != "resume"
+            inspection.exists and inspection.active is not False and action != "resume"
         ):
             raise RuntimeIntegrationError(
                 "The selected Hermes target is active or its isolation could not be verified.",
@@ -870,9 +862,7 @@ class HermesAdapter:
             )
 
         self._context.prepare()
-        self._ensure_profile(
-            executable, target_profile_disposition=action
-        )
+        self._ensure_profile(executable, target_profile_disposition=action)
         self._require_isolated_profile()
 
         existing = self.existing_entry()

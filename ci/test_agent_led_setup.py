@@ -48,8 +48,7 @@ class _HermesProfileProbe:
         if args[1:] == ("profile", "list"):
             rows = ["Profile"]
             rows.extend(
-                f"{'*' if name == self.active else ' '} {name}"
-                for name in sorted(self.profiles)
+                f"{'*' if name == self.active else ' '} {name}" for name in sorted(self.profiles)
             )
             return subprocess.CompletedProcess(args, 0, "\n".join(rows), "")
         if args[-2:] == ("config", "path"):
