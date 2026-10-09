@@ -373,6 +373,11 @@ def remove_scratch(path: Path) -> None:
         time.sleep(0.2)
 
 
+def has_control_character(text: str) -> bool:
+    """Whether any character is a control character, including a line break or a tab."""
+    return any(ord(character) < 32 or ord(character) == 127 for character in text)
+
+
 def status_file(paths: Any) -> Path:
     """Return where the runner writes what it may say about itself."""
     path: Path = paths.root / "arena" / "status.json"
@@ -456,6 +461,16 @@ def require_budget() -> None:
         raise RunnerRefused("The Arena turn budget is not guaranteed.")
 
 
+#: The two gates every claim passes, by the name the status records and the message a launch
+#: raises. The turn budget is a pure check of constants; containment is the runner's own record.
+BUDGET_REFUSAL = "turn_budget_not_guaranteed"
+CONTAINMENT_REFUSAL = "runtime_tree_not_contained"
+GATE_MESSAGES = {
+    BUDGET_REFUSAL: "The Arena turn budget is not guaranteed.",
+    CONTAINMENT_REFUSAL: "The Arena runtime tree could not be proven contained.",
+}
+
+
 class ArenaRunner:
     """Poll as one signed identity; supervise one bounded child through the whole game."""
 
@@ -527,7 +542,8 @@ class ArenaRunner:
         """Start from the proof the caller just made with this driver and handle.
 
         The command line enables, runs and restarts through the same inspection and preflight, so a
-        runner begins with the generation that was in effect while that proof was made.
+        runner begins with the generation that was in effect while that proof was made. Its gates
+        are read before its declaration is asked, exactly as for every later proof (`_settle`).
         """
         self.generation = self._read_generation()
         self.proven = self._key(None)
@@ -535,8 +551,40 @@ class ArenaRunner:
         self.verdict: str = "passed"
         self.refusal: str | None = None
         self.pending = False
-        self.declared_model = self._declared_model()
+        self._settle(self.proven, self.handle)
         self._write_status()
+
+    def _gate_refusal(self) -> str | None:
+        """Name the gate that refuses every claim now, or return `None` when both hold.
+
+        One fail-closed check for all paths: the proof that settles a declaration, the claim and a
+        launch. Neither gate reads a runtime: the budget is a check of constants, and containment is
+        the runner's own record of every kill so far.
+        """
+        if budget_problems():
+            return BUDGET_REFUSAL
+        if not self.contained:
+            return CONTAINMENT_REFUSAL
+        return None
+
+    def _refuse(self, key: str | None, gate: str) -> None:
+        """Record that a gate refuses the proof of `key`: no claim, and no question again."""
+        self.refused, self.verdict, self.refusal = key, "refused", gate
+
+    def _settle(self, key: str | None, handle: Any) -> bool:
+        """Settle what a proof declares: the gates first, and the one question only once they hold.
+
+        Every proof keeps this order, the first one and each re-proof after a generation change. A
+        broken gate refuses the proof, asks the runtime nothing and keeps the declaration it held,
+        so the status shows no new value. Only when both gates hold is the runtime asked, once.
+        Returns whether the proof may stand.
+        """
+        gate = self._gate_refusal()
+        if gate is not None:
+            self._refuse(key, gate)
+            return False
+        self.declared_model = self._declared_model(handle)
+        return True
 
     def _read_generation(self) -> str | None:
         """Ask the driver for its opaque generation; one that cannot tell offers none."""
@@ -577,13 +625,20 @@ class ArenaRunner:
         self.refused = None
         self._write_status()
 
-    def _declared_model(self) -> str | None:
-        """Return the driver's model text only if the one RMD-1 check the forum uses accepts it."""
+    def _declared_model(self, handle: Any) -> str | None:
+        """Return the driver's text as one bounded public text, or honest absence.
+
+        The text is the driver's own report, asked once per proof; a failure, a timeout or any other
+        answer costs the field and nothing else. It is kept, trimmed, only when the one RMD-1 check
+        the forum uses accepts it and it holds no control character, not even one the trim would
+        remove. What the status shows and what the claim sends is this same text.
+        """
         try:
-            value = self.driver.declared_model(self.handle)
+            value = self.driver.declared_model(handle)
         except Exception:
             return None
-        return value if isinstance(value, str) and bridge.is_declared_model_valid(value) else None
+        text = value if isinstance(value, str) and bridge.is_declared_model_valid(value) else None
+        return text.strip() if text is not None and not has_control_character(text) else None
 
     def _declaration_for(self, intent: StartIntent) -> str | None:
         """Return what this intent's claim declares, settled the first time the intent is claimed.
@@ -618,6 +673,12 @@ class ArenaRunner:
         key = self._key(intent)
         if key is None or key == self.refused:
             return False
+        gate = self._gate_refusal() if key == self.proven else None
+        if gate is not None:
+            # A gate broke since this proof stood: nothing is claimed for it, and nothing is asked.
+            self._refuse(key, gate)
+            self._write_status()
+            return False
         if key == self.proven:
             return True
         try:
@@ -636,10 +697,12 @@ class ArenaRunner:
         if self._key(intent) != key:
             # It changed while it was being proven: the next poll proves what is there now.
             return False
-        self.handle, self.proven, self.refused = handle, key, None
         self.generation = self._read_generation()
         self.verdict, self.refusal, self.pending = "passed", None, False
-        self.declared_model = self._declared_model()
+        if not self._settle(key, handle):
+            self._write_status()
+            return False
+        self.handle, self.proven, self.refused = handle, key, None
         self._write_status()
         return True
 
@@ -659,7 +722,13 @@ class ArenaRunner:
             self._write_status()
 
     def _write_status(self) -> None:
-        """Write what the runner may say about itself; a failure to write costs nothing else."""
+        """Write what the runner may say about itself; a failure to write costs nothing else.
+
+        The file is a private, local record inside the profile, and no claim reads it: it is not an
+        authority. Its `declared_model` is the validated text the proof holds; the key is left out
+        when there is none, so no null is written. Writing asks the runtime no model
+        question; the generation read here is the one the `changed` field needs.
+        """
         current = self._read_generation()
         document = {
             "schema_version": 1,
@@ -670,9 +739,10 @@ class ArenaRunner:
             "changed": current is not None and current != self.generation,
             "pending": self.pending,
             "playing": self.active is not None,
-            "declared_model": self.declared_model,
             "updated_at": dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
+        if self.declared_model is not None:
+            document["declared_model"] = self.declared_model
         with contextlib.suppress(OSError):
             write_json_atomically(status_file(self.paths), document)
 
@@ -872,11 +942,10 @@ class ArenaRunner:
 
     def _launch(self, intent: StartIntent) -> None:
         """Claim, reserve durably, then spawn; restart uncertainty never launches twice."""
-        if budget_problems():
+        gate = self._gate_refusal()
+        if gate is not None:
             # Before the claim: the seat stays queued, and no model work can start.
-            raise RunnerRefused("The Arena turn budget is not guaranteed.")
-        if not self.contained:
-            raise RunnerRefused("The Arena runtime tree could not be proven contained.")
+            raise RunnerRefused(GATE_MESSAGES[gate])
         # The declaration was resolved by the proof before this claim and is frozen for the intent;
         # it is left out of the body, never sent as null, when there is none.
         claim: dict[str, Any] = {"runner_id": self.journal.runner_id}

@@ -50,6 +50,17 @@ REQUIRED = frozenset(
         "test_a_changed_state_found_while_a_stop_begins_forwards_no_move",
         "test_a_stop_cannot_begin_between_the_check_and_the_forward",
         "test_a_profile_file_changed_after_the_decision_forwards_no_move_as_a_stop_begins",
+        "test_a_broken_gate_at_the_first_proof_asks_the_runtime_nothing",
+        "test_a_new_generation_under_a_broken_gate_asks_nothing_and_shows_no_new_value",
+        "test_a_valid_path_asks_exactly_once_and_claims_the_frozen_value",
+        "test_the_launch_check_stays_a_second_defence",
+        "test_a_valid_text_appears_exactly_in_the_status",
+        "test_a_missing_text_is_honestly_absent_and_no_null_is_written",
+        "test_an_invalid_text_does_not_appear_in_the_status",
+        "test_a_text_with_a_control_character_does_not_appear_in_the_status",
+        "test_a_timed_out_text_appears_in_neither_the_status_nor_the_claim",
+        "test_raw_driver_output_reaches_neither_the_status_nor_a_diagnostic",
+        "test_the_status_file_sits_inside_the_profile_and_the_profile_is_private",
     }
 )
 #: How many tests must have passed in all: a job that ran a handful proved a handful.

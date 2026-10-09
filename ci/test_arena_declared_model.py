@@ -18,6 +18,8 @@ import contextlib
 import inspect
 import io
 import json
+import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -39,6 +41,7 @@ from agentnexus_sdk import (
     arena_match,
     arena_runner,
     bridge,
+    profiles,
     runtimes,
 )
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions
@@ -177,8 +180,13 @@ class Scene:
         answer: object = MODEL,
         *,
         signed: bool = False,
+        broken: str | None = None,
     ) -> None:
-        """Build a runner proven with the driver, as the command line proves it before running."""
+        """Build a runner proven with the driver, as the command line proves it before running.
+
+        `broken` ("budget" or "containment") breaks one gate before the first proof, as a process
+        that starts with a broken gate would find it.
+        """
         self.monkeypatch, self.tmp_path = monkeypatch, tmp_path
         self.events: list[str] = []
         self.posts: list[tuple[str, dict[str, Any]]] = []
@@ -198,6 +206,8 @@ class Scene:
         runner.paths = SimpleNamespace(root=tmp_path / "profile")
         runner.driver, runner.handle = self.driver, self.driver.inspect(None)
         runner.active = runner.child = runner.worker = None
+        if broken is not None:
+            self.break_gate(broken)
         runner.begin_proof()
         if signed:
             runner.client = AgentNexusClient(
@@ -264,6 +274,21 @@ class Scene:
         return httpx.Response(200, json=self.answer(suffix, json.loads(request.content)))
 
     # -- driving the real runner -----------------------------------------------------------------
+
+    def break_gate(self, gate: str) -> None:
+        """Break one gate for the rest of this scene: the turn budget or the containment."""
+        if gate == "budget":
+            self.monkeypatch.setattr(arena_runner, "budget_problems", lambda: ["version"])
+        else:
+            self.runner.contained = False
+
+    def document(self) -> dict[str, Any]:
+        """Read the status file back exactly as it was written, nothing filtered out."""
+        return json.loads(self.text())
+
+    def text(self) -> str:
+        """Read the status file back as text."""
+        return arena_runner.status_file(self.runner.paths).read_text(encoding="utf-8")
 
     def another(self) -> arena_runner.StartIntent:
         """Make one more start intent for this profile, as the API would offer it."""
@@ -753,3 +778,188 @@ def test_the_openclaw_driver_asks_its_runtime_for_at_most_five_seconds(
     assert asked == [(["models", "status", "--plain"], asked[0][1])]
     assert 0 < asked[0][1] <= 5
     assert arena_driver_openclaw.STEP_SECONDS == 180, "the preflight's timing is not touched"
+
+
+# ---------------------------------------------------------------------------------------------
+# The gates come before the one question, on every proof (agntnexus/agentnexus#223, #226)
+# ---------------------------------------------------------------------------------------------
+
+BUDGET_REFUSAL = "turn_budget_not_guaranteed"
+CONTAINMENT_REFUSAL = "runtime_tree_not_contained"
+
+
+@pytest.mark.windows_security
+@pytest.mark.parametrize(
+    ("broken", "refusal"),
+    [("budget", BUDGET_REFUSAL), ("containment", CONTAINMENT_REFUSAL)],
+)
+def test_a_broken_gate_at_the_first_proof_asks_the_runtime_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, broken: str, refusal: str
+) -> None:
+    """The gates are read before the declaration is asked: a broken one asks and claims nothing."""
+    scene = Scene(monkeypatch, tmp_path, broken=broken)
+    scene.tick()
+    assert scene.driver.asked == 0, "the runtime was asked under a broken gate"
+    assert scene.claims == []
+    assert "declared_model" not in scene.document()
+    assert scene.document()["refusal"] == refusal
+
+
+@pytest.mark.windows_security
+@pytest.mark.parametrize(
+    ("broken", "refusal"),
+    [("budget", BUDGET_REFUSAL), ("containment", CONTAINMENT_REFUSAL)],
+)
+def test_a_new_generation_under_a_broken_gate_asks_nothing_and_shows_no_new_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, broken: str, refusal: str
+) -> None:
+    """A re-proof after a generation change keeps the order: no question, no claim, no new value."""
+    scene = Scene(monkeypatch, tmp_path, "first/model-a")
+    assert scene.driver.asked == 1
+    scene.break_gate(broken)
+    scene.driver.answer, scene.driver.generation_value = "second/model-b", "g2"
+    scene.tick()
+    assert scene.driver.asked == 1, "the new generation was asked under a broken gate"
+    assert scene.claims == []
+    assert scene.document()["declared_model"] == "first/model-a"
+    assert scene.document()["refusal"] == refusal
+
+
+@pytest.mark.windows_security
+def test_a_valid_path_asks_exactly_once_and_claims_the_frozen_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With both gates holding, the one question is asked once, and the claim carries its answer."""
+    scene = Scene(monkeypatch, tmp_path, "first/model-a")
+    scene.tick()
+    assert scene.driver.asked == 1
+    assert scene.claims == [{"runner_id": RUNNER_ID, "declared_model": "first/model-a"}]
+    assert scene.document().get("refusal") is None
+
+
+@pytest.mark.windows_security
+def test_the_launch_check_stays_a_second_defence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A launch with a broken budget is still refused before its claim, and asks nothing."""
+    scene = Scene(monkeypatch, tmp_path, MODEL)
+    scene.break_gate("budget")
+    with pytest.raises(arena_runner.RunnerRefused, match="turn budget"):
+        scene.launch()
+    assert scene.driver.asked == 1
+    assert scene.claims == []
+
+
+# ---------------------------------------------------------------------------------------------
+# The private status file: what it holds, and what it never holds (agntnexus/agentnexus#226)
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.windows_security
+def test_a_valid_text_appears_exactly_in_the_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The validated, bounded text is what the status shows, and what the claim sent."""
+    scene = Scene(monkeypatch, tmp_path, MODEL)
+    assert scene.document()["declared_model"] == MODEL
+
+
+@pytest.mark.windows_security
+def test_a_missing_text_is_honestly_absent_and_no_null_is_written(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Absence is the missing key, as in the claim: the status never writes a null declaration."""
+    scene = Scene(monkeypatch, tmp_path, None)
+    assert "declared_model" not in scene.document()
+    assert "declared_model" not in scene.text()
+
+
+@pytest.mark.windows_security
+@pytest.mark.parametrize(
+    "text",
+    ["has space/model", "https://provider.example/v1", "-leading/model", "x" * 121],
+)
+def test_an_invalid_text_does_not_appear_in_the_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, text: str
+) -> None:
+    """A text the one RMD-1 check refuses is left out, and its characters with it."""
+    scene = Scene(monkeypatch, tmp_path, text)
+    assert "declared_model" not in scene.document()
+    assert text not in scene.text()
+
+
+@pytest.mark.windows_security
+@pytest.mark.parametrize(
+    "text",
+    [f"{MODEL}\n", f"{MODEL}\t", f"{MODEL}\x1b[0m", "synthetic\x00vendor/model"],
+)
+def test_a_text_with_a_control_character_does_not_appear_in_the_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, text: str
+) -> None:
+    """A control character is refused even where the trim would have removed it."""
+    scene = Scene(monkeypatch, tmp_path, text)
+    assert "declared_model" not in scene.document()
+    assert "vendor" not in scene.text(), "a part of the refused text reached the status"
+
+
+@pytest.mark.windows_security
+def test_a_timed_out_text_appears_in_neither_the_status_nor_the_claim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A timeout that carries a partial answer costs the field; the partial answer is never used."""
+    timeout = subprocess.TimeoutExpired(cmd=["hermes"], timeout=5.0, output=MODEL)
+    scene = Scene(monkeypatch, tmp_path, timeout)
+    scene.launch()
+    assert scene.claims == [{"runner_id": RUNNER_ID}]
+    assert "declared_model" not in scene.document()
+    assert MODEL not in scene.text()
+
+
+@pytest.mark.windows_security
+def test_raw_driver_output_reaches_neither_the_status_nor_a_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The runtime's own report, unvalidated, is never copied anywhere the runner writes."""
+    raw = (
+        "Profile: agent2\nModel:   synthetic-raw-sentinel (synthetic-provider)\nGateway: stopped\n"
+    )
+    scene = Scene(monkeypatch, tmp_path, raw)
+    scene.launch()
+    printed = capsys.readouterr().out
+    assert "synthetic-raw-sentinel" not in scene.text()
+    assert "synthetic-raw-sentinel" not in printed
+    assert "run_started" in printed, "the diagnostic under test did not run"
+    assert scene.claims == [{"runner_id": RUNNER_ID}]
+
+
+def test_writing_the_status_asks_the_runtime_nothing_again(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The status reads the value the proof holds: no question to the runtime, however often."""
+    scene = Scene(monkeypatch, tmp_path, MODEL)
+    for _ in range(3):
+        scene.runner._write_status()
+    assert scene.driver.asked == 1
+
+
+def test_the_status_file_is_no_authority(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A forged status file changes nothing: the claim carries the text the proof holds."""
+    scene = Scene(monkeypatch, tmp_path, MODEL)
+    arena_runner.status_file(scene.runner.paths).write_text(
+        json.dumps({"declared_model": "forged/model-z"}), encoding="utf-8"
+    )
+    scene.launch()
+    assert scene.claims == [{"runner_id": RUNNER_ID, "declared_model": MODEL}]
+
+
+@pytest.mark.windows_security
+def test_the_status_file_sits_inside_the_profile_and_the_profile_is_private(tmp_path: Path) -> None:
+    """The status file lives under the profile, and the profile is owner-only on POSIX."""
+    install = tmp_path / "install"
+    profiles.ensure_profile_directory(install, PROFILE)
+    paths = Paths.for_profile(install, PROFILE)
+    path = arena_runner.status_file(paths)
+    assert path == paths.root / "arena" / "status.json"
+    assert path.is_relative_to(profiles.profiles_root(install))
+    if os.name == "posix":
+        assert stat.S_IMODE(paths.root.stat().st_mode) == 0o700

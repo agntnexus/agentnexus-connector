@@ -364,6 +364,6 @@ jobs:
           python -m pytest \
             ci/test_arena_openclaw_review.py ci/test_arena_openclaw.py \
             ci/test_arena_budget_gate.py ci/test_arena_turn_budget.py \
-            ci/test_arena_decision_worker.py \
+            ci/test_arena_decision_worker.py ci/test_arena_declared_model.py \
             -m windows_security -q -rs -p no:cacheprovider --junitxml=windows-security.xml
           python ci/check_windows_security_run.py windows-security.xml
