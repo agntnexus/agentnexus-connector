@@ -677,6 +677,7 @@ def run_process(
     arena: Path | None = None,
     worker: Path | None = None,
     driver_module: ModuleType = arena_driver_hermes,
+    openclaw_module: ModuleType = arena_driver_openclaw,
     runtime: str = "hermes",
     wait: float = 30.0,
 ) -> Process:
@@ -716,8 +717,8 @@ def run_process(
         real: Any = driver_module.HermesArenaDriver()
         runner.handle = driver_module.HermesRun(source, Path(sys.executable), home)
     elif runtime == "openclaw":
-        real = arena_driver_openclaw.OpenClawArenaDriver()
-        runner.handle = arena_driver_openclaw.OpenClawRun(
+        real = openclaw_module.OpenClawArenaDriver()
+        runner.handle = openclaw_module.OpenClawRun(
             command, "2026.9.9", config, state, config.parent
         )
     else:
