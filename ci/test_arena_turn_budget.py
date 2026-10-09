@@ -26,6 +26,7 @@ from __future__ import annotations
 import io
 import json
 import queue
+import sys
 import threading
 import time
 import uuid
@@ -2011,3 +2012,91 @@ def test_parent_guards_detect_a_weakened_source(
     """The parent's gate, its window, its elapsed accounting and its log lock are load-bearing."""
     mutant = load_mutant(tmp_path, arena_runner, original, replacement)
     expect_guard(lambda module: oracle(module, monkeypatch, capsys), arena_runner, mutant)
+
+
+# ---------------------------------------------------------------------------------------------
+# No late move after the intent was cancelled or the run stopped (agntnexus/agentnexus#223)
+# ---------------------------------------------------------------------------------------------
+
+
+def stopped_run(
+    module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    stop_after_the_line_is_read: bool,
+) -> list[str]:
+    """Stop the runner while the match process's move is still unread, and list what was served."""
+    runner, owned = supervisor(module)
+    served: list[str] = []
+
+    def game(command: dict[str, Any], **kwargs: object) -> dict[str, Any]:
+        served.append(command["operation"])
+        return {"status": "active", "game_version": "connect-four-1-solo"}
+
+    monkeypatch.setattr(module.bridge, "_run_game_command", game)
+    stop = lambda: setattr(runner, "stopping", True)  # noqa: E731 - what `stop_child` does first
+    if stop_after_the_line_is_read:
+        real = module.arena_match.bounded_request
+
+        def bounded(operation: str, arguments: Any) -> Any:
+            if operation == "game_move":
+                stop()
+            return real(operation, arguments)
+
+        monkeypatch.setattr(module.arena_match, "bounded_request", bounded)
+        items: list[str | Callable[[], None]] = [JOIN, started(), MOVE, RETURNED, FINISHED]
+    else:
+        items = [JOIN, started(), stop, MOVE, RETURNED, FINISHED]
+    module.ArenaRunner._serve(runner, FakeChild(Pipe(items)), owned)
+    capsys.readouterr()
+    return served
+
+
+@pytest.mark.parametrize("after_the_line_is_read", [False, True])
+def test_a_move_still_in_the_pipe_when_the_run_is_stopped_is_never_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    after_the_line_is_read: bool,
+) -> None:
+    """A cancelled intent or a replaced run has no late move, whatever the child had written."""
+    served = stopped_run(
+        arena_runner, monkeypatch, capsys, stop_after_the_line_is_read=after_the_line_is_read
+    )
+    assert served == ["game_join"]
+
+
+@pytest.mark.parametrize("after_the_line_is_read", [False, True])
+def test_a_parent_that_serves_after_a_stop_is_noticed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    after_the_line_is_read: bool,
+) -> None:
+    """Mutation: with the check removed, the stopped run forwards its move."""
+    mutant = load_mutant(
+        tmp_path, arena_runner, "if self.stopping:  # stopping before the forward", "if False:"
+    )
+    try:
+        served = stopped_run(
+            mutant, monkeypatch, capsys, stop_after_the_line_is_read=after_the_line_is_read
+        )
+        assert served == ["game_join", "game_move"]
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+def test_stopping_a_run_says_so_before_it_ends_the_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flag is up before the child dies, so nothing it left behind is served."""
+    runner = object.__new__(arena_runner.ArenaRunner)
+    runner.child = SimpleNamespace(
+        poll=lambda: 0, wait=lambda **kwargs: None, stdin=None, stdout=None
+    )
+    runner.worker = None
+    runner.active = None
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        arena_runner.arena_match, "end_tree", lambda process: seen.append(runner.stopping)
+    )
+    runner.stop_child()
+    assert seen == [True]
