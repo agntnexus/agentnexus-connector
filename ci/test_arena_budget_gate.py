@@ -32,6 +32,7 @@ from agentnexus_sdk import arena_driver_hermes, arena_match, arena_runner, conne
 PROVIDER_PHASE = 10
 
 
+@pytest.mark.windows_security
 def test_the_shipped_budget_is_guaranteed() -> None:
     """With the admitted numbers nothing is wrong."""
     assert arena_runner.budget_problems() == []
@@ -476,12 +477,14 @@ def test_without_a_process_table_the_capability_proof_fails_closed(
     assert arena_match.prove_tree() is False
 
 
+@pytest.mark.windows_security
 def test_the_capability_proof_holds_a_detached_grandchild_too() -> None:
     """The proof's tree contains a process in a session of its own; the real kill ends it."""
     assert arena_match.prove_tree() is True
     assert "start_new_session" in Path(arena_match.__file__).read_text(encoding="utf-8")
 
 
+@pytest.mark.windows_security
 def test_a_stop_that_could_not_prove_containment_blocks_every_later_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -499,6 +502,7 @@ def test_a_stop_that_could_not_prove_containment_blocks_every_later_claim(
     assert calls == []
 
 
+@pytest.mark.windows_security
 def test_a_cutoff_that_could_not_prove_containment_blocks_every_later_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

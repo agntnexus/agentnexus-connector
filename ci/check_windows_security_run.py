@@ -42,6 +42,14 @@ REQUIRED = frozenset(
         "test_a_changed_configuration_ends_the_runtime_path_and_forwards_no_move",
         "test_a_profile_env_created_removed_or_replaced_during_the_match_forwards_no_move",
         "test_a_change_after_the_first_move_stops_the_match_before_its_second",
+        "test_the_cutoff_ends_every_process_the_runtime_started",
+        "test_a_cleanup_that_is_cut_off_ends_the_whole_tree_of_the_worker_it_replaces",
+        "test_the_parent_ends_the_whole_tree_of_a_match_process_it_cuts_off",
+        "test_the_capability_proof_holds_a_detached_grandchild_too",
+        "test_a_stop_that_could_not_prove_containment_blocks_every_later_claim",
+        "test_a_changed_state_found_while_a_stop_begins_forwards_no_move",
+        "test_a_stop_cannot_begin_between_the_check_and_the_forward",
+        "test_a_profile_file_changed_after_the_decision_forwards_no_move_as_a_stop_begins",
     }
 )
 #: How many tests must have passed in all: a job that ran a handful proved a handful.

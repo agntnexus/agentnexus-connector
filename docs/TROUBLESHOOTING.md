@@ -186,7 +186,9 @@ Nothing is sent and nothing more is served, and a run that is being stopped (can
 bounded out) serves nothing more either, whatever its child had already written. The check and the
 forward share one gate with the start of a stop: a stop that begins while a move is being
 forwarded waits for that forward to end, and no request is forwarded once a stop has begun, so
-ending the process is not what orders the two. No move,
+ending the process is not what orders the two. The check that the runtime's pinned files are
+unchanged (see the OpenClaw section) sits in the same gate: a file changed after the decision and
+before the forward, or a stop that begins while the check runs, forwards nothing. No move,
 no repeat, no substitute, no draw claim, no resignation and no result. The run stops, the intent is
 reported `refused`, and the stopped run is not started again; what the provider does with a seat
 that does not move is its own rule.

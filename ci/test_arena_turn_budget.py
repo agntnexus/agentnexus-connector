@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import queue
 import sys
 import threading
@@ -50,8 +51,10 @@ from arena_fakes import (
     play,
     supervisor,
 )
+from arena_openclaw_support import stand_in_handle
+from fake_chat_model import FakeChatModel
 
-from agentnexus_sdk import arena_match, arena_runner, games
+from agentnexus_sdk import arena_driver_openclaw, arena_match, arena_runner, games
 
 PROVIDER_TURN = 60.0
 RESERVE = 15.0
@@ -2102,6 +2105,7 @@ def test_stopping_a_run_says_so_before_it_ends_the_tree(monkeypatch: pytest.Monk
     assert seen == [True]
 
 
+@pytest.mark.windows_security
 def test_a_stop_cannot_begin_between_the_check_and_the_forward(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2203,6 +2207,9 @@ def pinned_run(
     *,
     still_pinned: bool,
     module: ModuleType = arena_runner,
+    handle: Any = None,
+    pin: str = "pin",
+    answer: Callable[[Any, str], bool] | None = None,
 ) -> tuple[list[str], list[bool], Any, Any]:
     """Serve one move; the driver's pin check starts a stop and then answers `still_pinned`.
 
@@ -2216,19 +2223,19 @@ def pinned_run(
     )
     runner.worker = None
     runner.active = None
-    runner.handle, runner.pin = object(), "pin"
+    runner.handle, runner.pin = object() if handle is None else handle, pin
     runner.proven, runner.refused = "generation:abc", None
     runner._write_status = lambda: None
     monkeypatch.setattr(module.arena_match, "end_tree", lambda process: True)
     stopper: list[threading.Thread] = []
     inside: list[bool] = []
 
-    def hook(handle: Any, pin: str) -> bool:
+    def hook(given: Any, pinned: str) -> bool:
         stopper.append(threading.Thread(target=runner.stop_child))
         stopper[0].start()
         time.sleep(0.3)
         inside.append(runner.stopping)
-        return still_pinned
+        return still_pinned if answer is None else answer(given, pinned)
 
     runner.driver = SimpleNamespace(still_pinned=hook)
     forwarded: list[str] = []
@@ -2246,6 +2253,7 @@ def pinned_run(
     return forwarded, inside, runner, (stopper[0] if stopper else None)
 
 
+@pytest.mark.windows_security
 def test_a_changed_state_found_while_a_stop_begins_forwards_no_move(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2313,3 +2321,68 @@ def test_a_parent_whose_pin_check_leaves_the_gate_or_is_gone_is_noticed(
         expect_guard(oracle, arena_runner, mutant)
     finally:
         sys.modules.pop(mutant.__name__, None)
+
+
+@pytest.mark.windows_security
+@pytest.mark.parametrize(
+    ("what", "no_env"),
+    [
+        ("create_env", True),
+        ("remove_env", False),
+        ("replace_env", False),
+        ("append_config", False),
+    ],
+)
+def test_a_profile_file_changed_after_the_decision_forwards_no_move_as_a_stop_begins(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    what: str,
+    no_env: bool,
+) -> None:
+    """The real driver's pin, the real files, and a stop that begins inside the check.
+
+    After the decision, before the forward, the profile's `.env` appears, disappears or is replaced,
+    or the configuration grows. The stop waits for the check, the check says changed, and nothing
+    reaches the API or the provider.
+    """
+    server = FakeChatModel("move")
+    try:
+        handle = stand_in_handle(tmp_path, server, no_profile_env=no_env)
+        driver = arena_driver_openclaw.OpenClawArenaDriver()
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        pin = driver.launch(handle, scratch).pin
+        assert pin
+        config = Path(str(handle.config))
+        env = config.parent / ".env"
+
+        def after_the_decision(given: Any, pinned: str) -> bool:
+            if what == "create_env":
+                env.write_text("SYNTHETIC_KEY=created-after-the-decision\n", encoding="utf-8")
+            elif what == "remove_env":
+                env.unlink()
+            elif what == "replace_env":
+                stamp = env.stat()
+                other = env.with_name("other.env")
+                other.write_bytes(env.read_bytes())
+                os.utime(other, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                os.replace(other, env)
+            else:
+                with config.open("ab") as handle_:
+                    handle_.write(b" ")
+            return driver.still_pinned(given, pinned)
+
+        forwarded, inside, runner, _ = pinned_run(
+            monkeypatch,
+            capsys,
+            still_pinned=False,
+            handle=handle,
+            pin=pin,
+            answer=after_the_decision,
+        )
+        assert set(inside) == {False}, "a stop took effect inside the check"
+        assert forwarded == [], "a move reached the API after the profile changed"
+        assert runner.proven is None and runner.stopping is True
+    finally:
+        server.close()

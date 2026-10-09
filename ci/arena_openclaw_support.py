@@ -90,9 +90,12 @@ def stand_in_handle(
     server: FakeChatModel,
     fault: str = "",
     profile: dict[str, Any] | None = None,
+    *,
+    no_profile_env: bool = False,
 ) -> arena_driver_openclaw.OpenClawRun:
     """Return the handle of a stand-in installation with a disposable profile."""
     behavior = behavior_of(server, tmp_path, fault)
+    behavior["no_profile_env"] = no_profile_env
     if profile is not None:
         behavior["profile"] = profile
     command, config, state = openclaw_stand_in(tmp_path, behavior)

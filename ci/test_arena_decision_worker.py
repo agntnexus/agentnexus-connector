@@ -734,6 +734,7 @@ def test_an_adapter_that_reads_the_profile_from_the_wrong_place_is_noticed(
 # ---------------------------------------------------------------------------------------------
 
 
+@pytest.mark.windows_security
 @pytest.mark.parametrize("helper", ["detached", "inherit"])
 @pytest.mark.parametrize("role", ["white", "first"])
 def test_the_cutoff_ends_every_process_the_runtime_started(
@@ -751,6 +752,7 @@ def test_the_cutoff_ends_every_process_the_runtime_started(
     assert_no_residue(run)  # the helper holds a tether: it must be gone too
 
 
+@pytest.mark.windows_security
 def test_a_cleanup_that_is_cut_off_ends_the_whole_tree_of_the_worker_it_replaces(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -764,6 +766,7 @@ def test_a_cleanup_that_is_cut_off_ends_the_whole_tree_of_the_worker_it_replaces
     assert_no_residue(run)
 
 
+@pytest.mark.windows_security
 def test_the_parent_ends_the_whole_tree_of_a_match_process_it_cuts_off(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
