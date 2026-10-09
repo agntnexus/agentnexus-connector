@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -22,10 +23,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from arena_fakes import load_mutant
 from arena_openclaw_support import stand_in_handle
 from fake_chat_model import FakeChatModel
 
-from agentnexus_sdk import arena_driver, arena_driver_openclaw, openclaw_arena
+from agentnexus_sdk import arena_driver, arena_driver_openclaw, arena_match, openclaw_arena
 
 WINDOWS = sys.platform == "win32"
 ME = "S-1-5-21-1-2-3-1001"
@@ -328,3 +330,95 @@ def test_a_failed_job_makes_the_openclaw_preflight_refuse_before_any_claim(
             arena_driver.check_preflight(arena_driver_openclaw.OpenClawArenaDriver(), handle)
     finally:
         server.close()
+
+
+# ---------------------------------------------------------------------------------------------
+# Mutation proofs: weaken one condition, require the proof to notice
+# ---------------------------------------------------------------------------------------------
+
+
+def mutant_of(folder: Path, original: str, replacement: str) -> Any:
+    """Load a copy of the OpenClaw module with one line weakened, beside the copy it loads."""
+    folder.mkdir(parents=True, exist_ok=True)
+    shutil.copy(arena_match.__file__, folder / "arena_match.py")
+    return load_mutant(folder, openclaw_arena, original, replacement)
+
+
+def test_an_access_decision_that_ignores_who_was_granted_is_noticed(tmp_path: Path) -> None:
+    """Mutation: with the grantee no longer checked, a profile shared with Users is private."""
+    mutant = mutant_of(tmp_path / "mutant", "or sid not in allowed", "or False")
+    try:
+        shared = [(ALLOWED, ME), (ALLOWED, USERS)]
+        assert openclaw_arena.acl_is_private(ME, shared, ME) is False
+        assert mutant.acl_is_private(ME, shared, ME) is True
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+@pytest.mark.skipif(not WINDOWS, reason="the access lists are Windows'")
+def test_a_profile_check_without_the_windows_privacy_gate_is_noticed(
+    tmp_path: Path,
+) -> None:
+    """Mutation: without the gate, a profile shared with another group is accepted."""
+    mutant = mutant_of(
+        tmp_path / "mutant",
+        'elif sys.platform == "win32" and not (windows_private(root) and windows_private(state)):',
+        "elif False:",
+    )
+    try:
+        root, config, state = profile_on_disk(tmp_path / "shared")
+        lock_to_user(root)
+        share_with_users(root)
+        assert openclaw_arena.profile_context_valid(root, config, state) is False
+        assert mutant.profile_context_valid(root, config, state) is True
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+@pytest.mark.skipif(not WINDOWS, reason="job objects are Windows'")
+def test_a_process_that_never_joins_its_job_is_noticed(tmp_path: Path) -> None:
+    """Mutation: with the assignment skipped, ending the run leaves the grandchild running."""
+    mutant = mutant_of(
+        tmp_path / "mutant",
+        "if not self._kernel.AssignProcessToJobObject(self.handle, handle):",
+        "if False:",
+    )
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    accepted: list[socket.socket] = []
+
+    def accept() -> None:
+        with contextlib.suppress(OSError):
+            while True:
+                accepted.append(server.accept()[0])
+
+    threading.Thread(target=accept, daemon=True).start()
+    (tmp_path / "cwd").mkdir()
+    script = tmp_path / "children.py"
+    script.write_text(CHILDREN.replace("time.sleep(60)", "time.sleep(20)"), encoding="utf-8")
+    try:
+        run = mutant.Run(
+            [sys.executable, str(script), str(server.getsockname()[1])], dict(os.environ), tmp_path
+        )
+        deadline = time.monotonic() + 30
+        while len(accepted) < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert len(accepted) == 2
+        run.end()
+        survivors = 0
+        for connection in accepted:
+            connection.settimeout(3)
+            try:
+                if connection.recv(1) != b"":
+                    survivors += 1
+            except TimeoutError:
+                survivors += 1
+            except ConnectionResetError:
+                pass
+        assert survivors >= 1, "an unassigned process was ended with its run"
+    finally:
+        for connection in accepted:
+            connection.close()
+        server.close()
+        sys.modules.pop(mutant.__name__, None)

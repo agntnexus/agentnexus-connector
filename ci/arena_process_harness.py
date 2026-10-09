@@ -13,6 +13,7 @@ import hashlib
 import json
 import socket
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -34,6 +35,7 @@ from agentnexus_sdk import (
     arena_match,
     arena_runner,
     hermes_arena,
+    openclaw_arena,
 )
 
 #: The runtimes every process test runs through: the Hermes stand-in and a second, fake runtime.
@@ -487,6 +489,15 @@ def openclaw_stand_in(root: Path, behavior: dict[str, Any]) -> tuple[tuple[str, 
     home = root / "home"
     (home / "state").mkdir(parents=True)
     home.chmod(0o700)
+    if sys.platform == "win32":
+        # The profile is judged by its owner and access list: lock it to the current user alone,
+        # as a profile of a real installation has to be.
+        sid = openclaw_arena.windows_current_sid()
+        subprocess.run(  # noqa: S603 - fixed system tool on a test directory
+            ["icacls", str(home), "/inheritance:r", "/grant:r", f"*{sid}:(OI)(CI)F"],  # noqa: S607
+            check=True,
+            capture_output=True,
+        )
     config = home / "openclaw.json"
     config.write_text(json.dumps(behavior["profile"]), encoding="utf-8")
     (home / "state" / "canary.txt").write_text("canary state, never rewritten\n", encoding="utf-8")

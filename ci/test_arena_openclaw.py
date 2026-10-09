@@ -324,12 +324,12 @@ def test_a_configuration_that_includes_other_files_cannot_be_pinned_and_is_refus
         server.close()
 
 
-def test_a_launch_that_hands_the_live_profile_configuration_on_is_noticed(
+def test_a_launch_that_hands_the_live_profile_configuration_on_is_refused_by_the_worker(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    """Mutation: with the live path passed on, a profile change reaches the active match."""
+    """Mutation: with the live path passed on, the worker refuses it, and no model is asked."""
     mutant = load_mutant(
         tmp_path / "mutant",
         arena_driver_openclaw,
@@ -337,20 +337,11 @@ def test_a_launch_that_hands_the_live_profile_configuration_on_is_noticed(
         "openclaw_arena.CONFIG_ENV: str(handle.config),  # pinned",
     )
     server = FakeChatModel("move,move")
+    (tmp_path / "run").mkdir()
     try:
-        thread = change_the_route_after_the_first_request(
-            server, tmp_path / "run" / "home" / "openclaw.json"
-        )
-        run = play(
-            monkeypatch,
-            capsys,
-            tmp_path / "run",
-            server,
-            turns=2,
-            openclaw_module=mutant,
-        )
-        thread.join(timeout=10)
-        assert [request["model"] for request in server.requests] == ["fake-model", "changed-model"]
+        run = play(monkeypatch, capsys, tmp_path / "run", server, turns=2, openclaw_module=mutant)
+        assert server.requests == [] and run.forwarded == []
+        assert "runtime_exception" in run.events
         run.tethers.close()
     finally:
         server.close()

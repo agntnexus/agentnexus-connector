@@ -24,6 +24,7 @@ import importlib.util
 import json
 import os
 import queue
+import re
 import secrets
 import shutil
 import signal
@@ -74,14 +75,188 @@ FORCE = getattr(signal, "SIGKILL", signal.SIGTERM)
 KEPT = {"PATH", "SYSTEMROOT", "WINDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR"}
 
 
+SID = re.compile(r"S-1-\d+(?:-\d+)+")
+#: The accounts that can take any file on Windows anyway: the system and the Administrators group.
+SYSTEM_SID = "S-1-5-18"
+ADMINISTRATORS_SID = "S-1-5-32-544"
+ACE_ALLOWED, ACE_DENIED = 0, 1
+
+
+def acl_is_private(owner: str, entries: list[tuple[int, str]] | None, user: str) -> bool:
+    """Decide from an owner and an access list whether only `user` (and the system) can reach it.
+
+    The owner must be the user. Every grant must be to the user, to the system or to the
+    Administrators group; a grant to anyone else - Everyone, Users, Authenticated Users, another
+    account - is refusal. Denials are ignored, they only narrow. A missing list (which grants
+    everyone everything), an entry of a kind that is not a plain grant or denial, and anything that
+    is not a well-formed security identifier cannot be judged, so they refuse.
+    """
+    if entries is None or not SID.fullmatch(user) or owner != user:
+        return False
+    allowed = {user, SYSTEM_SID, ADMINISTRATORS_SID}
+    for kind, sid in entries:
+        if kind == ACE_DENIED:
+            continue
+        if kind != ACE_ALLOWED or not SID.fullmatch(sid) or sid not in allowed:
+            return False
+    return True
+
+
+def windows_security(path: Path) -> tuple[str, list[tuple[int, str]] | None] | None:
+    """Read a directory's owner and access list (Windows), or `None` when it cannot be read.
+
+    Only the security descriptor is asked for; nothing inside the directory is opened or listed.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return None
+    advapi.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi.GetNamedSecurityInfoW.argtypes = (
+        wintypes.LPCWSTR,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi.GetAclInformation.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_int,
+    )
+    advapi.GetAce.argtypes = (ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p))
+    advapi.ConvertSidToStringSidW.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+
+    def text_of(sid: int | None) -> str | None:
+        pointer = ctypes.c_void_p()
+        if not sid or not advapi.ConvertSidToStringSidW(sid, ctypes.byref(pointer)):
+            return None
+        try:
+            return ctypes.wstring_at(pointer.value) if pointer.value else None
+        finally:
+            kernel.LocalFree(pointer)
+
+    class AclSize(ctypes.Structure):
+        _fields_ = (("count", wintypes.DWORD), ("used", wintypes.DWORD), ("free", wintypes.DWORD))
+
+    owner, dacl, descriptor = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    status = advapi.GetNamedSecurityInfoW(
+        str(path),
+        1,  # SE_FILE_OBJECT
+        0x1 | 0x4,  # OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+        ctypes.byref(owner),
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(descriptor),
+    )
+    if status != 0:
+        return None
+    try:
+        owner_text = text_of(owner.value)
+        if owner_text is None:
+            return None
+        if not dacl.value:
+            return owner_text, None
+        size = AclSize()
+        if not advapi.GetAclInformation(dacl, ctypes.byref(size), ctypes.sizeof(size), 2):
+            return None
+        entries: list[tuple[int, str]] = []
+        for index in range(size.count):
+            ace = ctypes.c_void_p()
+            if not advapi.GetAce(dacl, index, ctypes.byref(ace)) or not ace.value:
+                return None
+            kind = ctypes.c_ubyte.from_address(ace.value).value
+            if kind in (ACE_ALLOWED, ACE_DENIED):
+                sid = text_of(ace.value + 8)
+                if sid is None:
+                    return None
+                entries.append((kind, sid))
+            else:
+                entries.append((kind, ""))
+        return owner_text, entries
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+def windows_current_sid() -> str:
+    """Return the security identifier of the user this process runs as (Windows), or `""`."""
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return ""
+    kernel.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+    advapi.OpenProcessToken.argtypes = (
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi.GetTokenInformation.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    advapi.ConvertSidToStringSidW.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+    token = ctypes.c_void_p()
+    if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 0x8, ctypes.byref(token)):
+        return ""
+    try:
+        needed = wintypes.DWORD()
+        advapi.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))  # TokenUser
+        if not needed.value:
+            return ""
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not advapi.GetTokenInformation(token, 1, buffer, needed, ctypes.byref(needed)):
+            return ""
+        sid = ctypes.c_void_p.from_buffer(buffer).value
+        pointer = ctypes.c_void_p()
+        if not sid or not advapi.ConvertSidToStringSidW(sid, ctypes.byref(pointer)):
+            return ""
+        try:
+            return ctypes.wstring_at(pointer.value) if pointer.value else ""
+        finally:
+            kernel.LocalFree(pointer)
+    finally:
+        kernel.CloseHandle(token)
+
+
+def windows_private(path: Path) -> bool:
+    """Return whether only the current user (and the system accounts) can reach this directory."""
+    try:
+        security = windows_security(path)
+        user = windows_current_sid()
+    except (OSError, ValueError):
+        return False
+    return security is not None and acl_is_private(security[0], security[1], user)
+
+
 def profile_context_valid(profile_root: Path, profile_config: Path, profile_state: Path) -> bool:
     """Accept only the non-linked OpenClaw config and state this Connector profile owns.
 
     Nothing is opened: only paths and their metadata are looked at. The configuration and the state
-    must lie below the profile's own directory, with no link or junction on the way down, and on a
+    must lie below the profile's own directory, with no link or junction on the way down. On a
     system with owners and modes the profile directory must be the current user's and closed to
-    everyone else, because the runtime's own auth store lives in that state and nobody else may
-    reach it. Anything else is refused, and a refusal comes before any seat is claimed.
+    everyone else; on Windows the owner and the access list of the profile and of its state must
+    say the same (the user, the system and Administrators only). The runtime's own auth store lives
+    in that state and nobody else may reach it. Anything that cannot be proven is refused, and a
+    refusal comes before any seat is claimed.
     """
     try:
         root = Path(profile_root).absolute()
@@ -111,9 +286,34 @@ def profile_context_valid(profile_root: Path, profile_config: Path, profile_stat
             info = root.stat()
             if info.st_uid != os.geteuid() or info.st_mode & 0o077:
                 return False
+        elif sys.platform == "win32" and not (windows_private(root) and windows_private(state)):
+            # No owner and mode here: the owner and the access list of the profile and of its
+            # state must say it is the user's alone, or it is not proven and not accepted.
+            return False
     except (OSError, RuntimeError, ValueError):
         return False
     return True
+
+
+def pin_configuration(config: Path, scratch: Path) -> Path:
+    """Copy the profile's one configuration file into a private folder of this match's scratch.
+
+    The effective configuration of a match - its model, its route, its agent directories - is the
+    one the match started with; a later change to the profile is for the next match. Only that one
+    file is copied, never the authentication store or anything beside it, and it is never parsed,
+    logged or hashed here. A configuration that includes other files cannot be copied faithfully,
+    so it is refused. The copy is removed with the scratch.
+    """
+    data = Path(config).read_bytes()
+    if len(data) > ENVELOPE_BYTES * 16 or b"$include" in data:
+        raise ValueError("The profile configuration cannot be pinned for one match.")
+    folder = scratch / "pinned"
+    folder.mkdir(parents=True, exist_ok=True)
+    pinned = folder / Path(config).name
+    pinned.write_bytes(data)
+    with contextlib.suppress(OSError):
+        pinned.chmod(0o600)
+    return pinned
 
 
 def agent_directories_valid(
@@ -435,10 +635,47 @@ def guard_main(command: list[str]) -> int:
 
 
 class WindowsJob:
-    """A job object that ends every process in it when its last handle closes (Windows)."""
+    """A job object that ends every process in it when it is ended or its last handle closes.
 
-    def __init__(self) -> None:
+    Every answer of Windows is checked; a call that fails raises `OSError` and the job is not used.
+    """
+
+    def __init__(self, kernel: Any = None, ntdll: Any = None) -> None:
         """Create the job with kill-on-close, so a killed worker leaves no runtime behind."""
+        if kernel is None:
+            kernel, ntdll = self._libraries()
+        self._kernel, self._ntdll = kernel, ntdll
+        self.handle: int | None = kernel.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise OSError("The process job could not be created.")
+        if not self._limit_to_kill_on_close():
+            self.close()
+            raise OSError("The process job could not be limited.")
+
+    @staticmethod
+    def _libraries() -> tuple[Any, Any]:
+        """Load the Windows libraries with their argument and result types declared."""
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+        kernel.SetInformationJobObject.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        )
+        kernel.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        kernel.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        ntdll = ctypes.WinDLL("ntdll")  # type: ignore[attr-defined]
+        ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+        ntdll.NtResumeProcess.restype = ctypes.c_long
+        return kernel, ntdll
+
+    def _limit_to_kill_on_close(self) -> bool:
         import ctypes
         from ctypes import wintypes
 
@@ -468,29 +705,51 @@ class WindowsJob:
                 ("PeakJobMemoryUsed", ctypes.c_size_t),
             )
 
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
-        kernel.CreateJobObjectW.restype = wintypes.HANDLE
-        kernel.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
-        kernel.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
-        self._kernel = kernel
-        self.handle = kernel.CreateJobObjectW(None, None)
         information = Extended()
         information.Basic.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        kernel.SetInformationJobObject(
-            self.handle, 9, ctypes.byref(information), ctypes.sizeof(information)
+        return bool(
+            self._kernel.SetInformationJobObject(
+                self.handle, 9, ctypes.byref(information), ctypes.sizeof(information)
+            )
         )
 
-    def add(self, process: subprocess.Popen[Any]) -> None:
-        """Put a started process, and so everything it starts, in the job."""
-        self._kernel.AssignProcessToJobObject(self.handle, int(process._handle))  # type: ignore[attr-defined]
+    def adopt(self, process: subprocess.Popen[Any]) -> None:
+        """Put a process that was started suspended in the job, and only then let it run."""
+        handle = int(process._handle)  # type: ignore[attr-defined]
+        if not self._kernel.AssignProcessToJobObject(self.handle, handle):
+            raise OSError("The process could not be put in its job.")
+        if self._ntdll.NtResumeProcess(handle) != 0:
+            raise OSError("The process of its job could not be resumed.")
 
     def end(self) -> None:
         """End every process in the job now."""
-        self._kernel.TerminateJobObject(self.handle, 1)
+        if self.handle:
+            self._kernel.TerminateJobObject(self.handle, 1)
 
     def close(self) -> None:
         """Release the job; whatever is still in it ends."""
-        self._kernel.CloseHandle(self.handle)
+        handle, self.handle = self.handle, None
+        if handle:
+            self._kernel.CloseHandle(handle)
+
+
+def start_in_job(argv: list[str], job: WindowsJob, **options: Any) -> subprocess.Popen[Any]:
+    """Start a process suspended, put it in the job, and resume it; fail with nothing running.
+
+    The process cannot start anything before it is in the job. If joining or resuming fails, the
+    process is killed, the job is released and the start raises.
+    """
+    flags = options.pop("creationflags", 0) | 0x4  # CREATE_SUSPENDED
+    process = subprocess.Popen(argv, creationflags=flags, **options)  # noqa: S603 - the caller's argv
+    try:
+        job.adopt(process)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            process.kill()
+        job.end()
+        job.close()
+        raise
+    return process
 
 
 class Run:
@@ -502,17 +761,23 @@ class Run:
         self.job: WindowsJob | None = None
         self.tree: set[int] = set()
         if sys.platform == "win32":
-            self.job = WindowsJob()
-            self.process = subprocess.Popen(  # noqa: S603 - the runtime and this worker's argv
-                argv,
-                env=environment,
-                cwd=work / "cwd",
-                stdin=subprocess.DEVNULL,
-                stdout=self.output,
-                stderr=subprocess.DEVNULL,
-                creationflags=0x08000000,  # CREATE_NO_WINDOW
-            )
-            self.job.add(self.process)
+            try:
+                self.job = WindowsJob()
+                self.process = start_in_job(
+                    argv,
+                    self.job,
+                    env=environment,
+                    cwd=work / "cwd",
+                    stdin=subprocess.DEVNULL,
+                    stdout=self.output,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=0x08000000,  # CREATE_NO_WINDOW
+                )
+            except BaseException:
+                if self.job is not None:
+                    self.job.close()
+                self.output.close()
+                raise
         else:
             self.process = subprocess.Popen(  # noqa: S603 - the runtime behind this guard
                 [sys.executable, "-I", str(Path(__file__).resolve()), "--guard", "--", *argv],
@@ -628,8 +893,13 @@ def worker_main(
     profile_root = Path(os.environ[PROFILE_ROOT_ENV])
     profile_config = Path(os.environ[PROFILE_CONFIG_ENV])
     profile_state = Path(os.environ[PROFILE_STATE_ENV])
-    if config != profile_config or not profile_context_valid(
-        profile_root, profile_config, profile_state
+    # The configuration of this match is the pinned copy below the scratch, never the live profile.
+    if (
+        config is None
+        or config == profile_config
+        or not config.is_file()
+        or not config.resolve().is_relative_to(scratch.resolve())
+        or not profile_context_valid(profile_root, profile_config, profile_state)
     ):
         raise RuntimeError("OpenClaw profile context is no longer owned.")
 

@@ -277,8 +277,9 @@ channel (a Unix socket in the throwaway directory, a named pipe on Windows, a on
 worker validates it again and alone talks to the supervisor.
 
 When the supervisor reports a move accepted, the whole runtime process tree is ended, because the
-runtime would otherwise ask its model once more. On Windows the tree lives in a job object that
-ends when the worker does; elsewhere a guard process ends it when its parent is gone or on request,
+runtime would otherwise ask its model once more. On Windows the runtime starts suspended, joins a job object before its first instruction and only
+then runs; if any step fails it is killed and the start is refused, before a seat is claimed when it is the
+preflight. The job ends when the worker does; elsewhere a guard process ends it when its parent is gone or on request,
 reading the tree before the first signal because the runtime keeps children in sessions of their
 own. The throwaway session directory is removed afterwards. The Connector never writes the auth
 store; OpenClaw alone may manage it through its normal runtime boundary.
@@ -293,6 +294,20 @@ What this does not give you, stated plainly:
   boundary keeps per-decision sessions disposable while OpenClaw resolves profile-scoped auth
   itself. The Connector passes only validated paths, never opens the auth database, and refuses
   configured agent-store paths outside the selected profile or through a link.
+- The profile and its state must be the user's alone, and that is proven before a seat is claimed. On
+  Linux and macOS the profile directory must be owned by you with mode 0700. On Windows the owner of
+  the profile directory and of its state must be you, and their access lists may grant access only
+  to you, the system and Administrators; a grant to Everyone, Users, Authenticated Users or any
+  other account, an access list that cannot be read, or an entry the Connector cannot classify,
+  refuses the profile as not isolated. Only the owner and the access list are read, never anything
+  inside the directory. To lock a profile directory to yourself, run
+  `icacls <profile directory> /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"`.
+- One match plays on one configuration. When a match starts, the profile's single configuration
+  file is copied into the match's private scratch and every decision of that match uses the copy,
+  so a change to the profile's model, route or agent directories during a match takes effect with
+  the next match, after the idle preflight. The copy is made without parsing the file and is
+  removed with the scratch; the authentication store is never copied. A configuration that includes
+  other files cannot be copied faithfully and is refused.
 - The runtime sends its host name, working directory and operating system to the model provider in
   every request; the working directory is an empty throwaway.
 - The three-tool guarantee is proven for the model route the runtime takes with the overlay. A
