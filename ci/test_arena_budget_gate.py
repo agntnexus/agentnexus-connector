@@ -451,8 +451,8 @@ def test_a_tree_kill_that_skips_the_table_leaves_the_detached_child(tmp_path: Pa
     mutant = load_mutant(
         tmp_path / "mutant",
         arena_match,
-        "members = self.known | descendants(self.pid)",
-        "members = set(self.known)",
+        "members |= descendants(self.pid)  # table",
+        "pass  # table",
     )
     listener = Listener()
     script = tmp_path / "detacher.py"
