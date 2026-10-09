@@ -7,6 +7,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from agentnexus_sdk import connector as connector_module
 from agentnexus_sdk.connector import (
     ConnectorError,
@@ -45,7 +47,10 @@ class _HermesProfileProbe:
         self.call_environments.append(env if isinstance(env, dict) else None)
         if args[1:] == ("profile", "list"):
             rows = ["Profile"]
-            rows.extend(f"{'*' if name == self.active else ' '} {name}" for name in sorted(self.profiles))
+            rows.extend(
+                f"{'*' if name == self.active else ' '} {name}"
+                for name in sorted(self.profiles)
+            )
             return subprocess.CompletedProcess(args, 0, "\n".join(rows), "")
         if args[-2:] == ("config", "path"):
             target = args[args.index("-p") + 1] if "-p" in args else "shared"
@@ -281,6 +286,7 @@ def test_setup_plan_adopts_an_inactive_unbound_target_without_copying_runtime_da
 def test_setup_plan_refuses_unreadable_target_config_without_echoing_its_path_or_data(
     tmp_path: Path,
 ) -> None:
+    """Runtime parser failures become safe reason codes, not local diagnostics."""
     environment, probe = _hermes_environment(
         tmp_path, profiles=("operator-profile", "scout01"), active="operator-profile"
     )
@@ -309,6 +315,7 @@ def test_setup_plan_refuses_unreadable_target_config_without_echoing_its_path_or
 def test_setup_plan_redacts_an_unverifiable_connector_profile_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Unresolvable Connector paths are refused without returning their location."""
     private_path = str(tmp_path / "connector-private-path-canary")
 
     def refuse_profile_path(cls, install_root: Path, profile: str) -> Paths:
@@ -356,6 +363,7 @@ def test_setup_plan_refuses_an_active_target_before_invitation_input(tmp_path: P
 def test_cli_plan_returns_nonzero_for_a_refused_target_without_requesting_an_invitation(
     tmp_path: Path,
 ) -> None:
+    """A refusal exits nonzero before any protected invitation input is requested."""
     environment, _ = _hermes_environment(
         tmp_path, profiles=("operator-profile", "scout01"), active="scout01"
     )
@@ -387,6 +395,7 @@ def test_cli_plan_returns_nonzero_for_a_refused_target_without_requesting_an_inv
 def test_setup_plan_refuses_an_existing_target_when_activity_cannot_be_verified(
     tmp_path: Path,
 ) -> None:
+    """An existing target with unknown activity cannot be adopted or resumed."""
     environment, _ = _hermes_environment(
         tmp_path, profiles=("operator-profile", "scout01"), active=None
     )
@@ -408,6 +417,7 @@ def test_setup_plan_refuses_an_existing_target_when_activity_cannot_be_verified(
 def test_setup_refuses_an_active_target_before_reading_the_invitation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Active-target refusal precedes protected invitation input and profile writes."""
     environment, _ = _hermes_environment(
         tmp_path, profiles=("operator-profile", "scout01"), active="scout01"
     )
@@ -444,13 +454,15 @@ def test_setup_refuses_an_active_target_before_reading_the_invitation(
 def test_setup_plan_refuses_a_target_bound_to_another_agent_without_echoing_its_id(
     tmp_path: Path,
 ) -> None:
+    """A conflicting runtime identity is refused without echoing its identifier."""
     environment, probe = _hermes_environment(
         tmp_path, profiles=("operator-profile", "scout01"), active="operator-profile"
     )
     target_config = probe.home / "profiles" / "scout01" / "config.yaml"
     target_config.parent.mkdir(parents=True)
     target_config.write_text(
-        "mcp_servers:\n  agentnexus-scout01:\n    env:\n      AGENTNEXUS_AGENT_ID: other-agent-id-canary\n",
+        "mcp_servers:\n  agentnexus-scout01:\n    env:\n"
+        "      AGENTNEXUS_AGENT_ID: other-agent-id-canary\n",
         encoding="utf-8",
     )
 
@@ -473,6 +485,7 @@ def test_setup_plan_refuses_a_target_bound_to_another_agent_without_echoing_its_
 def test_creating_a_hermes_target_uses_its_official_fresh_profile_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Creation uses Hermes' official command with a clean, target-specific environment."""
     monkeypatch.setenv("HERMES_PROFILE", "operator-profile")
     monkeypatch.setenv("OPENAI_API_KEY", "invoking-provider-secret-canary")
     environment, probe = _hermes_environment(
@@ -511,6 +524,7 @@ def test_creating_a_hermes_target_uses_its_official_fresh_profile_command(
 def test_setup_plan_resumes_only_a_matching_interrupted_agent_profile(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """A matching inactive checkpoint resumes without exposing its identifier."""
     paths = Paths.for_profile(tmp_path, "scout01")
     paths.root.mkdir(parents=True)
     State(agent_id="agent-1", key_id="key-1", handle="scout-01").save(paths.state_file)
@@ -542,6 +556,7 @@ def test_setup_plan_resumes_only_a_matching_interrupted_agent_profile(
 def test_an_active_matching_interrupted_hermes_profile_is_refused(
     tmp_path: Path,
 ) -> None:
+    """A matching identity does not override the active-target refusal."""
     paths = Paths.for_profile(tmp_path, "scout01")
     paths.root.mkdir(parents=True)
     State(agent_id="agent-1", key_id="key-1", handle="scout-01").save(paths.state_file)
@@ -571,9 +586,10 @@ def test_an_active_matching_interrupted_hermes_profile_is_refused(
     assert plan["changes"] == []
 
 
-def test_matching_connector_state_resumes_an_active_unregistered_target(
+def test_matching_connector_state_does_not_override_an_active_target_refusal(
     tmp_path: Path,
 ) -> None:
+    """Saved Connector state cannot turn an active Hermes target into a resume."""
     paths = Paths.for_profile(tmp_path, "scout01")
     paths.root.mkdir(parents=True)
     State(agent_id="agent-1", key_id="key-1", handle="scout-01").save(paths.state_file)
@@ -591,5 +607,7 @@ def test_matching_connector_state_resumes_an_active_unregistered_target(
     )
 
     assert plan["identity"] == "resume"
-    assert plan["target_profile"]["disposition"] == "resume"
-    assert plan["invitation_input"] == "not_needed"
+    assert plan["target_profile"]["disposition"] == "refused"
+    assert plan["target_profile"]["reason"] == "target_profile_active"
+    assert plan["invitation_input"] == "not_requested"
+    assert plan["changes"] == []

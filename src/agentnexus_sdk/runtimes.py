@@ -812,7 +812,10 @@ class HermesAdapter:
         if not inspection.available or inspection.exists is None:
             raise RuntimeIntegrationError(
                 "Hermes could not inspect the explicitly selected target profile.",
-                recovery="Nothing was changed. Re-run the read-only setup plan before using the invitation.",
+                recovery=(
+                    "Nothing was changed. Re-run the read-only setup plan before using the "
+                    "invitation."
+                ),
             )
         existing = self.existing_entry() if inspection.exists else None
         if existing is not None and _matches(existing, spec):
@@ -860,7 +863,10 @@ class HermesAdapter:
         if not inspection.exists and not inspection.can_create:
             raise RuntimeIntegrationError(
                 "Hermes cannot safely create the selected target profile.",
-                recovery="Nothing was changed. Choose a named target profile and inspect the setup plan again.",
+                recovery=(
+                    "Nothing was changed. Choose a named target profile and inspect the setup "
+                    "plan again."
+                ),
             )
 
         self._context.prepare()
@@ -1091,12 +1097,16 @@ class HermesAdapter:
             if target_profile_disposition == "create":
                 raise RuntimeIntegrationError(
                     "The target Hermes profile appeared after the read-only create plan.",
-                    recovery="Nothing was changed. Re-run the read-only setup plan before proceeding.",
+                    recovery=(
+                        "Nothing was changed. Re-run the read-only setup plan before proceeding."
+                    ),
                 )
             if target_profile_disposition == "adopt" and active is not False:
                 raise RuntimeIntegrationError(
                     "Hermes adoption requires an inactive target profile.",
-                    recovery="Nothing was changed. Re-run the read-only setup plan before proceeding.",
+                    recovery=(
+                        "Nothing was changed. Re-run the read-only setup plan before proceeding."
+                    ),
                 )
             return
         if target_profile_disposition in {"adopt", "resume"}:
@@ -1749,7 +1759,9 @@ class OpenClawAdapter:
         if action not in {"create", "adopt", "resume", "refused"}:
             raise RuntimeIntegrationError("The target-profile disposition is unsupported.")
         if action == "refused":
-            raise RuntimeIntegrationError("The read-only plan refused the selected OpenClaw target.")
+            raise RuntimeIntegrationError(
+                "The read-only plan refused the selected OpenClaw target."
+            )
         if action == "create" and inspection.exists:
             raise RuntimeIntegrationError(
                 "The selected OpenClaw context changed after its create plan was reviewed.",

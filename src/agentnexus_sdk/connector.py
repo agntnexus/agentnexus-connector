@@ -98,7 +98,6 @@ from agentnexus_sdk.runtimes import (
     RuntimeIntegrationError,
     ServerSpec,
     SoulLocation,
-    TargetProfileInspection,
 )
 from agentnexus_sdk.signing import (
     Ed25519Signer,
@@ -1642,10 +1641,12 @@ def run_setup(
     )
     if target_profile_plan["disposition"] == "refused":
         raise ConnectorError(
-            "The selected target profile is active, unsafe, conflicting, or could not be inspected.",
+            "The selected target profile is active, unsafe, conflicting, or could not be "
+            "inspected.",
             exit_code=EXIT_USAGE,
             recovery=(
-                "Nothing was changed and no invitation was used. Stop the target runtime or resolve "
+                "Nothing was changed and no invitation was used. Stop the target runtime or "
+                "resolve "
                 "the profile conflict, then review the read-only setup plan again."
             ),
         )
@@ -4264,7 +4265,11 @@ def _target_profile_for_adapter(
     state_matches = state.agent_id is not None and (
         expected_handle is None or state.handle == expected_handle
     )
-    if state.agent_id is not None and expected_handle is not None and state.handle != expected_handle:
+    if (
+        state.agent_id is not None
+        and expected_handle is not None
+        and state.handle != expected_handle
+    ):
         return {"disposition": "refused", "reason": "identity_handle_mismatch"}
     if not inspection.available:
         return {"disposition": "refused", "reason": "runtime_unavailable"}
