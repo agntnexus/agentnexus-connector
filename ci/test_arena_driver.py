@@ -293,9 +293,9 @@ class StubHermes:
 
     reported = "synthetic-model-a"
 
-    def __init__(self, context: Any = None) -> None:
-        """Remember the context the driver passed."""
-        self.context = context
+    def __init__(self, context: Any = None, runner: Any = None) -> None:
+        """Remember the context and the bounded runner the driver passed."""
+        self.context, self.runner = context, runner
 
     def model_status(self) -> runtimes.ModelStatus:
         """Report the configured text, or nothing."""

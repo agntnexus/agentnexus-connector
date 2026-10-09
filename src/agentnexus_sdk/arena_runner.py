@@ -37,6 +37,10 @@ STARTS = "/agent-api/v1/arena/start-intents"
 STATUSES = frozenset(
     {"offline", "queued", "starting", "playing", "completed", "refused", "expired", "cancelled"}
 )
+#: How many recent start intents keep the declaration their claim was made with. A claim is retried
+#: for the one intent at the head of the queue, so a handful is more than a run needs, and the
+#: memory cannot grow with the life of the service.
+DECLARATIONS_KEPT = 8
 DIAGNOSTICS = arena_match.DIAGNOSTICS | frozenset(
     {
         "game_join_started",
@@ -417,6 +421,12 @@ class ArenaRunner:
     """Poll as one signed identity; supervise one bounded child through the whole game."""
 
     scratch: Path | None = None  # the running child's throwaway runtime home
+    #: What the driver declared at the last proof; `None` until a proof has run, so a runner that
+    #: was never proven declares nothing.
+    declared_model: str | None = None
+    #: What each recent intent's claim declared, `None` where it declared nothing. Created on first
+    #: use, one per runner: a dict here would be shared by every instance.
+    declared_models: dict[str, str | None] | None = None
 
     def __init__(
         self, paths: Any, providers: str, driver: arena_driver.ArenaRuntimeDriver, handle: Any
@@ -504,6 +514,29 @@ class ArenaRunner:
         except Exception:
             return None
         return value if isinstance(value, str) and bridge.is_declared_model_valid(value) else None
+
+    def _declaration_for(self, intent: StartIntent) -> str | None:
+        """Return what this intent's claim declares, settled the first time the intent is claimed.
+
+        The text is the one the driver reported at the proof that precedes every claim
+        (`self.declared_model`, RMD-1, D-174): the driver is not asked again here, per tick or per
+        move, and nothing the match process or its model says can reach it. It is checked once more
+        before it is sent, because a driver's answer is untrusted, and what is sent is the text that
+        passed. It is frozen per intent, absence included: a claim retried in a later tick sends
+        what it first sent, even if a newer proof has reported another text since.
+        """
+        if self.declared_models is None:
+            self.declared_models = {}
+        remembered = self.declared_models
+        if intent.intent_id not in remembered:
+            text = self.declared_model
+            declared: str | None = None
+            if isinstance(text, str) and bridge.is_declared_model_valid(text):
+                declared = text.strip()
+            while len(remembered) >= DECLARATIONS_KEPT:
+                del remembered[next(iter(remembered))]
+            remembered[intent.intent_id] = declared
+        return remembered[intent.intent_id]
 
     def _prove(self, intent: StartIntent | None) -> bool:
         """Return whether the runtime in effect has passed its preflight and may be claimed with.
@@ -758,7 +791,13 @@ class ArenaRunner:
 
     def _launch(self, intent: StartIntent) -> None:
         """Claim, reserve durably, then spawn; restart uncertainty never launches twice."""
-        claimed = self._post(f"/{intent.intent_id}/claim", {"runner_id": self.journal.runner_id})
+        # The declaration was resolved by the proof before this claim and is frozen for the intent;
+        # it is left out of the body, never sent as null, when there is none.
+        claim: dict[str, Any] = {"runner_id": self.journal.runner_id}
+        declared = self._declaration_for(intent)
+        if declared is not None:
+            claim["declared_model"] = declared
+        claimed = self._post(f"/{intent.intent_id}/claim", claim)
         owned = StartIntent.parse(claimed, agent_id=self.config.agent_id)
         if owned.claimed_by != self.journal.runner_id:
             raise RunnerRefused("Another runner holds this intent.")

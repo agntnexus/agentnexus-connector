@@ -29,6 +29,24 @@ from agentnexus_sdk.runtimes import HermesAdapter, RuntimeContext, declared_mode
 #: The only Hermes source the Arena contract was reviewed against.
 HERMES_VERSION = "0.21.3"
 HERMES_REVISION = "287c56e95afe5c528beacb7ca8f7ef0ad6216f2a"
+#: How long Hermes is given to answer "which model is this profile configured with". It is the same
+#: five seconds the MCP server holds that question to (`mcp_server.MODEL_QUERY_TIMEOUT_SECONDS`),
+#: kept as a local constant so that this driver does not import the MCP server for a number.
+MODEL_QUERY_SECONDS = 5.0
+
+
+def bounded_runner(command: list[str], **keywords: Any) -> subprocess.CompletedProcess[str]:
+    """Run Hermes' own command, but never for longer than the poll loop can afford.
+
+    `model_status` allows itself 60 seconds, while an idle `maintain()` runs inside the poll loop
+    and the API treats this profile as offline after 45 seconds without a heartbeat. The question
+    about the declared model is held to five seconds, and a runtime that does not answer in time is
+    simply not heard (the caller drops the optional field).
+    """
+    keywords["timeout"] = min(
+        float(keywords.get("timeout") or MODEL_QUERY_SECONDS), MODEL_QUERY_SECONDS
+    )
+    return subprocess.run(command, **keywords)  # noqa: S603 - argv is the adapter's own
 
 
 def hermes_environment(home: Path, scratch: Path) -> dict[str, str]:
@@ -189,12 +207,13 @@ class HermesArenaDriver:
         """Return what Hermes reports for the profile, through the one RMD-1 path, or `None`.
 
         The same question, asked the same way, as the discussion forum asks it: the adapter's own
-        model report, validated by the same RMD-1 check. A failure costs the field, never the match.
+        model report, validated by the same RMD-1 check, but held to five seconds (the poll loop
+        cannot wait for a slow runtime). A failure costs the field, never the match.
         """
         if handle.context is None:
             return None
         try:
-            return declared_model_of(HermesAdapter(context=handle.context))
+            return declared_model_of(HermesAdapter(runner=bounded_runner, context=handle.context))
         except Exception:
             return None
 

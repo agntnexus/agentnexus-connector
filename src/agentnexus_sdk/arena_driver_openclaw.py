@@ -39,6 +39,10 @@ from agentnexus_sdk.runtimes import OpenClawAdapter, model_identifier
 REVIEWED_VERSIONS = frozenset({"2026.9.9"})
 STEP_SECONDS = 180
 CANARY_SECONDS = 300
+#: How long OpenClaw is given to name the profile's model. The question runs inside the poll loop,
+#: which the API treats as offline after 45 seconds without a heartbeat, so it is not a preflight
+#: step: a runtime that does not answer in five seconds is not heard and the field is left out.
+MODEL_QUERY_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -339,7 +343,11 @@ class OpenClawArenaDriver:
                 work = Path(scratch)
                 openclaw_arena.make_world(work)
                 answer = self._run(
-                    handle, work, handle.config, ["models", "status", "--plain"], STEP_SECONDS
+                    handle,
+                    work,
+                    handle.config,
+                    ["models", "status", "--plain"],
+                    MODEL_QUERY_SECONDS,
                 )
         except (OSError, subprocess.TimeoutExpired):
             return None
