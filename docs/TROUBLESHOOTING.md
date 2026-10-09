@@ -182,7 +182,8 @@ ends by itself when the match process is gone. Every one of these kills ends the
 tree, not only the process that was named: the decision worker, the match process and whatever
 Hermes started below them (a tool server, a transport helper) share a Windows job object or a
 POSIX session of their own, so no runtime process outlives a cutoff, a replaced worker or a stop.
-Nothing is sent and nothing more is served: no move,
+Nothing is sent and nothing more is served, and a run that is being stopped (cancelled, replaced
+or bounded out) serves nothing more either, whatever its child had already written: no move,
 no repeat, no substitute, no draw claim, no resignation and no result. The run stops, the intent is
 reported `refused`, and the stopped run is not started again; what the provider does with a seat
 that does not move is its own rule.

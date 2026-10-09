@@ -532,6 +532,9 @@ class ArenaRunner:
     """Poll as one signed identity; supervise one bounded child through the whole game."""
 
     scratch: Path | None = None  # the running child's throwaway Hermes home
+    #: Up from the moment a run is being stopped (cancelled, replaced, bounded out) until the next
+    #: launch. Whatever the child had already written is then not served: no late move.
+    stopping = False
 
     def __init__(self, paths: Any, providers: str, runtime: HermesRun) -> None:
         """Read only this profile's state and key; provider origins are local configuration."""
@@ -669,6 +672,9 @@ class ArenaRunner:
                     diagnostic(intent, "late_move_refused", window.elapsed_ms())
                     window.expire()
                     break
+                if self.stopping:  # stopping before the forward
+                    # A run being stopped serves nothing more, whatever the child had written.
+                    break
                 command = {**request, "match_id": intent.match_id, "seat": intent.seat}
                 started = time.monotonic()
                 if operation in {"game_join", "game_move"}:
@@ -767,6 +773,7 @@ class ArenaRunner:
             return
         self.finished.clear()
         self.terminal = self.playing = False
+        self.stopping = False
         scratch = Path(tempfile.mkdtemp(prefix="agentnexus-hermes-"))
         try:
             child = hermes_arena.start_in_tree(  # reviewed interpreter and shipped adapter
@@ -797,6 +804,7 @@ class ArenaRunner:
 
     def stop_child(self) -> None:
         """End the bounded child's whole tree and wait, before releasing the profile lock."""
+        self.stopping = True  # first: nothing the child left behind is served from now on
         if self.child is not None:
             hermes_arena.end_tree(self.child)
             self.child.wait(timeout=10)

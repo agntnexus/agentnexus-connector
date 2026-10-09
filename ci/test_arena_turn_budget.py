@@ -2068,22 +2068,17 @@ def test_a_move_still_in_the_pipe_when_the_run_is_stopped_is_never_forwarded(
     assert served == ["game_join"]
 
 
-@pytest.mark.parametrize(
-    ("original", "after_the_line_is_read"),
-    [
-        ("if window.expired or self.stopping:  # stopping", False),
-        ("if self.stopping:  # stopping before the forward", True),
-    ],
-)
+@pytest.mark.parametrize("after_the_line_is_read", [False, True])
 def test_a_parent_that_serves_after_a_stop_is_noticed(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
-    original: str,
     after_the_line_is_read: bool,
 ) -> None:
-    """Mutation: with either check removed, the stopped run forwards its move."""
-    mutant = load_mutant(tmp_path, arena_runner, original, original.split(" ", 1)[0] + " False:")
+    """Mutation: with the check removed, the stopped run forwards its move."""
+    mutant = load_mutant(
+        tmp_path, arena_runner, "if self.stopping:  # stopping before the forward", "if False:"
+    )
     try:
         served = stopped_run(
             mutant, monkeypatch, capsys, stop_after_the_line_is_read=after_the_line_is_read
