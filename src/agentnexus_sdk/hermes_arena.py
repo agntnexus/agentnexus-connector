@@ -438,6 +438,8 @@ class PosixTree:
         table is read first and each pid found is killed. The group is signalled only while the
         leader has not been reaped: the pid is then still ours and cannot name another process.
         """
+        if sys.platform == "win32":  # a job object ends the tree there, not a group
+            return
         import signal
 
         members = self.known | descendants(self.pid)
@@ -489,6 +491,97 @@ def end_tree(process: Any) -> None:
         tree.end(process)
     with contextlib.suppress(OSError):
         process.kill()
+
+
+def run_in_tree(argv: list[str], *, seconds: float, **options: Any) -> tuple[int, str] | None:
+    """Run a command to its end inside a tree, and return its status and output.
+
+    Nothing the command started outlives the call. A command that does not finish within `seconds`
+    has its whole tree ended and yields None, so a caller can only ever be refused, never stuck.
+    """
+    try:
+        process = start_in_tree(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            **options,
+        )
+    except OSError:
+        return None
+    try:
+        try:
+            output, _ = process.communicate(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            end_tree(process)
+            with contextlib.suppress(subprocess.TimeoutExpired, OSError, ValueError):
+                process.communicate(timeout=5)
+            return None
+        return process.returncode, output or ""
+    finally:
+        end_tree(process)
+
+
+def prove_tree() -> bool:
+    """Show on this machine that one kill ends a process and the grandchild it started.
+
+    Both hold the same pipe open, so it can only end once the whole tree is gone. The proof uses
+    the very functions that end a decision's tree, so a machine that cannot set up or end a tree
+    is found before a seat is claimed and not at a cutoff.
+    """
+    program = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "print('up', flush=True)\n"
+        "time.sleep(30)\n"
+    )
+    try:
+        process = start_in_tree(
+            [sys.executable, "-c", program],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    chunks: queue.Queue[bytes] = queue.Queue()
+
+    def pump() -> None:
+        with contextlib.suppress(OSError, ValueError):
+            for chunk in iter(lambda: process.stdout.read(1), b""):  # type: ignore[union-attr]
+                chunks.put(chunk)
+        chunks.put(b"")
+
+    threading.Thread(target=pump, daemon=True).start()
+    try:
+        started = chunks.get(timeout=20) != b""
+    except queue.Empty:
+        started = False
+    end_tree(process)
+    if not started:
+        return False
+    try:
+        while chunks.get(timeout=10) != b"":
+            pass
+    except queue.Empty:
+        return False
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=5)
+    return True
+
+
+def budget_report() -> dict[str, Any]:
+    """Return the turn budget this adapter keeps, for the parent to compare with its own."""
+    return {
+        "version": TURN_BUDGET_VERSION,
+        "turn": dict(PROVIDER_TURN_SECONDS),
+        "decision": dict(DECISION_SECONDS),
+        "reserve": TURN_RESERVE_SECONDS,
+        "poll": STATE_POLL_SECONDS,
+        "cleanup": CLEANUP_SECONDS,
+    }
 
 
 class Worker:
@@ -1021,7 +1114,13 @@ def main() -> int:
     if flag == "--preflight":
         with contextlib.redirect_stdout(sys.stderr):
             configure(lambda operation, arguments: None)
-        output.write(json.dumps({"bounded": True, "tools": sorted(TOOLS)}) + "\n")
+        report = {
+            "bounded": True,
+            "tools": sorted(TOOLS),
+            "turn_budget": budget_report(),
+            "tree": prove_tree(),
+        }
+        output.write(json.dumps(report) + "\n")
         output.flush()
         return 0
     return play(output, input_stream)

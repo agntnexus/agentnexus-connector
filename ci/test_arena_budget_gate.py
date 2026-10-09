@@ -118,7 +118,7 @@ def test_a_kill_that_leaves_a_grandchild_alive_is_not_a_proof(
 
 
 def runtime(tmp_path: Path) -> arena_runner.HermesRun:
-    """A verified-looking runtime; the probe is replaced in each test."""
+    """Return a verified-looking runtime; the probe is replaced in each test."""
     return arena_runner.HermesRun(tmp_path, Path(sys.executable), tmp_path)
 
 
@@ -197,7 +197,7 @@ def test_a_preflight_bounds_the_cold_start_of_the_runtime(
 
 
 def launching(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, list[str]]:
-    """A supervisor whose network and process start are recorded instead of used."""
+    """Return a supervisor whose network and process start are recorded instead of used."""
     runner, owned = supervisor()
     calls: list[str] = []
 
@@ -254,6 +254,7 @@ def test_a_launch_that_skips_the_budget_check_is_noticed(
             raise mutant.RunnerRefused("stop after the claim")
 
         runner._post = post
+        runner.journal = SimpleNamespace(runner_id="r", reserve=lambda identifier: True)
         monkeypatch.setattr(hermes_arena, "DECISION_SECONDS", {"chess": 59, "connect-four": 45})
         with pytest.raises(mutant.RunnerRefused, match="after the claim"):
             mutant.ArenaRunner._launch(runner, owned)
@@ -265,7 +266,10 @@ def test_a_launch_that_skips_the_budget_check_is_noticed(
 @pytest.mark.parametrize(
     ("original", "replacement"),
     [
-        ("return False\n        return not budget_problems(report)", "pass\n        return True"),
+        (
+            'return not budget_problems(report.get("turn_budget")) and hermes_arena.prove_tree()',
+            "return hermes_arena.prove_tree()",
+        ),
     ],
 )
 def test_a_preflight_without_the_budget_check_is_noticed(
