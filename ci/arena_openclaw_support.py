@@ -60,6 +60,7 @@ def behavior_of(
             "FAKE_OPENCLAW_RECORD": str(tmp_path / "openclaw.stand-in-record"),
             "FAKE_OPENCLAW_FAULT": fault,
             "FAKE_OPENCLAW_OUTSIDE": str(tmp_path / "outside.stand-in-record"),
+            "FAKE_OPENCLAW_PROFILE_CONFIG": str(tmp_path / "home" / "openclaw.json"),
             **env,
         },
     }
