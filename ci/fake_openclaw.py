@@ -142,6 +142,21 @@ def disturb(moment: str) -> None:
         copy = target + ".real"
         os.replace(target, copy)
         os.symlink(copy, target)
+    secrets_file = os.environ.get("FAKE_OPENCLAW_PROFILE_ENV")
+    if not secrets_file:
+        return
+    if active.get("create_env") == moment:
+        with open(secrets_file, "w", encoding="utf-8") as handle:
+            handle.write("SYNTHETIC_KEY=created-during-the-match\n")
+    if active.get("remove_env") == moment and os.path.exists(secrets_file):
+        os.remove(secrets_file)
+    if active.get("replace_env") == moment:
+        with open(secrets_file, "rb") as source:
+            data = source.read()
+        replacement = secrets_file + ".replacement"
+        with open(replacement, "wb") as handle:
+            handle.write(data)
+        os.replace(replacement, secrets_file)
 
 
 def record(event: dict[str, Any]) -> None:

@@ -34,7 +34,10 @@ def names_in(path: Path, pattern: re.Pattern[str] = MODEL_AND_PROVIDER_NAMES) ->
 
 def names_a_secrets_file(text: str) -> bool:
     """Return whether a source reads, or names, a secrets file or the module that reads one."""
-    return "dotenv" in text or bool(re.search(r"\.env(?![A-Za-z_])", text))
+    named = "\n".join(
+        line for line in text.splitlines() if "# metadata only, never opened" not in line
+    )
+    return "dotenv" in named or bool(re.search(r"\.env(?![A-Za-z_])", named))
 
 
 def imported_text(text: str) -> set[str]:

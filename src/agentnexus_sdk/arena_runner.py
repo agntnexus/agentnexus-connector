@@ -459,7 +459,8 @@ class ArenaRunner:
     #: Up from the moment a run is being stopped (cancelled, replaced, bounded out) until the next
     #: launch. Whatever the child had already written is then not served: no late move.
     stopping = False
-    #: Down once a kill could not prove the tree gone: nothing is claimed after that.
+    #: Down once a kill, or a worker's marker, says a tree could not be proven gone: nothing is
+    #: claimed after that, until the runner is started again.
     contained = True
     #: Taken to set `stopping` and, for the whole forward, to check it: after a stop begins no
     #: request is forwarded, and a stop waits for a forward that has already begun.
@@ -910,6 +911,8 @@ class ArenaRunner:
         self.worker = None
         self.active = None
         if self.scratch is not None:
+            if (self.scratch / arena_match.UNCONTAINED_MARKER).exists():
+                self.contained = False  # the worker could not show its runtime's tree gone
             # Nothing of the run is left running that could still write to it.
             remove_scratch(self.scratch)  # scratch
             self.scratch = None

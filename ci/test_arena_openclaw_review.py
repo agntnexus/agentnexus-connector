@@ -42,6 +42,7 @@ from agentnexus_sdk import (
 )
 
 WINDOWS = sys.platform == "win32"
+pytestmark = pytest.mark.windows_security
 ME = "S-1-5-21-1-2-3-1001"
 OTHER = "S-1-5-21-1-2-3-1002"
 SYSTEM = "S-1-5-18"
@@ -62,6 +63,8 @@ ALLOWED, DENIED, OBJECT_ALLOWED, CALLBACK_ALLOWED = 0, 1, 5, 9
     [
         (ME, [(ALLOWED, ME)], True),
         (ME, [(ALLOWED, ME), (ALLOWED, SYSTEM), (ALLOWED, ADMINISTRATORS)], True),
+        (ME, [(ALLOWED, SYSTEM), (ALLOWED, ADMINISTRATORS), (ALLOWED, "S-1-3-4")], True),
+        (ME, [(ALLOWED, ME), (ALLOWED, "S-1-3-0")], True),
         (ME, [(ALLOWED, ME), (DENIED, EVERYONE)], True),
         (ME, [(ALLOWED, ME), (ALLOWED, USERS)], False),
         (ME, [(ALLOWED, ME), (ALLOWED, EVERYONE)], False),
@@ -81,6 +84,20 @@ def test_only_the_intended_user_and_the_system_accounts_may_reach_a_directory(
 ) -> None:
     """The owner must be the user; each grant the user's, the system's or Administrators'."""
     assert openclaw_arena.acl_is_private(owner, entries, ME) is private
+
+
+def test_a_directory_an_elevated_administrator_created_is_private_to_that_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owner objects get from this token counts as the user; any other owner does not."""
+    monkeypatch.setattr(openclaw_arena, "windows_current_sid", lambda: ME)
+    monkeypatch.setattr(
+        openclaw_arena, "windows_security", lambda path: (ADMINISTRATORS, [(ALLOWED, ME)])
+    )
+    monkeypatch.setattr(openclaw_arena, "windows_token_owner", lambda: ADMINISTRATORS)
+    assert openclaw_arena.windows_private(Path("x")) is True
+    monkeypatch.setattr(openclaw_arena, "windows_token_owner", lambda: ME)
+    assert openclaw_arena.windows_private(Path("x")) is False
 
 
 def test_an_unknown_user_makes_nothing_private() -> None:
@@ -229,6 +246,20 @@ class FakeKernel:
         """Answer like the Windows call of this name."""
         self.calls.append("resume")
         return 1 if self.fail == "resume" else 0
+
+
+@pytest.mark.skipif(not WINDOWS, reason="job objects are Windows'")
+def test_the_job_calls_are_typed_and_the_handle_is_a_handle() -> None:
+    """`CreateJobObjectW` returns a `HANDLE`, not a C int: a 64-bit handle must not be cut."""
+    from ctypes import wintypes
+
+    kernel, ntdll = openclaw_arena.WindowsJob._libraries()
+    assert kernel.CreateJobObjectW.restype is wintypes.HANDLE
+    assert kernel.CreateJobObjectW.argtypes is not None
+    assert kernel.AssignProcessToJobObject.argtypes is not None
+    assert kernel.TerminateJobObject.argtypes is not None
+    assert kernel.CloseHandle.argtypes is not None
+    assert ntdll.NtResumeProcess.argtypes is not None
 
 
 @pytest.mark.skipif(not WINDOWS, reason="job objects are Windows'")
@@ -440,7 +471,7 @@ def test_a_process_that_never_joins_its_job_is_noticed(tmp_path: Path) -> None:
 # The configuration file is pinned by what can be said about it without opening it
 # ---------------------------------------------------------------------------------------------
 
-FIELDS = {"path", "device", "inode", "size", "modified_ns", "changed_ns", "kind"}
+FIELDS = {"path", "device", "inode", "size", "modified_ns", "changed_ns", "kind", "owner"}
 CONTENT = '{"synthetic": "config-content-that-must-never-be-read"}'
 
 
@@ -452,7 +483,7 @@ def pinned_profile(root: Path) -> tuple[Path, Path, Path]:
     return root_, config, state
 
 
-def take(root: Path, config: Path, state: Path) -> dict[str, str] | None:
+def take(root: Path, config: Path, state: Path) -> dict[str, dict[str, str]] | None:
     """Take the fingerprint with the real function."""
     return openclaw_arena.config_fingerprint(root, config, state)
 
@@ -461,10 +492,12 @@ def test_the_fingerprint_names_the_file_by_metadata_alone(tmp_path: Path) -> Non
     """Path, identity, size and times; nothing of the content, and nothing derived from it."""
     root, config, state = pinned_profile(tmp_path / "profile")
     fingerprint = take(root, config, state)
-    assert fingerprint is not None and set(fingerprint) == FIELDS
-    assert fingerprint["kind"] == "file" and fingerprint["size"] == str(len(CONTENT))
-    assert all(isinstance(value, str) for value in fingerprint.values())
-    assert not [value for value in fingerprint.values() if "config-content" in value]
+    assert fingerprint is not None and set(fingerprint) == {"config", "env"}
+    entry = fingerprint["config"]
+    assert set(entry) == FIELDS
+    assert entry["kind"] == "file" and entry["size"] == str(len(CONTENT))
+    assert all(isinstance(value, str) for value in entry.values())
+    assert "config-content" not in json.dumps(fingerprint)
     assert take(root, config, state) == fingerprint
 
 
@@ -489,8 +522,9 @@ def test_a_replacement_of_the_same_size_has_another_identity(tmp_path: Path) -> 
     os.replace(other, config)
     after = take(root, config, state)
     assert after is not None and after != before
-    assert after["size"] == before["size"] and after["modified_ns"] == before["modified_ns"]
-    assert (after["device"], after["inode"]) != (before["device"], before["inode"])
+    old, new = before["config"], after["config"]
+    assert new["size"] == old["size"] and new["modified_ns"] == old["modified_ns"]
+    assert (new["device"], new["inode"]) != (old["device"], old["inode"])
 
 
 def test_a_missing_file_has_no_fingerprint(tmp_path: Path) -> None:
@@ -609,8 +643,7 @@ def test_a_fingerprint_that_adds_a_content_digest_is_noticed(tmp_path: Path) -> 
     mutant = mutant_of(
         tmp_path / "mutant",
         '"kind": "file",  # metadata',
-        '"kind": __import__("hashlib")'
-        ".sha256(Path(profile_config).read_bytes()).hexdigest(),  # metadata",
+        '"kind": __import__("hashlib").sha256(Path(path).read_bytes()).hexdigest(),  # metadata',
     )
     try:
         expect_guard(
@@ -820,3 +853,430 @@ def test_a_driver_that_cannot_fingerprint_offers_no_generation_and_refuses_a_pre
             driver.preflight(handle)
     finally:
         server.close()
+
+
+# ---------------------------------------------------------------------------------------------
+# The optional profile .env is pinned like the configuration file (presence included)
+# ---------------------------------------------------------------------------------------------
+
+
+def with_env(root: Path) -> Path:
+    """Put a profile `.env` beside the configuration file and return it."""
+    env = root / ".env"
+    env.write_text("SYNTHETIC_KEY=synthetic-env-content-never-read\n", encoding="utf-8")
+    return env
+
+
+def test_the_fingerprint_covers_the_configuration_and_the_optional_env_separately(
+    tmp_path: Path,
+) -> None:
+    """Two entries; an absent `.env` is an entry too, and says where it would be."""
+    root, config, state = pinned_profile(tmp_path / "profile")
+    absent = take(root, config, state)
+    assert absent is not None and set(absent) == {"config", "env"}
+    assert set(absent["config"]) == FIELDS
+    assert absent["env"] == {"path": str((root / ".env").resolve()), "kind": "absent"}
+    env = with_env(root)
+    present = take(root, config, state)
+    assert present is not None and set(present["env"]) == FIELDS and present["env"] != absent["env"]
+    assert present["config"] == absent["config"]
+    assert str(env.resolve()) == present["env"]["path"]
+    assert "never-read" not in json.dumps(present)
+
+
+def test_an_env_created_removed_or_replaced_changes_the_fingerprint(tmp_path: Path) -> None:
+    """Presence or absence is part of it, and so is the identity of a same-size replacement."""
+    root, config, state = pinned_profile(tmp_path / "profile")
+    before_creation = take(root, config, state)
+    env = with_env(root)
+    created = take(root, config, state)
+    assert created != before_creation
+    stamp = env.stat()
+    other = root / "other.env"
+    other.write_text("SYNTHETIC_KEY=synthetic-env-content-nevEr-read\n", encoding="utf-8")
+    os.utime(other, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    os.replace(other, env)
+    replaced = take(root, config, state)
+    assert replaced is not None and replaced != created
+    assert replaced["env"]["size"] == created["env"]["size"] if created else False
+    env.unlink()
+    assert take(root, config, state) == before_creation
+
+
+def test_an_env_whose_state_cannot_be_read_has_no_fingerprint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Absent is proven only by the file system saying so; any other error is unprovable."""
+    root, config, state = pinned_profile(tmp_path / "profile")
+    real = os.lstat
+
+    def lstat(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(path).endswith(".env"):
+            raise PermissionError("synthetic")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    assert take(root, config, state) is None
+
+
+def test_the_fingerprint_names_the_owner_of_each_file(tmp_path: Path) -> None:
+    """The owner is part of the pin and must be the current user."""
+    root, config, state = pinned_profile(tmp_path / "profile")
+    with_env(root)
+    fingerprint = take(root, config, state)
+    assert fingerprint is not None
+    owners = {fingerprint["config"]["owner"], fingerprint["env"]["owner"]}
+    assert len(owners) == 1 and owners != {""}
+
+
+def test_a_file_owned_by_someone_else_has_no_fingerprint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A file that is not the user's cannot be pinned."""
+    root, config, state = pinned_profile(tmp_path / "profile")
+    monkeypatch.setattr(openclaw_arena, "file_owner", lambda path, info: "someone-else")
+    monkeypatch.setattr(openclaw_arena, "current_owner", lambda: "me")
+    monkeypatch.setattr(openclaw_arena, "windows_token_owner", lambda: "me")
+    assert take(root, config, state) is None
+
+
+# ---------------------------------------------------------------------------------------------
+# The authentication store is not pinned: the runtime may rotate its own tokens
+# ---------------------------------------------------------------------------------------------
+
+
+def test_neither_the_fingerprint_nor_the_generation_looks_at_the_authentication_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No stat, no open: the store (and the secrets file inside the state) is never named."""
+    server = FakeChatModel("move")
+    try:
+        handle = stand_in_handle(tmp_path, server)
+        state = Path(str(handle.state))
+        (state / ".env").write_text("SYNTHETIC=1\n", encoding="utf-8")
+        named: list[str] = []
+        for owner, names in ((os, ("stat", "lstat", "open")), (Path, ("stat", "lstat", "open"))):
+            for name in names:
+                real = getattr(owner, name)
+
+                def watcher(*args: Any, __real: Any = real, **kwargs: Any) -> Any:
+                    named.extend(str(a) for a in args[:1])
+                    return __real(*args, **kwargs)
+
+                monkeypatch.setattr(owner, name, watcher)
+        driver = arena_driver_openclaw.OpenClawArenaDriver()
+        assert driver.generation(handle) is not None
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        driver.launch(handle, scratch)
+        touched = [
+            n for n in named if "openclaw-agent.sqlite" in n or n.startswith(str(state / ".env"))
+        ]
+        assert touched == [], touched
+    finally:
+        server.close()
+
+
+def test_a_rotated_authentication_store_does_not_change_the_generation(tmp_path: Path) -> None:
+    """The runtime rewrites its own store; the generation and the pin stay as they were."""
+    server = FakeChatModel("move")
+    try:
+        handle = stand_in_handle(tmp_path, server)
+        driver = arena_driver_openclaw.OpenClawArenaDriver()
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        pin = driver.launch(handle, scratch).pin
+        before = driver.generation(handle)
+        store = Path(str(handle.state)) / "agents" / "main" / "agent" / "openclaw-agent.sqlite"
+        store.write_bytes(b"rotated by the runtime itself")
+        assert driver.generation(handle) == before
+        assert pin and driver.still_pinned(handle, pin) is True
+    finally:
+        server.close()
+
+
+def test_the_generation_follows_the_profile_env(tmp_path: Path) -> None:
+    """A created, changed or removed profile `.env` is a new generation."""
+    server = FakeChatModel("move")
+    try:
+        handle = stand_in_handle(tmp_path, server)
+        driver = arena_driver_openclaw.OpenClawArenaDriver()
+        before = driver.generation(handle)
+        env = Path(str(handle.config)).parent / ".env"
+        env.write_text("SYNTHETIC_KEY=changed\n", encoding="utf-8")
+        changed = driver.generation(handle)
+        env.unlink()
+        assert before is not None and changed not in (None, before)
+        assert driver.generation(handle) != before
+    finally:
+        server.close()
+
+
+# ---------------------------------------------------------------------------------------------
+# POSIX containment fails closed (the OpenClaw guard and its worker)
+# ---------------------------------------------------------------------------------------------
+
+POSIX = sys.platform != "win32"
+
+
+@pytest.mark.parametrize("failure", ["missing", "timeout", "status", "empty", "malformed"])
+def test_a_process_table_that_cannot_be_read_is_an_error_never_an_empty_proof(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """Every way the table can fail raises; an empty set would read as 'nothing below'."""
+
+    def run(*args: Any, **kwargs: Any) -> Any:
+        if failure == "missing":
+            raise FileNotFoundError("ps")
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired("ps", 10)
+        text = {"status": "1 0\n", "empty": "", "malformed": "not a table\nat all\n"}[failure]
+        return SimpleNamespace(returncode=1 if failure == "status" else 0, stdout=text)
+
+    monkeypatch.setattr(openclaw_arena.subprocess, "run", run)
+    with pytest.raises(OSError, match="process table"):
+        openclaw_arena.descendants(1)
+
+
+def test_the_process_table_walk_finds_children_and_grandchildren(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A good table gives the tree below the root."""
+    table = "  1     0\n 10     1\n 11    10\n 12    11\n 20     1\n"
+    monkeypatch.setattr(
+        openclaw_arena.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=table),
+    )
+    assert openclaw_arena.descendants(10) == {11, 12}
+
+
+def test_a_kill_that_cannot_read_the_table_still_signals_but_says_it_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Best effort on the root and what is known, and then no claim of success."""
+    signalled: list[int] = []
+
+    def unreadable(root: int) -> set[int]:
+        raise OSError("process table")
+
+    monkeypatch.setattr(openclaw_arena, "descendants", unreadable)
+    monkeypatch.setattr(openclaw_arena, "alive", lambda pid: False)
+    monkeypatch.setattr(openclaw_arena.os, "kill", lambda pid, sig: signalled.append(pid))
+    assert openclaw_arena.kill_tree(4242, {4243}) is False
+    assert {4242, 4243} <= set(signalled)
+
+
+def test_a_kill_with_a_readable_table_says_it_is_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control."""
+    monkeypatch.setattr(openclaw_arena, "descendants", lambda root: {4244})
+    monkeypatch.setattr(openclaw_arena, "alive", lambda pid: False)
+    monkeypatch.setattr(openclaw_arena.os, "kill", lambda pid, sig: None)
+    assert openclaw_arena.kill_tree(4242) is True
+
+
+SESSIONS = """\
+import os, socket, subprocess, sys, time
+port = int(sys.argv[1])
+CHILD = (
+    "import socket, sys, time\\n"
+    "s = socket.create_connection(('127.0.0.1', int(sys.argv[1])))\\n"
+    "time.sleep(60)\\n"
+)
+options = {"start_new_session": True} if os.name != "nt" else {"creationflags": 0x208}
+subprocess.Popen([sys.executable, "-c", CHILD, str(port)], **options)
+subprocess.Popen([sys.executable, "-c", CHILD, str(port)])
+s = socket.create_connection(("127.0.0.1", port))
+time.sleep(60)
+"""
+
+
+class Tether:
+    """The test's end of the sockets a runtime tree holds open while it lives."""
+
+    def __init__(self) -> None:
+        """Listen on loopback."""
+        self.server = socket.socket()
+        self.server.bind(("127.0.0.1", 0))
+        self.server.listen()
+        self.accepted: list[socket.socket] = []
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    @property
+    def port(self) -> int:
+        """Return the port the tree connects to."""
+        return int(self.server.getsockname()[1])
+
+    def _accept(self) -> None:
+        with contextlib.suppress(OSError):
+            while True:
+                self.accepted.append(self.server.accept()[0])
+
+    def wait_for(self, count: int) -> None:
+        """Wait for this many processes to connect."""
+        deadline = time.monotonic() + 40
+        while len(self.accepted) < count and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert len(self.accepted) == count, len(self.accepted)
+
+    def alive(self, wait: float = 6.0) -> int:
+        """Count the connections still open after the wait."""
+        count = 0
+        for connection in self.accepted:
+            connection.settimeout(wait)
+            try:
+                if connection.recv(1) != b"":
+                    count += 1
+            except TimeoutError:
+                count += 1
+            except ConnectionResetError:
+                pass
+        return count
+
+    def close(self) -> None:
+        """Drop everything."""
+        for connection in self.accepted:
+            connection.close()
+        self.server.close()
+
+
+def start_run(tmp_path: Path, program: str, tether: Tether) -> Any:
+    """Start a run of this program in the way a decision's runtime is started."""
+    (tmp_path / "cwd").mkdir(exist_ok=True)
+    script = tmp_path / "tree.py"
+    script.write_text(program, encoding="utf-8")
+    return openclaw_arena.Run(
+        [sys.executable, str(script), str(tether.port)], dict(os.environ), tmp_path
+    )
+
+
+def test_a_run_ends_a_child_a_grandchild_and_one_in_a_session_of_its_own(tmp_path: Path) -> None:
+    """Three processes hold the tether; ending the run leaves none, and says it is contained."""
+    tether = Tether()
+    run = start_run(tmp_path, SESSIONS, tether)
+    try:
+        tether.wait_for(3)
+        run.end()
+        assert tether.alive() == 0, "a process of the tree survived"
+        assert run.contained is True
+    finally:
+        tether.close()
+
+
+@pytest.mark.skipif(not POSIX, reason="the process table is the POSIX way to find a tree")
+def test_a_run_whose_tree_cannot_be_listed_does_not_report_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Without a process table the run is killed as far as it can be, and is not contained."""
+    tether = Tether()
+    run = start_run(tmp_path, SESSIONS, tether)
+    try:
+        tether.wait_for(3)
+
+        def unreadable(root: int) -> set[int]:
+            raise OSError("process table")
+
+        monkeypatch.setattr(openclaw_arena, "descendants", unreadable)
+        run.end()
+        assert run.contained is False
+    finally:
+        tether.close()
+
+
+def test_the_proof_of_containment_holds_on_this_machine() -> None:
+    """A tree with a child in a session of its own is ended, and every pid is gone."""
+    assert openclaw_arena.prove_containment() is True
+
+
+@pytest.mark.skipif(not POSIX, reason="the process table is the POSIX way to find a tree")
+def test_without_a_process_table_the_proof_of_containment_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The capability proof refuses before any claim when the tree cannot be enumerated."""
+
+    def unreadable(root: int) -> set[int]:
+        raise OSError("process table")
+
+    monkeypatch.setattr(openclaw_arena, "descendants", unreadable)
+    assert openclaw_arena.prove_containment() is False
+
+
+def test_a_preflight_refuses_when_containment_cannot_be_proven(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The driver's preflight, which every claim depends on, fails closed."""
+    server = FakeChatModel("move")
+    try:
+        handle = stand_in_handle(tmp_path, server)
+        monkeypatch.setattr(openclaw_arena, "prove_containment", lambda: False)
+        with pytest.raises(arena_driver.DriverRefusedError):
+            arena_driver_openclaw.OpenClawArenaDriver().preflight(handle)
+    finally:
+        server.close()
+
+
+def test_a_worker_that_lost_containment_leaves_a_marker_the_runner_reads(
+    tmp_path: Path,
+) -> None:
+    """The scratch of the match carries the news to the supervisor, which claims nothing more."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    openclaw_arena.note_uncontained(scratch)
+    assert (scratch / arena_match.UNCONTAINED_MARKER).is_file()
+    runner, owned = supervisor()
+    runner.scratch, runner.child, runner.worker, runner.active = scratch, None, None, None
+    runner.stop_child()
+    assert runner.contained is False
+    runner._post = lambda suffix, payload: pytest.fail("a seat was claimed")
+    runner.journal = SimpleNamespace(runner_id="r", reserve=lambda identifier: True)
+    with pytest.raises(arena_runner.RunnerRefused, match="contained"):
+        arena_runner.ArenaRunner._launch(runner, owned)
+
+
+def test_a_kill_that_trusts_its_blindness_is_noticed(tmp_path: Path) -> None:
+    """Mutation: if an unreadable table still counts as complete, the same oracle fails."""
+    mutant = mutant_of(
+        tmp_path / "mutant", "    return complete  # kill_tree", "    return True  # kill_tree"
+    )
+    try:
+
+        def oracle(module: Any) -> None:
+            def unreadable(root: int) -> set[int]:
+                raise OSError("process table")
+
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(module, "descendants", unreadable)
+                patch.setattr(module, "alive", lambda pid: False)
+                patch.setattr(module.os, "kill", lambda pid, sig: None)
+                assert module.kill_tree(4242) is False
+
+        expect_guard(oracle, openclaw_arena, mutant)
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+def test_an_empty_process_table_taken_as_a_proof_is_noticed(tmp_path: Path) -> None:
+    """Mutation: if an empty table is returned as a table, nothing below a root is 'proven'."""
+    mutant = mutant_of(
+        tmp_path / "mutant",
+        'raise OSError("The process table could not be read.")  # empty',
+        "return {}  # empty",
+    )
+    try:
+
+        def oracle(module: Any) -> None:
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(
+                    module.subprocess,
+                    "run",
+                    lambda *a, **k: SimpleNamespace(returncode=0, stdout=""),
+                )
+                try:
+                    module.descendants(1)
+                except OSError:
+                    return
+                raise AssertionError("an empty process table was taken as a proof")
+
+        expect_guard(oracle, openclaw_arena, mutant)
+    finally:
+        sys.modules.pop(mutant.__name__, None)
