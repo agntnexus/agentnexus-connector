@@ -204,6 +204,14 @@ class OpenClawArenaDriver:
         shows which tools reach a model.
         """
         refusal = DriverRefused("preflight_refused", self.display_name)
+        if (
+            handle.config is None
+            or handle.state is None
+            or handle.profile_root is None
+            or openclaw_arena.config_fingerprint(handle.profile_root, handle.config, handle.state)
+            is None
+        ):
+            raise refusal
         canary = CanaryModel()
         try:
             with tempfile.TemporaryDirectory(
@@ -310,8 +318,15 @@ class OpenClawArenaDriver:
         """
         digest = hashlib.sha256()
         digest.update(handle.version.encode())
+        if handle.config is None or handle.state is None or handle.profile_root is None:
+            return None
+        fingerprint = openclaw_arena.config_fingerprint(
+            handle.profile_root, handle.config, handle.state
+        )
+        if fingerprint is None:
+            return None
+        digest.update(openclaw_arena.pin_text(fingerprint).encode())
         for label, path in (
-            ("config", handle.config),
             ("secrets", handle.config.parent / ".env" if handle.config is not None else None),
             ("state-secrets", handle.state / ".env" if handle.state is not None else None),
             ("entry", Path(handle.command[-1])),
@@ -351,13 +366,15 @@ class OpenClawArenaDriver:
         """Return the match process command: it runs the OpenClaw worker as its decision worker."""
         match = Path(arena_match.__file__).resolve()
         worker = Path(openclaw_arena.__file__).resolve()
-        if handle.config is None:
+        if handle.config is None or handle.state is None or handle.profile_root is None:
             raise DriverRefused("not_isolated", self.display_name)
-        try:
-            # One configuration for the whole match: a later change to the profile is for the next.
-            pinned = openclaw_arena.pin_configuration(handle.config, scratch)
-        except (OSError, ValueError) as error:
-            raise DriverRefused("not_isolated", self.display_name) from error
+        # The file as it is now, by metadata alone; the runtime opens its original itself.
+        fingerprint = openclaw_arena.config_fingerprint(
+            handle.profile_root, handle.config, handle.state
+        )
+        if fingerprint is None:
+            raise DriverRefused("not_isolated", self.display_name)
+        pin = openclaw_arena.pin_text(fingerprint)
         environment = {
             key: value for key, value in os.environ.items() if key.upper() in openclaw_arena.KEPT
         }
@@ -365,7 +382,8 @@ class OpenClawArenaDriver:
             PYTHONUTF8="1",
             **{
                 openclaw_arena.COMMAND_ENV: json.dumps(list(handle.command)),
-                openclaw_arena.CONFIG_ENV: str(pinned),  # pinned
+                openclaw_arena.CONFIG_ENV: str(handle.config),
+                openclaw_arena.PIN_ENV: pin,
                 openclaw_arena.SCRATCH_ENV: str(scratch),
                 openclaw_arena.PROFILE_ROOT_ENV: str(handle.profile_root or ""),
                 openclaw_arena.PROFILE_CONFIG_ENV: str(handle.config or ""),
@@ -376,6 +394,15 @@ class OpenClawArenaDriver:
         return Launch(
             command=[python, "-I", str(match), "--", python, "-I", str(worker)],
             environment=environment,
+            pin=pin,
+        )
+
+    def still_pinned(self, handle: OpenClawRun, pin: str) -> bool:
+        """Say whether the configuration file is, provably, still the one this match pinned."""
+        if handle.config is None or handle.state is None or handle.profile_root is None:
+            return False
+        return openclaw_arena.pinned_state_holds(
+            pin, handle.profile_root, handle.config, handle.state
         )
 
 

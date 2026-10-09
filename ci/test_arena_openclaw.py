@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 from arena_boundary import names_a_secrets_file, names_in
-from arena_fakes import MOVES, load_mutant
+from arena_fakes import MOVES
 from arena_openclaw_support import behavior_of, records_of, stand_in_handle, survivors
 from arena_process_harness import (
     moves_of,
@@ -249,107 +249,137 @@ def test_a_kill_ladder_without_its_last_rung_is_noticed(
 
 
 # ---------------------------------------------------------------------------------------------
-# One match, one configuration (agntnexus/agentnexus#228, generation pinning)
+# One match, one configuration file as it was (agntnexus/agentnexus#228, pinned by metadata)
 # ---------------------------------------------------------------------------------------------
 
 
-def change_the_route_after_the_first_request(
-    server: FakeChatModel, config: Path
-) -> threading.Thread:
-    """Rewrite the profile's model route as soon as the first decision has asked its model."""
-    changed = threading.Event()
-
-    def change() -> None:
-        deadline = time.monotonic() + 60
-        while not server.requests and time.monotonic() < deadline:
-            time.sleep(0.01)
-        document = json.loads(config.read_text(encoding="utf-8"))
-        document["agents"]["defaults"]["model"]["primary"] = "fakeprov/changed-model"
-        config.write_text(json.dumps(document), encoding="utf-8")
-        changed.set()
-
-    thread = threading.Thread(target=change, daemon=True)
-    thread.changed = changed  # type: ignore[attr-defined]
-    thread.start()
-    return thread
+def config_disturbed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    fault: str,
+    plan: str = "move",
+) -> tuple[Any, FakeChatModel]:
+    """Play one match in which the stand-in runtime changes the profile's file at this moment."""
+    server = FakeChatModel(plan)
+    run = play(monkeypatch, capsys, tmp_path, server, fault=fault)
+    return run, server
 
 
-def test_a_profile_change_between_two_moves_does_not_reach_the_active_match(
+@pytest.mark.parametrize(
+    ("fault", "asked_the_model"),
+    [
+        ("touch_config=version", False),
+        ("touch_config=request", True),
+        ("touch_config=tool", True),
+        ("replace_config=request", True),
+        ("replace_config=tool", True),
+    ],
+)
+def test_a_changed_configuration_ends_the_runtime_path_and_forwards_no_move(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    fault: str,
+    asked_the_model: bool,
+) -> None:
+    """Before a start, during a decision, before the forward, or replaced by a same-size file."""
+    run, server = config_disturbed(monkeypatch, capsys, tmp_path, fault)
+    try:
+        assert run.forwarded == [], "a move was forwarded after the configuration changed"
+        assert "game_move_started" not in run.events
+        assert bool(server.requests) is asked_the_model, server.requests
+        assert survivors(tmp_path) == [], "the runtime path was not ended"
+        assert not run.runner.terminal
+    finally:
+        server.close()
+        run.tethers.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a link needs a privilege on Windows")
+def test_a_link_put_in_place_of_the_configuration_forwards_no_move(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    """The match plays its two moves with the model it started with, whatever the profile says."""
-    server = FakeChatModel("move,move")
+    """The file becomes a symbolic link to a copy: the identity and the link state both say no."""
+    run, server = config_disturbed(monkeypatch, capsys, tmp_path, "link_config=tool")
     try:
-        thread = change_the_route_after_the_first_request(
-            server, tmp_path / "home" / "openclaw.json"
-        )
+        assert run.forwarded == []
+        assert survivors(tmp_path) == []
+    finally:
+        server.close()
+        run.tethers.close()
+
+
+def test_a_change_after_the_first_move_stops_the_match_before_its_second(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The first decision runs on the file as it was; the second, after a change, makes no move."""
+    server = FakeChatModel("move,move")
+    config = tmp_path / "home" / "openclaw.json"
+
+    def change() -> None:
+        deadline = time.monotonic() + 90
+        while len(server.requests) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        with config.open("ab") as handle:
+            handle.write(b" ")
+
+    thread = threading.Thread(target=change, daemon=True)
+    thread.start()
+    try:
         run = play(monkeypatch, capsys, tmp_path, server, turns=2)
         thread.join(timeout=10)
-        assert thread.changed.is_set(), "the profile was never changed, so nothing was proven"  # type: ignore[attr-defined]
-        assert moves_of(run, "white") == [MOVES["white"], MOVES["white"]]
-        assert [request["model"] for request in server.requests] == ["fake-model", "fake-model"]
+        assert moves_of(run, "white") == [MOVES["white"]], "the second move was forwarded"
+        assert len(server.requests) == 2
+        assert survivors(tmp_path) == []
         run.tethers.close()
     finally:
         server.close()
 
 
-def test_the_pinned_configuration_is_one_private_copy_of_the_configuration_file_alone(
-    tmp_path: Path,
-) -> None:
-    """The match gets a copy of the one configuration file below its scratch; the store stays."""
+def test_the_launch_pins_metadata_and_copies_nothing(tmp_path: Path) -> None:
+    """The scratch stays empty, the runtime keeps its original file, and the pin has no content."""
     server = FakeChatModel("move")
     try:
         handle = stand_in_handle(tmp_path, server)
         scratch = tmp_path / "scratch"
         scratch.mkdir()
         launch = arena_driver_openclaw.OpenClawArenaDriver().launch(handle, scratch)
-        pinned = Path(launch.environment[openclaw_arena.CONFIG_ENV])
-        assert pinned.is_relative_to(scratch)
-        assert pinned.read_bytes() == handle.config.read_bytes()
+        assert list(scratch.rglob("*")) == [], "something was put in the scratch"
+        assert launch.environment[openclaw_arena.CONFIG_ENV] == str(handle.config)
         assert launch.environment[openclaw_arena.PROFILE_CONFIG_ENV] == str(handle.config)
-        assert [p.name for p in pinned.parent.iterdir()] == [pinned.name]
-        assert not [p for p in scratch.rglob("*") if p.name.endswith(".sqlite")]
+        text = handle.config.read_text(encoding="utf-8")
+        assert launch.pin and text not in launch.pin
+        assert launch.environment[openclaw_arena.PIN_ENV] == launch.pin
+        assert all(text not in value for value in launch.environment.values())
+        assert set(json.loads(launch.pin)) == {
+            "path",
+            "device",
+            "inode",
+            "size",
+            "modified_ns",
+            "changed_ns",
+            "kind",
+        }
     finally:
         server.close()
 
 
-def test_a_configuration_that_includes_other_files_cannot_be_pinned_and_is_refused(
-    tmp_path: Path,
+def test_a_launch_whose_file_state_cannot_be_pinned_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A copy would silently drop the includes, so the match is refused instead."""
+    """No provable identity, no match."""
     server = FakeChatModel("move")
     try:
-        profile = {**server.profile_config(), "$include": "./models.json5"}
-        handle = stand_in_handle(tmp_path, server, profile=profile)
+        handle = stand_in_handle(tmp_path, server)
+        monkeypatch.setattr(openclaw_arena, "config_fingerprint", lambda *args: None)
         scratch = tmp_path / "scratch"
         scratch.mkdir()
         with pytest.raises(arena_driver.DriverRefusedError):
             arena_driver_openclaw.OpenClawArenaDriver().launch(handle, scratch)
     finally:
         server.close()
-
-
-def test_a_launch_that_hands_the_live_profile_configuration_on_is_refused_by_the_worker(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    """Mutation: with the live path passed on, the worker refuses it, and no model is asked."""
-    mutant = load_mutant(
-        tmp_path / "mutant",
-        arena_driver_openclaw,
-        "openclaw_arena.CONFIG_ENV: str(pinned),  # pinned",
-        "openclaw_arena.CONFIG_ENV: str(handle.config),  # pinned",
-    )
-    server = FakeChatModel("move,move")
-    (tmp_path / "run").mkdir()
-    try:
-        run = play(monkeypatch, capsys, tmp_path / "run", server, turns=2, openclaw_module=mutant)
-        assert server.requests == [] and run.forwarded == []
-        assert "runtime_exception" in run.events
-        run.tethers.close()
-    finally:
-        server.close()
-        sys.modules.pop(mutant.__name__, None)

@@ -11,8 +11,13 @@
 
 from __future__ import annotations
 
+import builtins
 import contextlib
+import hashlib
+import io
+import json
 import os
+import queue
 import shutil
 import socket
 import subprocess
@@ -20,14 +25,21 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from arena_fakes import load_mutant
-from arena_openclaw_support import stand_in_handle
+from arena_fakes import expect_guard, load_mutant, supervisor
+from arena_openclaw_support import make_private, stand_in_handle
 from fake_chat_model import FakeChatModel
 
-from agentnexus_sdk import arena_driver, arena_driver_openclaw, arena_match, openclaw_arena
+from agentnexus_sdk import (
+    arena_driver,
+    arena_driver_openclaw,
+    arena_match,
+    arena_runner,
+    openclaw_arena,
+)
 
 WINDOWS = sys.platform == "win32"
 ME = "S-1-5-21-1-2-3-1001"
@@ -422,3 +434,389 @@ def test_a_process_that_never_joins_its_job_is_noticed(tmp_path: Path) -> None:
             connection.close()
         server.close()
         sys.modules.pop(mutant.__name__, None)
+
+
+# ---------------------------------------------------------------------------------------------
+# The configuration file is pinned by what can be said about it without opening it
+# ---------------------------------------------------------------------------------------------
+
+FIELDS = {"path", "device", "inode", "size", "modified_ns", "changed_ns", "kind"}
+CONTENT = '{"synthetic": "config-content-that-must-never-be-read"}'
+
+
+def pinned_profile(root: Path) -> tuple[Path, Path, Path]:
+    """Create a private profile with a configuration file and a state directory."""
+    root_, config, state = profile_on_disk(root)
+    config.write_text(CONTENT, encoding="utf-8")
+    make_private(root_)
+    return root_, config, state
+
+
+def take(root: Path, config: Path, state: Path) -> dict[str, str] | None:
+    """Take the fingerprint with the real function."""
+    return openclaw_arena.config_fingerprint(root, config, state)
+
+
+def test_the_fingerprint_names_the_file_by_metadata_alone(tmp_path: Path) -> None:
+    """Path, identity, size and times; nothing of the content, and nothing derived from it."""
+    root, config, state = pinned_profile(tmp_path / "profile")
+    fingerprint = take(root, config, state)
+    assert fingerprint is not None and set(fingerprint) == FIELDS
+    assert fingerprint["kind"] == "file" and fingerprint["size"] == str(len(CONTENT))
+    assert all(isinstance(value, str) for value in fingerprint.values())
+    assert not [value for value in fingerprint.values() if "config-content" in value]
+    assert take(root, config, state) == fingerprint
+
+
+def test_a_changed_file_has_another_fingerprint(tmp_path: Path) -> None:
+    """Any write is seen: the size and the times move."""
+    root, config, state = pinned_profile(tmp_path / "profile")
+    before = take(root, config, state)
+    with config.open("ab") as handle:
+        handle.write(b" ")
+    assert take(root, config, state) != before
+
+
+def test_a_replacement_of_the_same_size_has_another_identity(tmp_path: Path) -> None:
+    """Same size, same modification time, another file: the identity differs."""
+    root, config, state = pinned_profile(tmp_path / "profile")
+    before = take(root, config, state)
+    assert before is not None
+    stamp = config.stat()
+    other = config.with_name("other.json")
+    other.write_text(CONTENT.replace("synthetic", "syntheti_"), encoding="utf-8")
+    os.utime(other, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    os.replace(other, config)
+    after = take(root, config, state)
+    assert after is not None and after != before
+    assert after["size"] == before["size"] and after["modified_ns"] == before["modified_ns"]
+    assert (after["device"], after["inode"]) != (before["device"], before["inode"])
+
+
+def test_a_missing_file_has_no_fingerprint(tmp_path: Path) -> None:
+    """Nothing to pin, nothing proven."""
+    root, config, state = pinned_profile(tmp_path / "profile")
+    config.unlink()
+    assert take(root, config, state) is None
+
+
+@pytest.mark.skipif(WINDOWS, reason="a symbolic link needs a privilege on Windows")
+def test_a_symbolic_link_in_place_of_the_file_has_no_fingerprint(tmp_path: Path) -> None:
+    """The file turned into a link."""
+    root, config, state = pinned_profile(tmp_path / "profile")
+    real = root / "real.json"
+    config.rename(real)
+    config.symlink_to(real)
+    assert take(root, config, state) is None
+
+
+@pytest.mark.skipif(not WINDOWS, reason="junctions are Windows'")
+def test_a_junction_in_the_path_has_no_fingerprint(tmp_path: Path) -> None:
+    """A directory on the way down became a junction."""
+    root = tmp_path / "profile"
+    (root / "runtime").mkdir(parents=True)
+    (root / "state").mkdir()
+    config = root / "runtime" / "openclaw.json"
+    config.write_text(CONTENT, encoding="utf-8")
+    make_private(root)
+    state = root / "state"
+    assert take(root, config, state) is not None
+    (root / "runtime").rename(root / "real-runtime")
+    subprocess.run(  # noqa: S603 - a fixed system command on a test directory
+        ["cmd", "/c", "mklink", "/J", str(root / "runtime"), str(root / "real-runtime")],  # noqa: S607
+        check=True,
+        capture_output=True,
+    )
+    assert take(root, config, state) is None
+
+
+def test_a_file_whose_state_cannot_be_read_has_no_fingerprint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If the status cannot be read, the identity is not provable."""
+    root, config, state = pinned_profile(tmp_path / "profile")
+    real = os.lstat
+
+    def lstat(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(path) == str(config):
+            raise OSError("synthetic")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    assert take(root, config, state) is None
+
+
+def test_a_file_without_an_identity_has_no_fingerprint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A file system that gives no file number cannot show that the file is the same."""
+    root, config, state = pinned_profile(tmp_path / "profile")
+    real = os.lstat
+
+    def lstat(path: Any, *args: Any, **kwargs: Any) -> Any:
+        info = real(path, *args, **kwargs)
+        if str(path) != str(config):
+            return info
+        values = list(info)
+        values[1] = 0  # st_ino
+        return os.stat_result(values)
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    assert take(root, config, state) is None
+
+
+def test_a_profile_that_is_no_longer_private_has_no_fingerprint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The privacy boundary that was already checked is part of what is pinned."""
+    root, config, state = pinned_profile(tmp_path / "profile")
+    monkeypatch.setattr(openclaw_arena, "profile_context_valid", lambda *args: False)
+    assert take(root, config, state) is None
+
+
+def forbid_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make any opening of a file, any read of a path's content and any digest an error."""
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("file content was touched")
+
+    for owner, names in (
+        (builtins, ("open",)),
+        (io, ("open",)),
+        (os, ("open",)),
+        (Path, ("open", "read_bytes", "read_text")),
+        (hashlib, ("sha256", "sha1", "md5", "blake2b", "new")),
+    ):
+        for name in names:
+            monkeypatch.setattr(owner, name, refuse)
+
+
+def no_content_oracle(module: Any, tmp_path: Path) -> None:
+    """Take a fingerprint with the module while nothing may be opened, read or digested."""
+    root, config, state = pinned_profile(tmp_path)
+    with pytest.MonkeyPatch.context() as patch:
+        forbid_content(patch)
+        assert module.config_fingerprint(root, config, state) is not None
+
+
+def test_the_fingerprint_opens_reads_and_digests_nothing(tmp_path: Path) -> None:
+    """The oracle holds for the real module."""
+    no_content_oracle(openclaw_arena, tmp_path / "real")
+
+
+def test_a_fingerprint_that_adds_a_content_digest_is_noticed(tmp_path: Path) -> None:
+    """Mutation: with a digest of the file in it, the same oracle refuses."""
+    mutant = mutant_of(
+        tmp_path / "mutant",
+        '"kind": "file",  # metadata',
+        '"kind": __import__("hashlib")'
+        ".sha256(Path(profile_config).read_bytes()).hexdigest(),  # metadata",
+    )
+    try:
+        expect_guard(
+            lambda module: no_content_oracle(module, tmp_path / module.__name__),
+            openclaw_arena,
+            mutant,
+        )
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+# ---------------------------------------------------------------------------------------------
+# The relay forwards nothing once the file has changed
+# ---------------------------------------------------------------------------------------------
+
+
+def relayed(verify: Any, module: Any = openclaw_arena) -> tuple[list[dict[str, Any]], Any, Any]:
+    """Send one move through the worker's relay with this check; return what went upstream."""
+    state = module.Decision()
+    incoming: queue.Queue[str] = queue.Queue()
+    incoming.put(json.dumps({"result": {"status": "active"}}))
+    sent: list[dict[str, Any]] = []
+    request = {"op": "game_move", "arguments": {"move": "e2e4"}}
+    reply = module.answer(request, state, incoming, sent.append, verify)
+    return sent, reply, state
+
+
+def test_the_relay_forwards_a_move_while_the_check_holds() -> None:
+    """Control: with the check passing, the move goes upstream."""
+    sent, reply, _ = relayed(lambda: True)
+    assert len(sent) == 1 and not reply.get("error")
+
+
+@pytest.mark.parametrize("how", ["false", "raises"])
+def test_the_relay_forwards_nothing_when_the_check_fails_or_cannot_be_made(how: str) -> None:
+    """A changed file, or a check that errors, sends nothing and ends the decision."""
+
+    def verify() -> bool:
+        if how == "raises":
+            raise OSError("synthetic")
+        return False
+
+    sent, reply, state = relayed(verify)
+    assert sent == [] and reply.get("error")
+    assert state.changed.is_set() and not state.accepted.is_set()
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        ("allowed = verify is None or verify()  # verify", "allowed = True  # verify"),
+        ("allowed = False  # unverifiable", "allowed = True  # unverifiable"),
+    ],
+    ids=["check-removed", "error-path-forwards"],
+)
+def test_a_relay_without_its_check_is_noticed(
+    tmp_path: Path, original: str, replacement: str
+) -> None:
+    """Mutation: with the check gone, or an error let through, the move goes upstream."""
+    mutant = mutant_of(tmp_path / "mutant", original, replacement)
+    try:
+
+        def oracle(module: Any) -> None:
+            def verify() -> bool:
+                raise OSError("synthetic")
+
+            sent, _, _ = relayed(verify, module)
+            assert sent == []
+
+        expect_guard(oracle, openclaw_arena, mutant)
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+# ---------------------------------------------------------------------------------------------
+# The supervisor checks the pin before it forwards
+# ---------------------------------------------------------------------------------------------
+
+
+def serve_a_move(
+    monkeypatch: pytest.MonkeyPatch, module: Any, hook: Any, *, pin: str | None = "pin"
+) -> tuple[list[str], Any]:
+    """Serve one scripted move through the supervisor with this driver hook; list the forwards."""
+    runner, owned = supervisor(module)
+    runner.driver = SimpleNamespace() if hook is None else SimpleNamespace(still_pinned=hook)
+    runner.handle, runner.pin = object(), pin
+    runner.proven, runner.refused = "generation:abc", None
+    runner._write_status = lambda: None
+    forwarded: list[str] = []
+
+    def game(command: dict[str, Any], **kwargs: object) -> dict[str, Any]:
+        forwarded.append(command["operation"])
+        return {"status": "active", "game_version": "connect-four-1-solo"}
+
+    monkeypatch.setattr(module.bridge, "_run_game_command", game)
+    lines = [
+        {"diagnostic": "model_call_started", "duration_ms": 0},
+        {"operation": "game_move", "column": 3},
+        {"finished": True},
+    ]
+    text = "".join(json.dumps(line) + "\n" for line in lines)
+    child = SimpleNamespace(stdout=io.StringIO(text), stdin=io.StringIO())
+    module.ArenaRunner._serve(runner, child, owned)
+    return forwarded, runner
+
+
+def test_a_move_is_forwarded_while_the_driver_says_the_pin_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control, and the two cases that offer no check: no hook, or a driver with no pin."""
+    for hook, pin in (
+        (lambda handle, pinned: True, "pin"),
+        (None, "pin"),
+        (lambda h, p: False, None),
+    ):
+        forwarded, runner = serve_a_move(monkeypatch, arena_runner, hook, pin=pin)
+        assert forwarded == ["game_move"] and runner.proven == "generation:abc"
+
+
+@pytest.mark.parametrize("how", ["false", "raises"])
+def test_a_move_is_not_forwarded_when_the_pin_fails_and_the_proof_is_dropped(
+    monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    """A changed state, or a check that cannot be made, forwards nothing and voids the proof."""
+
+    def hook(handle: Any, pin: str) -> bool:
+        if how == "raises":
+            raise OSError("synthetic")
+        return False
+
+    forwarded, runner = serve_a_move(monkeypatch, arena_runner, hook)
+    assert forwarded == []
+    assert runner.proven is None, "claims continue on a proof the file no longer matches"
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        ("if not self._pinned():", "if False:"),
+        ("return False  # unverifiable", "return True  # unverifiable"),
+    ],
+    ids=["check-removed", "unverifiable-accepted"],
+)
+def test_a_supervisor_without_its_pin_check_is_noticed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, original: str, replacement: str
+) -> None:
+    """Mutation: with the check gone, or an unverifiable state accepted, the move is forwarded."""
+    mutant = load_mutant(tmp_path, arena_runner, original, replacement)
+    try:
+
+        def oracle(module: Any) -> None:
+            def hook(handle: Any, pin: str) -> bool:
+                raise OSError("synthetic")
+
+            with pytest.MonkeyPatch.context() as patch:
+                forwarded, _ = serve_a_move(patch, module, hook)
+            assert forwarded == []
+
+        expect_guard(oracle, arena_runner, mutant)
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+# ---------------------------------------------------------------------------------------------
+# The driver
+# ---------------------------------------------------------------------------------------------
+
+
+def test_the_driver_follows_the_file_and_the_generation_follows_the_identity(
+    tmp_path: Path,
+) -> None:
+    """`still_pinned` is true until the file changes; the generation changes with the identity."""
+    server = FakeChatModel("move")
+    try:
+        handle = stand_in_handle(tmp_path, server)
+        driver = arena_driver_openclaw.OpenClawArenaDriver()
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        pin = driver.launch(handle, scratch).pin
+        assert pin and driver.still_pinned(handle, pin) is True
+        before = driver.generation(handle)
+        assert before is not None
+        config = Path(str(handle.config))
+        stamp = config.stat()
+        other = config.with_name("other.json")
+        other.write_bytes(config.read_bytes())
+        os.utime(other, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        os.replace(other, config)
+        assert driver.still_pinned(handle, pin) is False
+        assert driver.generation(handle) != before
+        assert driver.still_pinned(handle, "not a pin") is False
+    finally:
+        server.close()
+
+
+def test_a_driver_that_cannot_fingerprint_offers_no_generation_and_refuses_a_preflight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Nothing provable: no generation token, and the preflight refuses."""
+    server = FakeChatModel("move")
+    try:
+        handle = stand_in_handle(tmp_path, server)
+        monkeypatch.setattr(openclaw_arena, "config_fingerprint", lambda *args: None)
+        driver = arena_driver_openclaw.OpenClawArenaDriver()
+        assert driver.generation(handle) is None
+        with pytest.raises(arena_driver.DriverRefusedError):
+            driver.preflight(handle)
+    finally:
+        server.close()

@@ -327,12 +327,19 @@ What this does not give you, stated plainly:
   refuses the profile as not isolated. Only the owner and the access list are read, never anything
   inside the directory. To lock a profile directory to yourself, run
   `icacls <profile directory> /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"`.
-- One match plays on one configuration. When a match starts, the profile's single configuration
-  file is copied into the match's private scratch and every decision of that match uses the copy,
-  so a change to the profile's model, route or agent directories during a match takes effect with
-  the next match, after the idle preflight. The copy is made without parsing the file and is
-  removed with the scratch; the authentication store is never copied. A configuration that includes
-  other files cannot be copied faithfully and is refused.
+- One match plays on the configuration file it started with, or it stops. OpenClaw alone reads its
+  original configuration and its authentication store; the Connector never opens, reads, parses,
+  hashes, copies, logs or stores the configuration. When a match starts it records what can be
+  said about the file without opening it: its canonical path, its identity (device and file
+  number), its size, its modification and status times, that it is a plain file and no link or
+  junction, and the owner and privacy check of the profile. That record is checked again before
+  each start of the runtime, when the runtime has finished a decision, and immediately before a
+  move is forwarded. If the file changed, was replaced, became a link, is missing, or its state
+  cannot be proven, the runtime is stopped, the decision is discarded, no move is sent, the
+  proof of the runtime is void and no further seat is claimed until a new preflight succeeds
+  while nothing runs. A same-size in-place rewrite that restores the modification time cannot
+  be seen on a host whose status time is not exposed; that limit is the price of never reading
+  the file.
 - The runtime sends its host name, working directory and operating system to the model provider in
   every request; the working directory is an empty throwaway.
 - The three-tool guarantee is proven for the model route the runtime takes with the overlay. A

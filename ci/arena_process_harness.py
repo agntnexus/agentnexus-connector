@@ -634,7 +634,12 @@ class StandInDriver:
         command[2:3] = [str(self.launcher), str(match), str(self.bound), str(self.cleanup)]
         if self.worker_file is not None:
             command[command.index("--") + 3] = str(self.worker_file)
-        return arena_driver.Launch(command, launch.environment)
+        return arena_driver.Launch(command, launch.environment, getattr(launch, "pin", None))
+
+    def still_pinned(self, handle: Any, pin: str) -> bool:
+        """Ask the real driver, when it has a check."""
+        check = getattr(self.real, "still_pinned", None)
+        return True if check is None else bool(check(handle, pin))
 
 
 class Tethers:
