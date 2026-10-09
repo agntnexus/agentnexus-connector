@@ -946,7 +946,7 @@ def test_a_parent_that_does_not_kill_leaves_a_match_process_that_does_not_end_it
     """Without the parent's kill the second line is gone: the process-level proof notices."""
     lax = lax_match_process(tmp_path)
     broken = load_mutant(
-        tmp_path / "mutant", arena_runner, "child.kill()  # decision cutoff", "pass"
+        tmp_path / "mutant", arena_runner, "hermes_arena.end_tree(child)  # decision cutoff", "pass"
     )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -980,7 +980,7 @@ def test_a_worker_that_outlives_its_match_process_is_noticed(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    """Without the worker's own exit on a closed pipe, the parent's kill leaves a Hermes behind."""
+    """A match process killed alone leaves its worker unless the OS ends it (POSIX has no job)."""
     source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
     for original, replacement in (
         ("message = worker.get(remaining)", "message = worker.get(3600)"),
@@ -993,10 +993,15 @@ def test_a_worker_that_outlives_its_match_process_is_noticed(
     broken.write_text(source, encoding="utf-8")
     run_dir = tmp_path / "run"
     run_dir.mkdir()
+    # The parent of this test kills the match process alone, as the parent did before the tree kill.
+    monkeypatch.setattr(hermes_arena, "end_tree", lambda process: process.kill())
     run = run_process(monkeypatch, capsys, run_dir, "white", {"mode": "block"}, arena=broken)
     assert run.forwarded == []
-    with pytest.raises(AssertionError, match="still alive"):
-        assert_no_residue(run)
+    if os.name == "nt":
+        assert_no_residue(run)  # the job object of the match process is the second line here
+    else:
+        with pytest.raises(AssertionError, match="still alive"):
+            assert_no_residue(run)
 
 
 # ---------------------------------------------------------------------------------------------
