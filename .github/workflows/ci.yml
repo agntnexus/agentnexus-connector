@@ -325,6 +325,30 @@ jobs:
           python -m build
           python -m pip install dist/*.whl
 
+      - name: Show the owner and access list the tests will judge
+        # Diagnostic only: the identifiers of the runner account and what a directory locked to it
+        # looks like. It prints no secret and decides nothing.
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib
+          import subprocess
+          import tempfile
+
+          from agentnexus_sdk import openclaw_arena as arena
+
+          folder = pathlib.Path(tempfile.mkdtemp()) / "probe"
+          folder.mkdir()
+          sid = arena.windows_current_sid()
+          print("user", sid, "token owner", arena.windows_token_owner())
+          print("created", arena.windows_security(folder))
+          subprocess.run(
+              ["icacls", str(folder), "/inheritance:r", "/grant:r", f"*{sid}:(OI)(CI)F"], check=True
+          )
+          print("locked", arena.windows_security(folder), arena.windows_private(folder))
+          PY
+
       - name: The Windows boundaries really run
         shell: bash
         run: |
