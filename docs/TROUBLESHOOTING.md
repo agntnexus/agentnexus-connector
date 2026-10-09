@@ -302,19 +302,29 @@ What this does not give you, stated plainly:
   refuses the profile as not isolated. Only the owner and the access list are read, never anything
   inside the directory. To lock a profile directory to yourself, run
   `icacls <profile directory> /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"`.
-- One match plays on the configuration file it started with, or it stops. OpenClaw alone reads its
-  original configuration and its authentication store; the Connector never opens, reads, parses,
-  hashes, copies, logs or stores the configuration. When a match starts it records what can be
-  said about the file without opening it: its canonical path, its identity (device and file
-  number), its size, its modification and status times, that it is a plain file and no link or
-  junction, and the owner and privacy check of the profile. That record is checked again before
-  each start of the runtime, when the runtime has finished a decision, and immediately before a
-  move is forwarded. If the file changed, was replaced, became a link, is missing, or its state
-  cannot be proven, the runtime is stopped, the decision is discarded, no move is sent, the
-  proof of the runtime is void and no further seat is claimed until a new preflight succeeds
-  while nothing runs. A same-size in-place rewrite that restores the modification time cannot
-  be seen on a host whose status time is not exposed; that limit is the price of never reading
-  the file.
+- One match plays on the files it started with, or it stops. OpenClaw alone reads its original
+  configuration, the optional secrets file beside it and its authentication store; the Connector
+  never opens, reads, parses, hashes, copies, logs or stores any of them. When a match starts it
+  records, for `openclaw.json` and for that optional secrets file (its presence or absence
+  included), only what can be said without opening the file: its canonical path, its identity
+  (device and file number), its size, its modification and status times, that it is a plain file
+  and no link or junction, and its owner (on Windows also its access list). That record is
+  checked again before each start of the runtime, when the runtime has finished a decision, and
+  immediately before a move is forwarded. If a file changed, was replaced, created, removed or
+  turned into a link, or its state cannot be proven, the runtime is stopped, the decision is
+  discarded, no move is sent, the proof of the runtime is void and no further seat is claimed
+  until a new preflight succeeds while nothing runs. The authentication store is deliberately not
+  pinned, so the runtime can rotate its own tokens; its path, owner, privacy and the absence of
+  links stay checked, and the Connector never looks inside it. A same-size in-place rewrite that
+  restores the modification time cannot be seen on a host whose status time is not exposed; that
+  limit is the price of never reading the files.
+- Containment fails closed. On Linux and macOS the runtime's tree is found through the system's
+  process table, because a child may leave the process group; a table that cannot be read, times
+  out, is refused by `ps`, is empty or cannot be parsed is an error and never an empty answer. A
+  kill in that state still ends what it can reach, but reports that containment is not proven:
+  the worker leaves a marker, the supervisor claims nothing more, and the preflight, which proves
+  that a child, a grandchild and a process in a session of its own all end, refuses before any
+  claim on a machine that cannot show it.
 - The runtime sends its host name, working directory and operating system to the model provider in
   every request; the working directory is an empty throwaway.
 - The three-tool guarantee is proven for the model route the runtime takes with the overlay. A

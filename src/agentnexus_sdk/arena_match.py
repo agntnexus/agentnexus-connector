@@ -114,6 +114,9 @@ SETTLE_SECONDS = 20
 #: runtime loads slowly on a small device, and a worker that is not ready is reported, not waited
 #: for.
 READY_SECONDS = 180
+#: A file a decision worker leaves in the match's scratch when it could not prove that the tree of
+#: its runtime is gone. The supervisor reads it when the run stops and claims nothing more.
+UNCONTAINED_MARKER = "uncontained"
 
 
 def diagnostic_bound(decisions: int) -> int:

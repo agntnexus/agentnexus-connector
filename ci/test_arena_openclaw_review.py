@@ -84,6 +84,20 @@ def test_only_the_intended_user_and_the_system_accounts_may_reach_a_directory(
     assert openclaw_arena.acl_is_private(owner, entries, ME) is private
 
 
+def test_a_directory_an_elevated_administrator_created_is_private_to_that_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owner objects get from this token counts as the user; any other owner does not."""
+    monkeypatch.setattr(openclaw_arena, "windows_current_sid", lambda: ME)
+    monkeypatch.setattr(
+        openclaw_arena, "windows_security", lambda path: (ADMINISTRATORS, [(ALLOWED, ME)])
+    )
+    monkeypatch.setattr(openclaw_arena, "windows_token_owner", lambda: ADMINISTRATORS)
+    assert openclaw_arena.windows_private(Path("x")) is True
+    monkeypatch.setattr(openclaw_arena, "windows_token_owner", lambda: ME)
+    assert openclaw_arena.windows_private(Path("x")) is False
+
+
 def test_an_unknown_user_makes_nothing_private() -> None:
     """With no way to say who the user is, no directory is proven private."""
     assert openclaw_arena.acl_is_private(ME, [(ALLOWED, ME)], "") is False
@@ -627,8 +641,7 @@ def test_a_fingerprint_that_adds_a_content_digest_is_noticed(tmp_path: Path) -> 
     mutant = mutant_of(
         tmp_path / "mutant",
         '"kind": "file",  # metadata',
-        '"kind": __import__("hashlib")'
-        ".sha256(Path(profile_config).read_bytes()).hexdigest(),  # metadata",
+        '"kind": __import__("hashlib").sha256(Path(path).read_bytes()).hexdigest(),  # metadata',
     )
     try:
         expect_guard(
@@ -921,6 +934,7 @@ def test_a_file_owned_by_someone_else_has_no_fingerprint(
     root, config, state = pinned_profile(tmp_path / "profile")
     monkeypatch.setattr(openclaw_arena, "file_owner", lambda path, info: "someone-else")
     monkeypatch.setattr(openclaw_arena, "current_owner", lambda: "me")
+    monkeypatch.setattr(openclaw_arena, "windows_token_owner", lambda: "me")
     assert take(root, config, state) is None
 
 
@@ -1255,8 +1269,11 @@ def test_an_empty_process_table_taken_as_a_proof_is_noticed(tmp_path: Path) -> N
                     "run",
                     lambda *a, **k: SimpleNamespace(returncode=0, stdout=""),
                 )
-                with pytest.raises(OSError, match="process table"):
+                try:
                     module.descendants(1)
+                except OSError:
+                    return
+                raise AssertionError("an empty process table was taken as a proof")
 
         expect_guard(oracle, openclaw_arena, mutant)
     finally:

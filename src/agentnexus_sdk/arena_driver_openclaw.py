@@ -212,6 +212,8 @@ class OpenClawArenaDriver:
             is None
         ):
             raise refusal
+        if not openclaw_arena.prove_containment():
+            raise refusal
         canary = CanaryModel()
         try:
             with tempfile.TemporaryDirectory(
@@ -326,11 +328,9 @@ class OpenClawArenaDriver:
         if fingerprint is None:
             return None
         digest.update(openclaw_arena.pin_text(fingerprint).encode())
-        for label, path in (
-            ("secrets", handle.config.parent / ".env" if handle.config is not None else None),
-            ("state-secrets", handle.state / ".env" if handle.state is not None else None),
-            ("entry", Path(handle.command[-1])),
-        ):
+        # The configuration and the profile secrets file are in the fingerprint above. The
+        # authentication store is not pinned, so that the runtime may rotate its own tokens.
+        for label, path in (("entry", Path(handle.command[-1])),):
             try:
                 info = path.stat() if path is not None else None
             except OSError:

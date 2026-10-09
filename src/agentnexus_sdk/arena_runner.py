@@ -419,6 +419,9 @@ class ArenaRunner:
     scratch: Path | None = None  # the running child's throwaway runtime home
     #: What the driver pinned for the running match (opaque), checked before every forward.
     pin: str | None = None
+    #: Down once a run could not prove that the tree of its runtime is gone: nothing is claimed
+    #: after that, until the runner is started again.
+    contained = True
 
     def __init__(
         self, paths: Any, providers: str, driver: arena_driver.ArenaRuntimeDriver, handle: Any
@@ -785,6 +788,8 @@ class ArenaRunner:
 
     def _launch(self, intent: StartIntent) -> None:
         """Claim, reserve durably, then spawn; restart uncertainty never launches twice."""
+        if not self.contained:
+            raise RunnerRefused("The Arena runtime tree could not be proven contained.")
         claimed = self._post(f"/{intent.intent_id}/claim", {"runner_id": self.journal.runner_id})
         owned = StartIntent.parse(claimed, agent_id=self.config.agent_id)
         if owned.claimed_by != self.journal.runner_id:
@@ -853,6 +858,8 @@ class ArenaRunner:
         self.worker = None
         self.active = None
         if self.scratch is not None:
+            if (self.scratch / arena_match.UNCONTAINED_MARKER).exists():
+                self.contained = False  # the worker could not show its runtime's tree gone
             # Nothing of the run is left running that could still write to it.
             remove_scratch(self.scratch)  # scratch
             self.scratch = None
