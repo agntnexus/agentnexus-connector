@@ -205,25 +205,36 @@ _CREATE_SUSPENDED = 0x00000004
 _KILL_ON_JOB_CLOSE = 0x00002000
 
 
-def descendants(root: int) -> set[int]:
-    """Return the pids below `root` (POSIX), read from the process table now."""
-    if os.name == "nt":
-        return set()
+def process_table() -> dict[int, list[int]]:
+    """Return every parent's children from the system's process table, or raise `OSError`.
+
+    A table that cannot be listed, that times out, that the lister refuses or that comes back empty
+    is an error and never an empty answer: an empty answer would read as "nothing below this
+    process", and a kill would stop short of what it could not see.
+    """
     try:
-        table = subprocess.run(
+        listing = subprocess.run(
             ["ps", "-A", "-o", "pid=,ppid="],  # noqa: S607 - the system's own process lister
             capture_output=True,
             text=True,
             timeout=10,
             check=False,
-        ).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return set()
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise OSError("The process table could not be read.") from error
     children: dict[int, list[int]] = {}
-    for line in table.splitlines():
+    for line in (listing.stdout or "").splitlines():
         parts = line.split()
         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
             children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    if listing.returncode != 0 or not children:
+        raise OSError("The process table could not be read.")
+    return children
+
+
+def descendants(root: int) -> set[int]:
+    """Return the pids below `root` from the process table now; raise `OSError` if unreadable."""
+    children = process_table()
     found: set[int] = set()
     pending = [root]
     while pending:
@@ -295,10 +306,9 @@ class WindowsJob:
         if self._ntdll.NtResumeProcess(handle) != 0:
             raise OSError("The suspended process could not be resumed.")
 
-    def end(self) -> None:
-        """End every process in the job now."""
-        if self.handle:
-            self._kernel.TerminateJobObject(self.handle, 1)
+    def end(self) -> bool:
+        """End every process in the job now; say whether Windows did it."""
+        return bool(self.handle) and bool(self._kernel.TerminateJobObject(self.handle, 1))
 
     def close(self) -> None:
         """Release the job; whatever is still in it ends."""
@@ -315,25 +325,36 @@ class PosixTree:
         self.pid = pid
         self.known: set[int] = set()
 
-    def end(self, process: subprocess.Popen[Any]) -> None:
+    def end(self, process: subprocess.Popen[Any]) -> bool:
         """Kill the group and every descendant read from the process table before the first signal.
 
         A runtime may put a child in a session of its own, which no group signal reaches, so the
         table is read first and each pid found is killed. The group is signalled only while the
         leader has not been reaped: the pid is then still ours and cannot name another process.
+        The answer is whether the tree is provably gone: if the table could not be read, what was
+        reachable is still killed, but the answer is `False` and the caller must trust nothing.
         """
         if sys.platform == "win32":  # a job object ends the tree there, not a group
-            return
+            return True
         import signal
 
-        members = self.known | descendants(self.pid)
+        complete = True
+        members = set(self.known)
+        try:
+            members |= descendants(self.pid)  # table
+        except OSError:
+            complete = False
         if process.returncode is None:
             with contextlib.suppress(OSError):
                 os.killpg(self.pid, signal.SIGKILL)
-        members |= descendants(self.pid)
+        try:
+            members |= descendants(self.pid)
+        except OSError:
+            complete = False
         for pid in members:
             with contextlib.suppress(OSError):
                 os.kill(pid, signal.SIGKILL)
+        return complete
 
 
 def start_in_tree(argv: list[str], **options: Any) -> subprocess.Popen[Any]:
@@ -362,19 +383,22 @@ def start_in_tree(argv: list[str], **options: Any) -> subprocess.Popen[Any]:
     return process
 
 
-def end_tree(process: Any) -> None:
+def end_tree(process: Any) -> bool:
     """End a process started by `start_in_tree` and everything it started; safe to repeat.
 
-    A process that was not started that way (or a stand-in) is killed alone.
+    The answer says whether the tree is provably gone. A process that was not started that way (or
+    a stand-in) is killed alone and counts as gone.
     """
     tree = getattr(process, TREE_ATTRIBUTE, None)
+    complete = True
     if isinstance(tree, WindowsJob):
-        tree.end()
+        complete = tree.end()
         tree.close()
     elif isinstance(tree, PosixTree):
-        tree.end(process)
+        complete = tree.end(process)
     with contextlib.suppress(OSError):
         process.kill()
+    return complete
 
 
 def run_in_tree(argv: list[str], *, seconds: float, **options: Any) -> tuple[int, str] | None:
@@ -409,15 +433,20 @@ def run_in_tree(argv: list[str], *, seconds: float, **options: Any) -> tuple[int
 
 
 def prove_tree() -> bool:
-    """Show on this machine that one kill ends a process and the grandchild it started.
+    """Show on this machine that one kill ends a process and the grandchildren it started.
 
-    Both hold the same pipe open, so it can only end once the whole tree is gone. The proof uses
+    One grandchild stays in the process's session and one leaves it. All hold the same pipe open,
+    so it can only end once the whole tree is gone. A machine that cannot list its processes cannot
+    show it, and is not trusted with a seat. The proof uses
     the very functions that end a decision's tree, so a machine that cannot set up or end a tree
     is found before a seat is claimed and not at a cutoff.
     """
     program = (
-        "import subprocess, sys, time\n"
-        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "import os, subprocess, sys, time\n"
+        "child = [sys.executable, '-c', 'import time; time.sleep(30)']\n"
+        "detached = {'start_new_session': True} if os.name != 'nt' else {'creationflags': 0x208}\n"
+        "subprocess.Popen(child, stdout=sys.stdout)\n"
+        "subprocess.Popen(child, stdout=sys.stdout, **detached)\n"
         "print('up', flush=True)\n"
         "time.sleep(30)\n"
     )
@@ -443,8 +472,8 @@ def prove_tree() -> bool:
         started = chunks.get(timeout=20) != b""
     except queue.Empty:
         started = False
-    end_tree(process)
-    if not started:
+    complete = end_tree(process)
+    if not started or not complete:
         return False
     try:
         while chunks.get(timeout=10) != b"":

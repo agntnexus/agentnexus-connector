@@ -494,7 +494,10 @@ def test_a_parent_that_does_not_kill_leaves_a_match_process_that_does_not_end_it
     """Without the parent's kill the second line is gone: the process-level proof notices."""
     lax_match, lax_worker = lax_match_process(tmp_path)
     broken = load_mutant(
-        tmp_path / "mutant", arena_runner, "arena_match.end_tree(child)  # decision cutoff", "pass"
+        tmp_path / "mutant",
+        arena_runner,
+        "if not arena_match.end_tree(child):  # decision cutoff",
+        "if False:  # decision cutoff",
     )
     run_dir = tmp_path / "run"
     run_dir.mkdir()

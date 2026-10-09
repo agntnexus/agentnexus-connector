@@ -183,7 +183,10 @@ tree, not only the process that was named: the decision worker, the match proces
 runtime started below them (a tool server, a transport helper) share a Windows job object or a
 POSIX session of their own, so no runtime process outlives a cutoff, a replaced worker or a stop.
 Nothing is sent and nothing more is served, and a run that is being stopped (cancelled, replaced or
-bounded out) serves nothing more either, whatever its child had already written: no move,
+bounded out) serves nothing more either, whatever its child had already written. The check and the
+forward share one gate with the start of a stop: a stop that begins while a move is being
+forwarded waits for that forward to end, and no request is forwarded once a stop has begun, so
+ending the process is not what orders the two. No move,
 no repeat, no substitute, no draw claim, no resignation and no result. The run stops, the intent is
 reported `refused`, and the stopped run is not started again; what the provider does with a seat
 that does not move is its own rule.
@@ -230,7 +233,14 @@ before any runtime is asked and with the seat left queued, when any one of these
 the 45-second decision bound leaves the 15-second reserve under each game's provider deadline; the
 reserve is at least one state poll, one provider phase and a second; the cleanup is shorter than
 the reserve less one poll; and one kill ends a process and a grandchild on this machine (proved by
-starting and ending a small tree). The runner checks the numbers again before each claim, and the
+starting and ending a small tree that holds a grandchild in the process's session and one in a
+session of its own). On Linux and macOS the kill reads the system's process table before it
+signals, because a child in a session of its own is reached by no group signal; a table that
+cannot be read, times out or comes back empty is an error and never an empty answer. Such a kill
+still ends what it can reach, but it reports that containment was not proven, and the runner then
+claims nothing more until it is restarted; a machine that cannot list its processes fails the
+capability proof and is not trusted with a seat. The runner checks the numbers again before each
+claim, and the
 Hermes preflight must finish within 60 seconds. A refusal says only that the Arena turn budget is
 not guaranteed or that the runtime refused the preflight.
 

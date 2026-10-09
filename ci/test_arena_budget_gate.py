@@ -510,3 +510,58 @@ def test_a_cutoff_that_could_not_prove_containment_blocks_every_later_claim(
     with pytest.raises(arena_runner.RunnerRefused, match="contain"):
         arena_runner.ArenaRunner._launch(runner, owned)
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement", "kill"),
+    [
+        (
+            "if not arena_match.end_tree(child):  # decision cutoff",
+            "if arena_match.end_tree(child) and False:  # decision cutoff",
+            "cutoff",
+        ),
+        (
+            "if not arena_match.end_tree(self.child):",
+            "if arena_match.end_tree(self.child) and False:",
+            "stop",
+        ),
+        ("if not self.contained:", "if False:", "claim"),
+    ],
+)
+def test_a_parent_that_forgets_an_incomplete_kill_is_noticed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, original: str, replacement: str, kill: str
+) -> None:
+    """Mutation: if an incomplete kill is not remembered, or not honoured, the claim goes on."""
+    mutant = load_mutant(tmp_path, arena_runner, original, replacement)
+    try:
+        runner, owned = supervisor(mutant)
+        calls: list[str] = []
+
+        def post(suffix: str, payload: Any) -> Any:
+            calls.append(suffix)
+            raise mutant.RunnerRefused("stop after the claim")
+
+        runner._post = post
+        runner.journal = SimpleNamespace(runner_id="r", reserve=lambda identifier: True)
+        monkeypatch.setattr(arena_match, "end_tree", lambda process: False)
+        monkeypatch.setattr(mutant, "diagnostic", lambda *args, **kwargs: None)
+        if kill == "cutoff":
+            runner._cut_off(SimpleNamespace(), owned, 1)
+        elif kill == "stop":
+            runner.child = SimpleNamespace(
+                poll=lambda: 0,
+                kill=lambda: None,
+                wait=lambda **kwargs: None,
+                stdin=None,
+                stdout=None,
+            )
+            runner.worker = None
+            runner.active = None
+            runner.stop_child()
+        else:
+            runner.contained = False
+        with pytest.raises(mutant.RunnerRefused, match="after the claim"):
+            mutant.ArenaRunner._launch(runner, owned)
+        assert calls == [f"/{owned.intent_id}/claim"]
+    finally:
+        sys.modules.pop(mutant.__name__, None)

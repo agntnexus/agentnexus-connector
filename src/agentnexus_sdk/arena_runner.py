@@ -459,6 +459,11 @@ class ArenaRunner:
     #: Up from the moment a run is being stopped (cancelled, replaced, bounded out) until the next
     #: launch. Whatever the child had already written is then not served: no late move.
     stopping = False
+    #: Down once a kill could not prove the tree gone: nothing is claimed after that.
+    contained = True
+    #: Taken to set `stopping` and, for the whole forward, to check it: after a stop begins no
+    #: request is forwarded, and a stop waits for a forward that has already begun.
+    _gate = threading.Lock()
 
     def __init__(
         self, paths: Any, providers: str, driver: arena_driver.ArenaRuntimeDriver, handle: Any
@@ -716,17 +721,19 @@ class ArenaRunner:
                     diagnostic(intent, "late_move_refused", window.elapsed_ms())
                     window.expire()
                     break
-                if self.stopping:  # stopping before the forward
-                    # A run being stopped serves nothing more, whatever the child had written.
-                    break
                 command = {**request, "match_id": intent.match_id, "seat": intent.seat}
                 started = time.monotonic()
                 if operation in {"game_join", "game_move"}:
                     diagnostic(intent, f"{operation}_started")
                 try:
-                    result = bridge._run_game_command(
-                        command, config=self.config, client=self.client
-                    )
+                    with self._gate:  # forward gate
+                        if self.stopping:  # stopping before the forward
+                            # A run being stopped forwards nothing more, whatever its child had
+                            # written, and a stop that begins now waits for this forward to end.
+                            break
+                        result = bridge._run_game_command(
+                            command, config=self.config, client=self.client
+                        )
                     if operation in {"game_join", "game_move"}:
                         diagnostic(
                             intent,
@@ -797,7 +804,8 @@ class ArenaRunner:
         tick sees a child that ended without a finished game and reports the intent `refused`.
         """
         try:
-            arena_match.end_tree(child)  # decision cutoff
+            if not arena_match.end_tree(child):  # decision cutoff
+                self.contained = False
         finally:
             diagnostic(intent, "decision_budget_expired", duration_ms)
 
@@ -806,6 +814,8 @@ class ArenaRunner:
         if budget_problems():
             # Before the claim: the seat stays queued, and no model work can start.
             raise RunnerRefused("The Arena turn budget is not guaranteed.")
+        if not self.contained:
+            raise RunnerRefused("The Arena runtime tree could not be proven contained.")
         claimed = self._post(f"/{intent.intent_id}/claim", {"runner_id": self.journal.runner_id})
         owned = StartIntent.parse(claimed, agent_id=self.config.agent_id)
         if owned.claimed_by != self.journal.runner_id:
@@ -849,9 +859,11 @@ class ArenaRunner:
 
     def stop_child(self) -> None:
         """End the bounded child's whole tree and wait, before releasing the profile lock."""
-        self.stopping = True  # first: nothing the child left behind is served from now on
+        with self._gate:
+            self.stopping = True  # first: nothing the child left behind is forwarded from now on
         if self.child is not None:
-            arena_match.end_tree(self.child)
+            if not arena_match.end_tree(self.child):
+                self.contained = False
             self.child.wait(timeout=10)
             if self.worker is not None:
                 self.worker.join(timeout=30)
