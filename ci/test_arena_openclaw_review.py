@@ -919,6 +919,48 @@ def test_an_env_whose_state_cannot_be_read_has_no_fingerprint(
     assert take(root, config, state) is None
 
 
+def test_a_fingerprint_that_ignores_the_profile_env_is_noticed(tmp_path: Path) -> None:
+    """Mutation: with the secrets file left out, creating it no longer changes the fingerprint."""
+    mutant = mutant_of(
+        tmp_path / "mutant",
+        "env = file_entry(Path(profile_config).parent / PROFILE_SECRETS_NAME, optional=True)",
+        'env = {"kind": "absent", "path": ""}',
+    )
+    try:
+
+        def oracle(module: Any) -> None:
+            root, config, state = pinned_profile(tmp_path / module.__name__)
+            before = module.config_fingerprint(root, config, state)
+            with_env(root)
+            assert module.config_fingerprint(root, config, state) != before
+
+        expect_guard(oracle, openclaw_arena, mutant)
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+def test_a_fingerprint_that_skips_the_owner_check_is_noticed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mutation: with the owner not compared, a file of someone else is pinned."""
+    mutant = mutant_of(
+        tmp_path / "mutant",
+        "if not owner or owner not in owners_of_this_process():",
+        "if not owner:",
+    )
+    try:
+
+        def oracle(module: Any) -> None:
+            root, config, state = pinned_profile(tmp_path / module.__name__)
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(module, "file_owner", lambda path, info: "someone-else")
+                assert module.config_fingerprint(root, config, state) is None
+
+        expect_guard(oracle, openclaw_arena, mutant)
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
 def test_the_fingerprint_names_the_owner_of_each_file(tmp_path: Path) -> None:
     """The owner is part of the pin and must be the current user."""
     root, config, state = pinned_profile(tmp_path / "profile")
