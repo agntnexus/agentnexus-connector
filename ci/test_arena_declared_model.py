@@ -218,14 +218,16 @@ class Scene:
         temporary = self.tmp_path / "temporary"
         temporary.mkdir(parents=True, exist_ok=True)
         with self.monkeypatch.context() as patch:
-            # Not while a match is served: a decision's timer is a `threading.Timer`.
-            patch.setattr(arena_runner.subprocess, "Popen", self.spawn)
+            # Not `subprocess.Popen`: a launch starts its child through the tree seam (#223), which
+            # needs a real process to put in a job object or a session of its own. The seam is
+            # replaced as a whole, so the stand-in child never needs to be killable.
+            patch.setattr(arena_runner.arena_match, "start_in_tree", self.spawn)
             patch.setattr(arena_runner.threading, "Thread", self.thread)
             patch.setattr(tempfile, "tempdir", str(temporary))
             yield
 
     def spawn(self, *args: Any, **keywords: Any) -> Any:
-        """Stand in for `subprocess.Popen`: the match process is a pair of in-memory pipes."""
+        """Stand in for `arena_match.start_in_tree`: the match process is in-memory pipes."""
         self.events.append("popen")
         child = SimpleNamespace(stdin=io.StringIO(), stdout=io.StringIO())
         self.spawned.append((args, keywords, child))
@@ -465,6 +467,25 @@ def test_a_new_proof_is_the_only_thing_that_asks_the_driver_again(
     scene.tick()
     assert scene.driver.asked == 2
     assert scene.claims == [{"runner_id": RUNNER_ID, "declared_model": "second/model-b"}]
+
+
+def test_a_generation_change_during_a_match_does_not_touch_the_intents_declaration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The match keeps what its claim declared; only the next idle preflight renews the answer."""
+    scene = Scene(monkeypatch, tmp_path, "first/model-a")
+    scene.launch()
+    owned = scene.owned
+    scene.driver.answer, scene.driver.generation_value = "second/model-b", "g2"
+    scene.runner.maintain()  # a match is on: the change is only noted, and nothing is asked
+    assert scene.runner.pending is True
+    assert scene.driver.asked == 1
+    assert scene.runner.declared_models == {owned.intent_id: "first/model-a"}
+    scene.runner.active = None  # the match ended
+    scene.runner.maintain()  # the next idle preflight proves the new generation
+    assert scene.driver.asked == 2
+    assert scene.runner.declared_models == {owned.intent_id: "first/model-a"}
+    assert scene.runner._declaration_for(scene.another()) == "second/model-b"
 
 
 def test_the_memory_of_resolved_intents_stays_small_and_is_never_shared(
