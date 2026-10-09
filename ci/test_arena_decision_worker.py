@@ -1199,3 +1199,45 @@ def test_the_parent_ends_the_whole_tree_of_a_match_process_it_cuts_off(
     assert run.forwarded == []
     assert run.events.count("decision_budget_expired") == 1
     assert_no_residue(run)
+
+
+def untreed_match_process(tmp_path: Path) -> Path:
+    """Return a copy of the adapter that starts its decision worker outside a process tree."""
+    source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
+    for original, replacement in (
+        ("message = worker.get(remaining)", "message = worker.get(3600)"),
+        ("self.process = start_in_tree(", "self.process = subprocess.Popen("),
+    ):
+        assert source.count(original) == 1
+        source = source.replace(original, replacement)
+    path = tmp_path / "untreed" / "hermes_arena.py"
+    path.parent.mkdir()
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
+def test_a_worker_and_a_match_process_started_outside_a_tree_leave_the_helper_behind(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Mutation: with no tree under the worker or the match process, a kill reaches only one."""
+    untreed = untreed_match_process(tmp_path)
+    broken = load_mutant(
+        tmp_path / "mutant",
+        arena_runner,
+        "child = hermes_arena.start_in_tree(",
+        "child = subprocess.Popen(",
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    behavior = {"mode": "block", "helper": "detached"}
+    try:
+        run = run_process(
+            monkeypatch, capsys, run_dir, "white", behavior, module=broken, arena=untreed
+        )
+        assert run.forwarded == []
+        with pytest.raises(AssertionError, match="still alive"):
+            assert_no_residue(run)
+    finally:
+        sys.modules.pop(broken.__name__, None)

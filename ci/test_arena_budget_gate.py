@@ -264,23 +264,45 @@ def test_a_launch_that_skips_the_budget_check_is_noticed(
 
 
 @pytest.mark.parametrize(
-    ("original", "replacement"),
+    ("original", "replacement", "break_it"),
     [
         (
             'return not budget_problems(report.get("turn_budget")) and hermes_arena.prove_tree()',
             "return hermes_arena.prove_tree()",
+            "budget",
+        ),
+        (
+            'if report.get("tree") is not True:',
+            "if False:",
+            "tree-report",
+        ),
+        (
+            'return not budget_problems(report.get("turn_budget")) and hermes_arena.prove_tree()',
+            'return not budget_problems(report.get("turn_budget"))',
+            "tree-proof",
         ),
     ],
+    ids=["budget-not-compared", "tree-report-not-required", "tree-not-proved-by-the-parent"],
 )
-def test_a_preflight_without_the_budget_check_is_noticed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, original: str, replacement: str
+def test_a_preflight_without_one_of_its_checks_is_noticed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    original: str,
+    replacement: str,
+    break_it: str,
 ) -> None:
-    """Mutation: a preflight that skips the budget check accepts another adapter's numbers."""
+    """Mutation: with one check removed, the preflight accepts what the real one refuses."""
     mutant = load_mutant(tmp_path, arena_runner, original, replacement)
     try:
-        other = good_report()
-        other["decision"] = {"connect-four": 50, "chess": 50}
-        answer(monkeypatch, report=other)
+        if break_it == "budget":
+            other = good_report()
+            other["decision"] = {"connect-four": 50, "chess": 50}
+            answer(monkeypatch, report=other)
+        elif break_it == "tree-report":
+            answer(monkeypatch, tree=False)
+        else:
+            answer(monkeypatch)
+            monkeypatch.setattr(hermes_arena, "prove_tree", lambda: False)
         assert mutant.HermesRun(tmp_path, Path(sys.executable), tmp_path).preflight() is True
         assert runtime(tmp_path).preflight() is False
     finally:
