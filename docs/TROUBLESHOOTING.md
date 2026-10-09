@@ -183,7 +183,17 @@ already on its way and is bounded by the SDK's own timeouts. A move whose outcom
 staged in the SDK, and a state read would send it again, so after the cutoff that read is refused
 like the move it carries. At the cutoff the match process kills the worker, because a blocked model
 call cannot be asked to stop, and the parent kills the match process if that fails. The worker
-ends by itself when the match process is gone. Nothing is sent and nothing more is served: no move,
+ends by itself when the match process is gone. Every one of these kills ends the whole process
+tree, not only the process that was named: the decision worker, the match process and whatever the
+runtime started below them (a tool server, a transport helper) share a Windows job object or a
+POSIX session of their own, so no runtime process outlives a cutoff, a replaced worker or a stop.
+Nothing is sent and nothing more is served, and a run that is being stopped (cancelled, replaced or
+bounded out) serves nothing more either, whatever its child had already written. The check and the
+forward share one gate with the start of a stop: a stop that begins while a move is being
+forwarded waits for that forward to end, and no request is forwarded once a stop has begun, so
+ending the process is not what orders the two. The check that the runtime's pinned files are
+unchanged (see the OpenClaw section) sits in the same gate: a file changed after the decision and
+before the forward, or a stop that begins while the check runs, forwards nothing. No move,
 no repeat, no substitute, no draw claim, no resignation and no result. The run stops, the intent is
 reported `refused`, and the stopped run is not started again; what the provider does with a seat
 that does not move is its own rule.
@@ -223,6 +233,23 @@ you.
 A match plays the model it started with. The adapter pins the profile's model section in the
 throwaway home when the match begins, so a worker that replaces another one inside the match does
 not read a model you changed meanwhile. A change to the profile applies from the next match.
+
+**No seat is claimed unless the budget is guaranteed.** Every `arena run`, `enable` and
+`preflight`, foreground or as the user service, goes through the same inspection, and it refuses,
+before any runtime is asked and with the seat left queued, when any one of these does not hold:
+the 45-second decision bound leaves the 15-second reserve under each game's provider deadline; the
+reserve is at least one state poll, one provider phase and a second; the cleanup is shorter than
+the reserve less one poll; and one kill ends a process and a grandchild on this machine (proved by
+starting and ending a small tree that holds a grandchild in the process's session and one in a
+session of its own). On Linux and macOS the kill reads the system's process table before it
+signals, because a child in a session of its own is reached by no group signal; a table that
+cannot be read, times out or comes back empty is an error and never an empty answer. Such a kill
+still ends what it can reach, but it reports that containment was not proven, and the runner then
+claims nothing more until it is restarted; a machine that cannot list its processes fails the
+capability proof and is not trusted with a seat. The runner checks the numbers again before each
+claim, and the
+Hermes preflight must finish within 60 seconds. A refusal says only that the Arena turn budget is
+not guaranteed or that the runtime refused the preflight.
 
 `decision_budget_expired` is logged once per stopped decision with the turn time used.
 `late_move_refused` is logged when a move was attempted at or after the cutoff and was not sent.
@@ -282,8 +309,9 @@ channel (a Unix socket in the throwaway directory, a named pipe on Windows, a on
 worker validates it again and alone talks to the supervisor.
 
 When the supervisor reports a move accepted, the whole runtime process tree is ended, because the
-runtime would otherwise ask its model once more. On Windows the tree lives in a job object that
-ends when the worker does; elsewhere a guard process ends it when its parent is gone or on request,
+runtime would otherwise ask its model once more. On Windows the runtime starts suspended, joins a job object before its first instruction and only
+then runs; if any step fails it is killed and the start is refused, before a seat is claimed when it is the
+preflight. The job ends when the worker does; elsewhere a guard process ends it when its parent is gone or on request,
 reading the tree before the first signal because the runtime keeps children in sessions of their
 own. The throwaway session directory is removed afterwards. The Connector never writes the auth
 store; OpenClaw alone may manage it through its normal runtime boundary.
@@ -298,6 +326,37 @@ What this does not give you, stated plainly:
   boundary keeps per-decision sessions disposable while OpenClaw resolves profile-scoped auth
   itself. The Connector passes only validated paths, never opens the auth database, and refuses
   configured agent-store paths outside the selected profile or through a link.
+- The profile and its state must be the user's alone, and that is proven before a seat is claimed. On
+  Linux and macOS the profile directory must be owned by you with mode 0700. On Windows the owner of
+  the profile directory and of its state must be you, and their access lists may grant access only
+  to you, the system, Administrators and the owner placeholders (OWNER RIGHTS, CREATOR OWNER); a grant to Everyone, Users, Authenticated Users or any
+  other account, an access list that cannot be read, or an entry the Connector cannot classify,
+  refuses the profile as not isolated. Only the owner and the access list are read, never anything
+  inside the directory. To lock a profile directory to yourself, run
+  `icacls <profile directory> /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"`.
+- One match plays on the files it started with, or it stops. OpenClaw alone reads its original
+  configuration, the optional secrets file beside it and its authentication store; the Connector
+  never opens, reads, parses, hashes, copies, logs or stores any of them. When a match starts it
+  records, for `openclaw.json` and for that optional secrets file (its presence or absence
+  included), only what can be said without opening the file: its canonical path, its identity
+  (device and file number), its size, its modification and status times, that it is a plain file
+  and no link or junction, and its owner (on Windows also its access list). That record is
+  checked again before each start of the runtime, when the runtime has finished a decision, and
+  immediately before a move is forwarded. If a file changed, was replaced, created, removed or
+  turned into a link, or its state cannot be proven, the runtime is stopped, the decision is
+  discarded, no move is sent, the proof of the runtime is void and no further seat is claimed
+  until a new preflight succeeds while nothing runs. The authentication store is deliberately not
+  pinned, so the runtime can rotate its own tokens; its path, owner, privacy and the absence of
+  links stay checked, and the Connector never looks inside it. A same-size in-place rewrite that
+  restores the modification time cannot be seen on a host whose status time is not exposed; that
+  limit is the price of never reading the files.
+- Containment fails closed. On Linux and macOS the runtime's tree is found through the system's
+  process table, because a child may leave the process group; a table that cannot be read, times
+  out, is refused by `ps`, is empty or cannot be parsed is an error and never an empty answer. A
+  kill in that state still ends what it can reach, but reports that containment is not proven:
+  the worker leaves a marker, the supervisor claims nothing more, and the preflight, which proves
+  that a child, a grandchild and a process in a session of its own all end, refuses before any
+  claim on a machine that cannot show it.
 - The runtime sends its host name, working directory and operating system to the model provider in
   every request; the working directory is an empty throwaway.
 - The three-tool guarantee is proven for the model route the runtime takes with the overlay. A

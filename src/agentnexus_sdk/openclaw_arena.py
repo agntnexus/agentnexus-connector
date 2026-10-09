@@ -24,9 +24,12 @@ import importlib.util
 import json
 import os
 import queue
+import re
 import secrets
 import shutil
 import signal
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -58,11 +61,17 @@ SCRATCH_ENV = "AGENTNEXUS_ARENA_SCRATCH"
 PROFILE_ROOT_ENV = "AGENTNEXUS_OPENCLAW_PROFILE_ROOT"
 PROFILE_CONFIG_ENV = "AGENTNEXUS_OPENCLAW_PROFILE_CONFIG"
 PROFILE_STATE_ENV = "AGENTNEXUS_OPENCLAW_PROFILE_STATE"
+#: What the supervisor pinned about the profile's configuration file for this match: metadata only.
+PIN_ENV = "AGENTNEXUS_OPENCLAW_PIN"
 #: The server name of the bridge in the throwaway configuration; the runtime prefixes its tools.
 SERVER = "arena"
 PREFIXED = tuple(f"{SERVER}__{name}" for name in sorted(arena.TOOLS))
 #: How long the runtime's own process gets to leave before the whole tree is killed.
 TERM_SECONDS = 1.5
+#: The optional secrets file beside the configuration. Only its state is pinned, never its content.
+PROFILE_SECRETS_NAME = ".env"  # metadata only, never opened
+#: What the guard exits with when it ended the runtime's tree without being able to list it.
+UNCONTAINED_EXIT = 97
 #: The most the supervisor-facing worker waits for the runtime to start before the decision.
 VERSION_SECONDS = 60
 #: What the runtime's own deadline is shortened by, so it ends before the supervisor's cutoff.
@@ -74,14 +83,211 @@ FORCE = getattr(signal, "SIGKILL", signal.SIGTERM)
 KEPT = {"PATH", "SYSTEMROOT", "WINDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR"}
 
 
+SID = re.compile(r"S-1-\d+(?:-\d+)+")
+#: The accounts that can take any file on Windows anyway: the system and the Administrators group.
+SYSTEM_SID = "S-1-5-18"
+ADMINISTRATORS_SID = "S-1-5-32-544"
+ACE_ALLOWED, ACE_DENIED = 0, 1
+#: Placeholders for the object's own owner (OWNER RIGHTS, CREATOR OWNER): the owner is checked to be
+#: the user, so a grant to it is a grant to the user.
+OWNER_PLACEHOLDERS = frozenset({"S-1-3-4", "S-1-3-0"})
+
+
+def acl_is_private(owner: str, entries: list[tuple[int, str]] | None, user: str) -> bool:
+    """Decide from an owner and an access list whether only `user` (and the system) can reach it.
+
+    The owner must be the user. Every grant must be to the user, to the system or to the
+    Administrators group; a grant to anyone else - Everyone, Users, Authenticated Users, another
+    account - is refusal. Denials are ignored, they only narrow. A missing list (which grants
+    everyone everything), an entry of a kind that is not a plain grant or denial, and anything that
+    is not a well-formed security identifier cannot be judged, so they refuse.
+    """
+    if entries is None or not SID.fullmatch(user) or owner != user:
+        return False
+    allowed = {user, SYSTEM_SID, ADMINISTRATORS_SID} | OWNER_PLACEHOLDERS
+    for kind, sid in entries:
+        if kind == ACE_DENIED:
+            continue
+        if kind != ACE_ALLOWED or not SID.fullmatch(sid) or sid not in allowed:
+            return False
+    return True
+
+
+def windows_security(path: Path) -> tuple[str, list[tuple[int, str]] | None] | None:
+    """Read a directory's owner and access list (Windows), or `None` when it cannot be read.
+
+    Only the security descriptor is asked for; nothing inside the directory is opened or listed.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return None
+    advapi.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi.GetNamedSecurityInfoW.argtypes = (
+        wintypes.LPCWSTR,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi.GetAclInformation.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_int,
+    )
+    advapi.GetAce.argtypes = (ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p))
+    advapi.ConvertSidToStringSidW.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+
+    def text_of(sid: int | None) -> str | None:
+        pointer = ctypes.c_void_p()
+        if not sid or not advapi.ConvertSidToStringSidW(sid, ctypes.byref(pointer)):
+            return None
+        try:
+            return ctypes.wstring_at(pointer.value) if pointer.value else None
+        finally:
+            kernel.LocalFree(pointer)
+
+    class AclSize(ctypes.Structure):
+        _fields_ = (("count", wintypes.DWORD), ("used", wintypes.DWORD), ("free", wintypes.DWORD))
+
+    owner, dacl, descriptor = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    status = advapi.GetNamedSecurityInfoW(
+        str(path),
+        1,  # SE_FILE_OBJECT
+        0x1 | 0x4,  # OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+        ctypes.byref(owner),
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(descriptor),
+    )
+    if status != 0:
+        return None
+    try:
+        owner_text = text_of(owner.value)
+        if owner_text is None:
+            return None
+        if not dacl.value:
+            return owner_text, None
+        size = AclSize()
+        if not advapi.GetAclInformation(dacl, ctypes.byref(size), ctypes.sizeof(size), 2):
+            return None
+        entries: list[tuple[int, str]] = []
+        for index in range(size.count):
+            ace = ctypes.c_void_p()
+            if not advapi.GetAce(dacl, index, ctypes.byref(ace)) or not ace.value:
+                return None
+            kind = ctypes.c_ubyte.from_address(ace.value).value
+            if kind in (ACE_ALLOWED, ACE_DENIED):
+                sid = text_of(ace.value + 8)
+                if sid is None:
+                    return None
+                entries.append((kind, sid))
+            else:
+                entries.append((kind, ""))
+        return owner_text, entries
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+def windows_current_sid() -> str:
+    """Return the security identifier of the user this process runs as (Windows), or `""`."""
+    return _token_sid(1)  # TokenUser
+
+
+def windows_token_owner() -> str:
+    """Return the owner that objects this process creates get (Windows), or `""`.
+
+    For an ordinary token that is the user. For an elevated administrator it is the Administrators
+    group, and a file that process created is owned by it.
+    """
+    return _token_sid(4)  # TokenOwner
+
+
+def _token_sid(information_class: int) -> str:
+    """Return a security identifier from this process's token (Windows), or `""`."""
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return ""
+    kernel.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+    advapi.OpenProcessToken.argtypes = (
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi.GetTokenInformation.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    advapi.ConvertSidToStringSidW.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+    token = ctypes.c_void_p()
+    if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 0x8, ctypes.byref(token)):
+        return ""
+    try:
+        needed = wintypes.DWORD()
+        advapi.GetTokenInformation(token, information_class, None, 0, ctypes.byref(needed))
+        if not needed.value:
+            return ""
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not advapi.GetTokenInformation(
+            token, information_class, buffer, needed, ctypes.byref(needed)
+        ):
+            return ""
+        sid = ctypes.c_void_p.from_buffer(buffer).value
+        pointer = ctypes.c_void_p()
+        if not sid or not advapi.ConvertSidToStringSidW(sid, ctypes.byref(pointer)):
+            return ""
+        try:
+            return ctypes.wstring_at(pointer.value) if pointer.value else ""
+        finally:
+            kernel.LocalFree(pointer)
+    finally:
+        kernel.CloseHandle(token)
+
+
+def windows_private(path: Path) -> bool:
+    """Return whether only the current user (and the system accounts) can reach this directory."""
+    try:
+        security = windows_security(path)
+        user = windows_current_sid()
+        creator = windows_token_owner()
+    except (OSError, ValueError):
+        return False
+    if security is None:
+        return False
+    owner = user if security[0] and security[0] == creator else security[0]
+    return acl_is_private(owner, security[1], user)
+
+
 def profile_context_valid(profile_root: Path, profile_config: Path, profile_state: Path) -> bool:
     """Accept only the non-linked OpenClaw config and state this Connector profile owns.
 
     Nothing is opened: only paths and their metadata are looked at. The configuration and the state
-    must lie below the profile's own directory, with no link or junction on the way down, and on a
+    must lie below the profile's own directory, with no link or junction on the way down. On a
     system with owners and modes the profile directory must be the current user's and closed to
-    everyone else, because the runtime's own auth store lives in that state and nobody else may
-    reach it. Anything else is refused, and a refusal comes before any seat is claimed.
+    everyone else; on Windows the owner and the access list of the profile and of its state must
+    say the same (the user, the system and Administrators only). The runtime's own auth store lives
+    in that state and nobody else may reach it. Anything that cannot be proven is refused, and a
+    refusal comes before any seat is claimed.
     """
     try:
         root = Path(profile_root).absolute()
@@ -111,9 +317,126 @@ def profile_context_valid(profile_root: Path, profile_config: Path, profile_stat
             info = root.stat()
             if info.st_uid != os.geteuid() or info.st_mode & 0o077:
                 return False
+        elif sys.platform == "win32" and not (windows_private(root) and windows_private(state)):
+            # No owner and mode here: the owner and the access list of the profile and of its
+            # state must say it is the user's alone, or it is not proven and not accepted.
+            return False
     except (OSError, RuntimeError, ValueError):
         return False
     return True
+
+
+def current_owner() -> str:
+    """Return who this process runs as: the user id (POSIX) or the security identifier (Windows)."""
+    if sys.platform == "win32":
+        return windows_current_sid()
+    return str(os.geteuid())
+
+
+def owners_of_this_process() -> frozenset[str]:
+    """Return the owners a file of this user may have: the user and, on Windows, the token owner."""
+    owners = {current_owner()}
+    if sys.platform == "win32":
+        owners.add(windows_token_owner())
+    return frozenset(owners - {""})
+
+
+def file_owner(path: Path, info: os.stat_result) -> str:
+    """Return who owns this file, in the same notation as `current_owner`, or `""`."""
+    if sys.platform == "win32":
+        security = windows_security(path)
+        return security[0] if security else ""
+    return str(info.st_uid)
+
+
+def file_entry(path: Path, *, optional: bool) -> dict[str, str] | None:
+    """Describe one file by what can be said without opening it; `None` if that cannot be proven.
+
+    A file that does not exist is `absent` only if it is optional and the file system says it is
+    not there; any other failure is not proof of anything. A link, anything that is not a plain
+    file, a file without an identity, a file that is not the current user's and (Windows) one whose
+    access list lets anyone else in are all refused.
+    """
+    path = Path(path).absolute()
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        if not optional:
+            return None
+        try:
+            return {"path": str(path.parent.resolve(strict=True) / path.name), "kind": "absent"}
+        except (OSError, RuntimeError):
+            return None
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(info.st_mode) or info.st_ino == 0:
+            return None
+        owner = file_owner(path, info)
+        if not owner or owner not in owners_of_this_process():
+            return None
+        if sys.platform == "win32" and not windows_private(path):
+            return None
+        return {
+            "path": str(path.resolve(strict=True)),
+            "device": str(info.st_dev),
+            "inode": str(info.st_ino),
+            "size": str(info.st_size),
+            "modified_ns": str(info.st_mtime_ns),
+            "changed_ns": str(info.st_ctime_ns),
+            "kind": "file",  # metadata
+            "owner": owner,
+        }
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def config_fingerprint(
+    profile_root: Path, profile_config: Path, profile_state: Path
+) -> dict[str, dict[str, str]] | None:
+    """Describe the profile's configuration file and its optional secrets file without opening them.
+
+    The runtime alone reads its original configuration, its secrets file and its authentication
+    store. The Connector keeps, for `openclaw.json` and for the optional profile secrets file beside
+    it (presence or absence included), only its canonical path, its identity (device and file
+    number), its size, its modification and status times, that it is a plain file and no link or
+    junction,
+    and its owner (on Windows also its access list), under the owner and privacy boundary that
+    `profile_context_valid` already checks. Nothing is opened, read, parsed, hashed or copied, and
+    nothing derived from a content is in the fingerprint. The authentication store is not pinned,
+    so the runtime may rotate its own tokens. If any part cannot be proven, there is no
+    fingerprint and the match is not played.
+    """
+    try:
+        if not profile_context_valid(profile_root, profile_config, profile_state):
+            return None
+        config = file_entry(profile_config, optional=False)
+        env = file_entry(Path(profile_config).parent / PROFILE_SECRETS_NAME, optional=True)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if config is None or env is None:
+        return None
+    return {"config": config, "env": env}
+
+
+def pin_text(fingerprint: dict[str, dict[str, str]]) -> str:
+    """Return the fingerprint as the one stable text that is carried to the worker."""
+    return json.dumps(fingerprint, sort_keys=True)
+
+
+def pinned_state_holds(
+    pin: str, profile_root: Path, profile_config: Path, profile_state: Path
+) -> bool:
+    """Return whether the configuration file is, provably, still the one that was pinned."""
+    current = config_fingerprint(profile_root, profile_config, profile_state)
+    return current is not None and pin_text(current) == pin
+
+
+class ProfileChangedError(RuntimeError):
+    """The profile's configuration file is no longer the one the match started with."""
+
+
+ProfileChanged = ProfileChangedError
 
 
 def agent_directories_valid(
@@ -343,25 +666,44 @@ def exec_arguments(
 # ---------------------------------------------------------------------------------------------
 
 
-def descendants(root: int) -> set[int]:
-    """Return the pids below `root` (POSIX), read from the process table now."""
-    if sys.platform == "win32":
-        return set()
+def process_table() -> dict[int, list[int]]:
+    """Return every parent's children from the system's process table, or raise `OSError`.
+
+    A table that cannot be listed, that times out, that the lister refuses, that is empty or that
+    cannot be parsed, even in a single line, is an error and never an empty answer: an empty
+    answer would read as "nothing below this process", and a kill would stop short of what it
+    could not see.
+    """
     try:
-        table = subprocess.run(  # noqa: S603 - a fixed system command
+        listing = subprocess.run(  # noqa: S603 - a fixed system command
             [shutil.which("ps") or "/bin/ps", "-A", "-o", "pid=,ppid="],
             capture_output=True,
             text=True,
             timeout=10,
             check=False,
-        ).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return set()
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise OSError("The process table could not be read.") from error
     children: dict[int, list[int]] = {}
-    for line in table.splitlines():
+    for line in (listing.stdout or "").splitlines():
+        if not line.strip():
+            continue
         parts = line.split()
-        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+        # Every line is a pid and a parent pid, and nothing else. A line that is not is not
+        # skipped: a table with one broken line may hide the very process that matters.
+        if len(parts) != 2 or not all(re.fullmatch(r"[0-9]+", part) for part in parts):
+            raise OSError("The process table could not be read.")  # malformed line
+        children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    if listing.returncode != 0:
+        raise OSError("The process table could not be read.")
+    if not children:
+        raise OSError("The process table could not be read.")  # empty
+    return children
+
+
+def descendants(root: int) -> set[int]:
+    """Return the pids below `root` from the process table; raise `OSError` if it is unreadable."""
+    children = process_table()
     found: set[int] = set()
     pending = [root]
     while pending:
@@ -383,23 +725,35 @@ def alive(pid: int) -> bool:
     return True
 
 
-def kill_tree(root: int, known: set[int] | None = None) -> None:
+def kill_tree(root: int, known: set[int] | None = None) -> bool:
     """End `root` and everything below it, politely first and then for certain (POSIX).
 
     The tree is read before the first signal, because a child that outlives its parent is no longer
     found through it. SIGTERM goes to the root alone, which tears its own tree down; whoever is
     still there after a short wait, from the earlier reading or the current one, is killed.
+
+    If the process table cannot be read, the root and what is known are still killed, but the answer
+    is `False`: the tree is not proven gone, and the caller must not say it is.
     """
-    members = {root} | (known or set()) | descendants(root)
+    complete = True
+    members = {root} | (known or set())
+    try:
+        members |= descendants(root)
+    except OSError:
+        complete = False
     with contextlib.suppress(OSError):
         os.kill(root, signal.SIGTERM)
     end = time.monotonic() + TERM_SECONDS
     while time.monotonic() < end and alive(root):
         time.sleep(0.05)
-    members |= descendants(root)
+    try:
+        members |= descendants(root)
+    except OSError:
+        complete = False
     for pid in members:
         with contextlib.suppress(OSError):
             os.kill(pid, FORCE)
+    return complete  # kill_tree
 
 
 def guard_main(command: list[str]) -> int:
@@ -407,15 +761,16 @@ def guard_main(command: list[str]) -> int:
 
     Started by the worker, so that a worker killed outright still leaves no runtime behind: the
     guard notices the change of parent within a quarter of a second, and a TERM from the worker is
-    the ordinary way to end a decision.
+    the ordinary way to end a decision. If it ended the tree without being able to list it, it
+    exits with `UNCONTAINED_EXIT`, which the worker reads as containment that is not proven.
     """
     parent = os.getppid()
     child = subprocess.Popen(command, stdin=subprocess.DEVNULL)  # noqa: S603 - the worker's argv
     known: set[int] = set()
 
     def teardown(*_: object) -> None:
-        kill_tree(child.pid, known)
-        os._exit(143)
+        complete = kill_tree(child.pid, known)
+        os._exit(143 if complete else UNCONTAINED_EXIT)
 
     for name in ("SIGTERM", "SIGINT", "SIGHUP"):
         signal.signal(getattr(signal, name), teardown)
@@ -424,7 +779,8 @@ def guard_main(command: list[str]) -> int:
         if os.getppid() != parent:
             teardown()
         if time.monotonic() - last > 1.0:
-            known |= descendants(child.pid)
+            with contextlib.suppress(OSError):
+                known |= descendants(child.pid)
             last = time.monotonic()
         time.sleep(0.25)
     for pid in known:
@@ -435,10 +791,47 @@ def guard_main(command: list[str]) -> int:
 
 
 class WindowsJob:
-    """A job object that ends every process in it when its last handle closes (Windows)."""
+    """A job object that ends every process in it when it is ended or its last handle closes.
 
-    def __init__(self) -> None:
+    Every answer of Windows is checked; a call that fails raises `OSError` and the job is not used.
+    """
+
+    def __init__(self, kernel: Any = None, ntdll: Any = None) -> None:
         """Create the job with kill-on-close, so a killed worker leaves no runtime behind."""
+        if kernel is None:
+            kernel, ntdll = self._libraries()
+        self._kernel, self._ntdll = kernel, ntdll
+        self.handle: int | None = kernel.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise OSError("The process job could not be created.")
+        if not self._limit_to_kill_on_close():
+            self.close()
+            raise OSError("The process job could not be limited.")
+
+    @staticmethod
+    def _libraries() -> tuple[Any, Any]:
+        """Load the Windows libraries with their argument and result types declared."""
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+        kernel.SetInformationJobObject.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        )
+        kernel.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        kernel.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        ntdll = ctypes.WinDLL("ntdll")  # type: ignore[attr-defined]
+        ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+        ntdll.NtResumeProcess.restype = ctypes.c_long
+        return kernel, ntdll
+
+    def _limit_to_kill_on_close(self) -> bool:
         import ctypes
         from ctypes import wintypes
 
@@ -468,29 +861,50 @@ class WindowsJob:
                 ("PeakJobMemoryUsed", ctypes.c_size_t),
             )
 
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
-        kernel.CreateJobObjectW.restype = wintypes.HANDLE
-        kernel.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
-        kernel.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
-        self._kernel = kernel
-        self.handle = kernel.CreateJobObjectW(None, None)
         information = Extended()
         information.Basic.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        kernel.SetInformationJobObject(
-            self.handle, 9, ctypes.byref(information), ctypes.sizeof(information)
+        return bool(
+            self._kernel.SetInformationJobObject(
+                self.handle, 9, ctypes.byref(information), ctypes.sizeof(information)
+            )
         )
 
-    def add(self, process: subprocess.Popen[Any]) -> None:
-        """Put a started process, and so everything it starts, in the job."""
-        self._kernel.AssignProcessToJobObject(self.handle, int(process._handle))  # type: ignore[attr-defined]
+    def adopt(self, process: subprocess.Popen[Any]) -> None:
+        """Put a process that was started suspended in the job, and only then let it run."""
+        handle = int(process._handle)  # type: ignore[attr-defined]
+        if not self._kernel.AssignProcessToJobObject(self.handle, handle):
+            raise OSError("The process could not be put in its job.")
+        if self._ntdll.NtResumeProcess(handle) != 0:
+            raise OSError("The process of its job could not be resumed.")
 
-    def end(self) -> None:
-        """End every process in the job now."""
-        self._kernel.TerminateJobObject(self.handle, 1)
+    def end(self) -> bool:
+        """End every process in the job now; say whether Windows did it."""
+        return bool(self.handle) and bool(self._kernel.TerminateJobObject(self.handle, 1))
 
     def close(self) -> None:
         """Release the job; whatever is still in it ends."""
-        self._kernel.CloseHandle(self.handle)
+        handle, self.handle = self.handle, None
+        if handle:
+            self._kernel.CloseHandle(handle)
+
+
+def start_in_job(argv: list[str], job: WindowsJob, **options: Any) -> subprocess.Popen[Any]:
+    """Start a process suspended, put it in the job, and resume it; fail with nothing running.
+
+    The process cannot start anything before it is in the job. If joining or resuming fails, the
+    process is killed, the job is released and the start raises.
+    """
+    flags = options.pop("creationflags", 0) | 0x4  # CREATE_SUSPENDED
+    process = subprocess.Popen(argv, creationflags=flags, **options)  # noqa: S603 - the caller's argv
+    try:
+        job.adopt(process)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            process.kill()
+        job.end()
+        job.close()
+        raise
+    return process
 
 
 class Run:
@@ -501,18 +915,26 @@ class Run:
         self.output = open(work / "out.json", "wb")  # noqa: SIM115 - closed in `end`
         self.job: WindowsJob | None = None
         self.tree: set[int] = set()
+        #: False once an end of this run could not prove that its whole tree is gone.
+        self.contained = True
         if sys.platform == "win32":
-            self.job = WindowsJob()
-            self.process = subprocess.Popen(  # noqa: S603 - the runtime and this worker's argv
-                argv,
-                env=environment,
-                cwd=work / "cwd",
-                stdin=subprocess.DEVNULL,
-                stdout=self.output,
-                stderr=subprocess.DEVNULL,
-                creationflags=0x08000000,  # CREATE_NO_WINDOW
-            )
-            self.job.add(self.process)
+            try:
+                self.job = WindowsJob()
+                self.process = start_in_job(
+                    argv,
+                    self.job,
+                    env=environment,
+                    cwd=work / "cwd",
+                    stdin=subprocess.DEVNULL,
+                    stdout=self.output,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=0x08000000,  # CREATE_NO_WINDOW
+                )
+            except BaseException:
+                if self.job is not None:
+                    self.job.close()
+                self.output.close()
+                raise
         else:
             self.process = subprocess.Popen(  # noqa: S603 - the runtime behind this guard
                 [sys.executable, "-I", str(Path(__file__).resolve()), "--guard", "--", *argv],
@@ -528,27 +950,132 @@ class Run:
         return self.process.poll() is None
 
     def end(self) -> int | None:
-        """End the whole tree and reap it; return the exit status the runtime gave, if any."""
+        """End the whole tree and reap it; return the exit status the runtime gave, if any.
+
+        Whether the tree is provably gone is `contained`: a process table that cannot be read, a
+        guard that could not list the tree, or a job object that would not end all say no.
+        """
         if self.job is not None:
-            self.job.end()
+            if not self.job.end():
+                self.contained = False
         elif self.process.poll() is None:
-            self.tree = descendants(self.process.pid)
+            try:
+                self.tree = descendants(self.process.pid)
+            except OSError:
+                self.contained = False
             with contextlib.suppress(OSError):
                 self.process.terminate()
             try:
                 self.process.wait(timeout=TERM_SECONDS * 2)
             except subprocess.TimeoutExpired:
-                kill_tree(self.process.pid, self.tree)
+                if not kill_tree(self.process.pid, self.tree):
+                    self.contained = False
         for pid in self.tree:
             if alive(pid):
                 with contextlib.suppress(OSError):
                     os.kill(pid, FORCE)
         with contextlib.suppress(subprocess.TimeoutExpired):
             self.process.wait(timeout=5)
+        if self.process.returncode == UNCONTAINED_EXIT:
+            self.contained = False
         if self.job is not None:
             self.job.close()
         self.output.close()
         return self.process.returncode
+
+
+class ContainmentLostError(RuntimeError):
+    """A runtime's tree could not be shown to be gone."""
+
+
+ContainmentLost = ContainmentLostError
+
+
+def note_uncontained(scratch: Path) -> None:
+    """Leave the news in the match's scratch for the supervisor: nothing more is claimed."""
+    with contextlib.suppress(OSError):
+        (Path(scratch) / arena.UNCONTAINED_MARKER).write_bytes(b"")
+
+
+@contextlib.contextmanager
+def marks_lost_containment(scratch: Path) -> Any:
+    """Leave the marker if the block lost containment, and let the error go on."""
+    try:
+        yield
+    except ContainmentLostError:
+        note_uncontained(scratch)
+        raise
+
+
+PROOF = """\
+import os, socket, subprocess, sys, time
+port = int(sys.argv[1])
+CHILD = (
+    "import socket, sys, time\\n"
+    "s = socket.create_connection(('127.0.0.1', int(sys.argv[1])))\\n"
+    "time.sleep(60)\\n"
+)
+options = {"start_new_session": True} if os.name != "nt" else {"creationflags": 0x208}
+subprocess.Popen([sys.executable, "-c", CHILD, str(port)], **options)
+subprocess.Popen([sys.executable, "-c", CHILD, str(port)])
+s = socket.create_connection(("127.0.0.1", port))
+time.sleep(60)
+"""
+
+
+def prove_containment() -> bool:
+    """Show here that ending a run ends a child, a grandchild and one in a session of its own.
+
+    Each of the three holds a socket to a listener here, and a socket closes only when its process
+    is gone, so the proof does not depend on whether a dead process is reaped. A machine that cannot
+    list its processes (POSIX) or cannot end a job (Windows) fails, and is not trusted with a seat.
+    """
+    server = socket.socket()
+    accepted: list[socket.socket] = []
+    try:
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+
+        def accept() -> None:
+            with contextlib.suppress(OSError):
+                while True:
+                    accepted.append(server.accept()[0])
+
+        threading.Thread(target=accept, daemon=True).start()
+        with tempfile.TemporaryDirectory(
+            prefix="agentnexus-contain-", ignore_cleanup_errors=True
+        ) as scratch:
+            work = Path(scratch)
+            make_world(work)
+            script = work / "tree.py"
+            script.write_text(PROOF, encoding="utf-8")
+            environment = {k: v for k, v in os.environ.items() if k.upper() in KEPT}
+            run = Run(
+                [sys.executable, str(script), str(server.getsockname()[1])], environment, work
+            )
+            deadline = time.monotonic() + 30
+            while len(accepted) < 3 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            started = len(accepted) == 3
+            run.end()
+            if not started or not run.contained:
+                return False
+            for connection in accepted:
+                connection.settimeout(8)
+                try:
+                    if connection.recv(1) != b"":
+                        return False
+                except TimeoutError:
+                    return False
+                except ConnectionResetError:
+                    continue
+            return True
+    except OSError:
+        return False
+    finally:
+        for connection in accepted:
+            connection.close()
+        server.close()
 
 
 def bounded_run(
@@ -561,6 +1088,8 @@ def bounded_run(
         time.sleep(0.05)
     timed_out = run.running()
     status = run.end()
+    if not run.contained:
+        raise ContainmentLostError("The runtime's process tree could not be proven gone.")
     output = work / "out.json"
     try:
         if output.stat().st_size > 65536:
@@ -610,6 +1139,7 @@ class Decision:
         """Start with no move accepted."""
         self.accepted = threading.Event()
         self.over = threading.Event()
+        self.changed = threading.Event()
         self.lock = threading.Lock()
 
 
@@ -628,10 +1158,21 @@ def worker_main(
     profile_root = Path(os.environ[PROFILE_ROOT_ENV])
     profile_config = Path(os.environ[PROFILE_CONFIG_ENV])
     profile_state = Path(os.environ[PROFILE_STATE_ENV])
-    if config != profile_config or not profile_context_valid(
-        profile_root, profile_config, profile_state
+    pin = os.environ.get(PIN_ENV, "")
+    if (
+        not pin
+        or config != profile_config
+        or not profile_context_valid(profile_root, profile_config, profile_state)
     ):
         raise RuntimeError("OpenClaw profile context is no longer owned.")
+
+    def unchanged() -> bool:
+        return pinned_state_holds(pin, profile_root, profile_config, profile_state)
+
+    def check() -> None:
+        """Raise unless the configuration file is, provably, as the match started with it."""
+        if not unchanged():
+            raise ProfileChanged("The profile's configuration changed during the match.")
 
     def pump() -> None:
         # The match process closing this pipe means it is gone. The guard ends the runtime's tree.
@@ -648,32 +1189,36 @@ def worker_main(
     with contextlib.redirect_stdout(sys.stderr):
         boot = scratch / "boot"
         make_world(boot)
-        version, _ = bounded_run(
-            [*command, "--version"],
-            cli_environment(
-                dict(os.environ),
+        check()
+        with marks_lost_containment(scratch):
+            version, _ = bounded_run(
+                [*command, "--version"],
+                cli_environment(
+                    dict(os.environ),
+                    boot,
+                    boot,
+                    boot,
+                    profile_root=profile_root,
+                    profile_config=profile_config,
+                    profile_state=profile_state,
+                ),
                 boot,
-                boot,
-                boot,
-                profile_root=profile_root,
-                profile_config=profile_config,
-                profile_state=profile_state,
-            ),
-            boot,
-            VERSION_SECONDS,
-        )
+                VERSION_SECONDS,
+            )
         if version != 0:
             raise RuntimeError("The runtime does not start.")
         # Asked once, before the worker is ready: a start of the runtime costs seconds that a
         # decision's budget does not have.
-        others = server_names(
-            command,
-            config,
-            boot,
-            profile_root=profile_root,
-            profile_config=profile_config,
-            profile_state=profile_state,
-        )
+        check()
+        with marks_lost_containment(scratch):
+            others = server_names(
+                command,
+                config,
+                boot,
+                profile_root=profile_root,
+                profile_config=profile_config,
+                profile_state=profile_state,
+            )
         send({"ready": True})
         while True:
             line = arena.line_document(incoming.get())
@@ -691,6 +1236,8 @@ def worker_main(
                 profile_root,
                 profile_config,
                 profile_state,
+                check,
+                unchanged,
             )
 
 
@@ -705,8 +1252,15 @@ def run_decision(
     profile_root: Path,
     profile_config: Path,
     profile_state: Path,
+    check: Callable[[], None],
+    unchanged: Callable[[], bool],
 ) -> None:
-    """Make one decision with one run of the runtime; every ending is one fixed message."""
+    """Make one decision with one run of the runtime; every ending is one fixed message.
+
+    The configuration file is checked immediately before the runtime starts, again before each
+    request is relayed upstream and once more when the runtime has finished. A change at any of
+    them ends the runtime path, discards the decision and sends no move.
+    """
     work = Path(tempfile.mkdtemp(prefix="d", dir=scratch))
     state = Decision()
     run: Run | None = None
@@ -736,9 +1290,12 @@ def run_decision(
                 disabled=others,
             ),
         )
-        threading.Thread(target=relay, args=(listener, state, incoming, send), daemon=True).start()
+        threading.Thread(
+            target=relay, args=(listener, state, incoming, send, unchanged), daemon=True
+        ).start()
         seconds = max(10, int(decision["seconds"]) - MARGIN_SECONDS)
         include_root = config.parent if config is not None else work
+        check()
         run = Run(
             exec_arguments(command, prompt, seconds, overlay, work),
             cli_environment(
@@ -753,8 +1310,16 @@ def run_decision(
             work,
         )
         end = time.monotonic() + decision["seconds"] + MARGIN_SECONDS
-        while not state.accepted.is_set() and run.running() and time.monotonic() < end:
+        while (
+            not state.accepted.is_set()
+            and not state.changed.is_set()
+            and run.running()
+            and time.monotonic() < end
+        ):
             time.sleep(0.05)
+        if state.changed.is_set():
+            raise ProfileChanged("The profile's configuration changed during the decision.")
+        check()
         if state.accepted.is_set():
             outcome = "completed"
             send({"decision": "completed"})
@@ -765,6 +1330,9 @@ def run_decision(
     finally:
         state.over.set()
         status = run.end() if run is not None else None
+        lost = run is not None and not run.contained
+        if lost:
+            note_uncontained(scratch)
         if listener is not None:
             with contextlib.suppress(Exception):
                 listener.close()
@@ -777,6 +1345,8 @@ def run_decision(
         if short is not None:
             shutil.rmtree(short, ignore_errors=True)
         send({"decision": "closed" if remove_tree(work) else "close_failed"})
+        if lost:
+            raise ContainmentLostError("The runtime's process tree could not be proven gone.")
 
 
 def server_names(
@@ -830,6 +1400,7 @@ def relay(
     state: Decision,
     incoming: queue.Queue[str],
     send: Callable[[dict[str, Any]], None],
+    verify: Callable[[], bool] | None = None,
 ) -> None:
     """Accept the bridge and answer its calls, one at a time, for the one bound match."""
     while not state.over.is_set():
@@ -844,7 +1415,9 @@ def relay(
                 if not connection.poll(0.25):
                     continue
                 request = json.loads(connection.recv_bytes(65536))
-                connection.send_bytes(json.dumps(answer(request, state, incoming, send)).encode())
+                connection.send_bytes(
+                    json.dumps(answer(request, state, incoming, send, verify)).encode()
+                )
         with contextlib.suppress(Exception):
             connection.close()
 
@@ -854,8 +1427,14 @@ def answer(
     state: Decision,
     incoming: queue.Queue[str],
     send: Callable[[dict[str, Any]], None],
+    verify: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """Validate one bridge call, ask the supervisor and shape the reply the bridge hands on."""
+    """Validate one bridge call, ask the supervisor and shape the reply the bridge hands on.
+
+    `verify` says whether the profile's configuration file is still the one the match started with.
+    If it says no, or cannot say, nothing is relayed upstream: the decision is over and sends no
+    move.
+    """
     with state.lock:
         if state.accepted.is_set():
             return {"text": "The move was already accepted. Stop.", "error": True}
@@ -865,6 +1444,13 @@ def answer(
             bounded = arena.bounded_request(request["op"], request["arguments"])
         except ValueError:
             return {"text": "That request is outside the Arena contract.", "error": True}
+        try:
+            allowed = verify is None or verify()  # verify
+        except Exception:
+            allowed = False  # unverifiable
+        if not allowed:
+            state.changed.set()
+            return {"text": "The profile changed. Stop.", "error": True}
         send(bounded)
         reply = arena.line_document(incoming.get())
         if reply == {"complete": True}:

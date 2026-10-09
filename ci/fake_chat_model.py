@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -26,6 +27,8 @@ class FakeChatModel:
         self.plan = plan.split(",")
         self.arguments = arguments or {"move": "e2e4"}
         self.requests: list[dict[str, Any]] = []
+        #: Called with the request's index, in the server thread, before the model answers it.
+        self.before_request: Callable[[int], None] | None = None
         self.stopped = threading.Event()
         owner = self
 
@@ -50,11 +53,14 @@ class FakeChatModel:
                 owner.requests.append(
                     {
                         "path": self.path,
+                        "model": body.get("model"),
                         "tools": sorted(names),
                         "roles": [m.get("role") for m in body.get("messages", [])],
                         "scheme": (self.headers.get("authorization") or "").partition(" ")[0],
                     }
                 )
+                if owner.before_request is not None:
+                    owner.before_request(index)
                 mode = owner.plan[min(index, len(owner.plan) - 1)]
                 if mode == "hang":
                     owner.stopped.wait(3600)

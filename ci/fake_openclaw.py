@@ -28,6 +28,9 @@ Environment knobs (all optional):
     ``emit_hostname``, ``no_auth``, ``extra_tool_in_request``.
 ``FAKE_OPENCLAW_OUTSIDE``
     File the ``write_outside`` fault touches.
+``FAKE_OPENCLAW_PROFILE_CONFIG``
+    The profile's configuration file; ``touch_config=M``, ``replace_config=M`` and
+    ``link_config=M`` (M: ``version``, ``request``, ``tool``) change it at that moment.
 
 ``agent_path_escape``
     Reports an agent store outside the selected profile so preflight must refuse.
@@ -112,6 +115,48 @@ def faults() -> dict[str, str]:
             name, _, value = item.partition("=")
             result[name] = value
     return result
+
+
+def disturb(moment: str) -> None:
+    """Change the profile's configuration file now if a fault asks for it at this moment.
+
+    ``touch_config=M`` appends a space; ``replace_config=M`` swaps in a same-size file with another
+    identity; ``link_config=M`` turns the file into a symbolic link to a copy. M is ``version``,
+    ``request`` or ``tool``. A fake runtime never touches a real profile, only the test's.
+    """
+    target = os.environ.get("FAKE_OPENCLAW_PROFILE_CONFIG")
+    active = faults()
+    if not target:
+        return
+    if active.get("touch_config") == moment:
+        with open(target, "ab") as handle:
+            handle.write(b" ")
+    if active.get("replace_config") == moment:
+        with open(target, "rb") as source:
+            data = source.read()
+        replacement = target + ".replacement"
+        with open(replacement, "wb") as handle:
+            handle.write(data)
+        os.replace(replacement, target)
+    if active.get("link_config") == moment:
+        copy = target + ".real"
+        os.replace(target, copy)
+        os.symlink(copy, target)
+    secrets_file = os.environ.get("FAKE_OPENCLAW_PROFILE_ENV")
+    if not secrets_file:
+        return
+    if active.get("create_env") == moment:
+        with open(secrets_file, "w", encoding="utf-8") as handle:
+            handle.write("SYNTHETIC_KEY=created-during-the-match\n")
+    if active.get("remove_env") == moment and os.path.exists(secrets_file):
+        os.remove(secrets_file)
+    if active.get("replace_env") == moment:
+        with open(secrets_file, "rb") as source:
+            data = source.read()
+        replacement = secrets_file + ".replacement"
+        with open(replacement, "wb") as handle:
+            handle.write(data)
+        os.replace(replacement, secrets_file)
 
 
 def record(event: dict[str, Any]) -> None:
@@ -758,6 +803,7 @@ class Runtime:
 
     def model_request(self, messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, str]]]:
         """POST one streaming chat-completions request and return (text, tool calls)."""
+        disturb("request")
         provider = dig(self.config, f"models.providers.{self.provider_id}") or {}
         url = str(provider["baseUrl"]).rstrip("/") + "/chat/completions"
         if not url.startswith(("http://", "https://")):
@@ -957,6 +1003,7 @@ class Runtime:
                     }
                 )
                 for call in calls:
+                    disturb("tool")
                     result = self.execute(call)
                     record(
                         {"event": "tool_call", "name": call["name"], "arguments": call["arguments"]}
@@ -1095,6 +1142,7 @@ def main(argv: list[str]) -> int:
     """Dispatch one OpenClaw command line and return the exit code."""
     check_sandbox()
     if "--version" in argv or "-V" in argv:
+        disturb("version")
         sys.stdout.write(VERSION_LINE + "\n")
         return 0
     _globals, rest = split_globals(argv)

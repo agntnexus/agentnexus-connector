@@ -12,6 +12,7 @@ empty profile auth-store snapshot is unchanged, and per-decision session state i
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -21,7 +22,7 @@ from typing import Any
 import pytest
 from arena_boundary import names_a_secrets_file, names_in
 from arena_fakes import MOVES
-from arena_openclaw_support import behavior_of, records_of, survivors
+from arena_openclaw_support import behavior_of, records_of, stand_in_handle, survivors
 from arena_process_harness import (
     moves_of,
     mutated_programs,
@@ -30,7 +31,13 @@ from arena_process_harness import (
 )
 from fake_chat_model import FakeChatModel
 
-from agentnexus_sdk import arena_match, openclaw_arena, openclaw_bridge
+from agentnexus_sdk import (
+    arena_driver,
+    arena_driver_openclaw,
+    arena_match,
+    openclaw_arena,
+    openclaw_bridge,
+)
 
 SOURCE = Path(arena_match.__file__).parent
 THREE = sorted(f"arena__{name}" for name in arena_match.TOOLS)
@@ -203,9 +210,16 @@ def test_a_kill_ladder_without_its_last_rung_is_noticed(
     tmp_path: Path,
     model: FakeChatModel,
 ) -> None:
-    """Break the forceful signal: a runtime that ignores termination then outlives its decision."""
+    """Break the forceful signal: a runtime that ignores termination then outlives its decision.
+
+    The whole-tree kill of the match process and of the parent is taken away here (the worker is
+    started outside a tree and the parent kills the match process alone), because it would end the
+    leaked child by itself: this proves the worker's own ladder, the last line, still matters.
+    """
+    monkeypatch.setattr(arena_match, "end_tree", lambda process: process.kill())
     broken_match, broken_worker = mutated_programs(
         tmp_path / "broken",
+        match=(("self.process = start_in_tree(", "self.process = subprocess.Popen("),),
         worker=(
             (
                 'FORCE = getattr(signal, "SIGKILL", signal.SIGTERM)',
@@ -231,3 +245,186 @@ def test_a_kill_ladder_without_its_last_rung_is_noticed(
         os.kill(pid, 9)
     assert left, "a ladder without its last rung left nothing behind, so the proof proves nothing"
     run.tethers.close()
+
+
+# ---------------------------------------------------------------------------------------------
+# One match, one configuration file as it was (agntnexus/agentnexus#228, pinned by metadata)
+# ---------------------------------------------------------------------------------------------
+
+
+def config_disturbed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    fault: str,
+    plan: str = "move",
+    *,
+    no_env: bool = False,
+) -> tuple[Any, FakeChatModel]:
+    """Play one match in which the stand-in runtime changes the profile's file at this moment."""
+    server = FakeChatModel(plan)
+    behavior = behavior_of(server, tmp_path, fault)
+    behavior["no_profile_env"] = no_env
+    run = run_process(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        "white",
+        behavior,
+        runtime="openclaw",
+        bound=25.0,
+        wait=60.0,
+    )
+    return run, server
+
+
+@pytest.mark.windows_security
+@pytest.mark.parametrize(
+    ("fault", "no_env"),
+    [
+        ("create_env=request", True),
+        ("create_env=tool", True),
+        ("remove_env=version", False),
+        ("remove_env=tool", False),
+        ("replace_env=tool", False),
+    ],
+)
+def test_a_profile_env_created_removed_or_replaced_during_the_match_forwards_no_move(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    fault: str,
+    no_env: bool,
+) -> None:
+    """The optional `.env` is pinned like the configuration, presence and absence included."""
+    run, server = config_disturbed(monkeypatch, capsys, tmp_path, fault, no_env=no_env)
+    try:
+        assert run.forwarded == [], "a move was forwarded after the profile .env changed"
+        assert "game_move_started" not in run.events
+        assert survivors(tmp_path) == []
+        assert not run.runner.terminal
+    finally:
+        server.close()
+        run.tethers.close()
+
+
+@pytest.mark.windows_security
+@pytest.mark.parametrize(
+    ("fault", "asked_the_model"),
+    [
+        ("touch_config=version", False),
+        ("touch_config=request", True),
+        ("touch_config=tool", True),
+        ("replace_config=request", True),
+        ("replace_config=tool", True),
+    ],
+)
+def test_a_changed_configuration_ends_the_runtime_path_and_forwards_no_move(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    fault: str,
+    asked_the_model: bool,
+) -> None:
+    """Before a start, during a decision, before the forward, or replaced by a same-size file."""
+    run, server = config_disturbed(monkeypatch, capsys, tmp_path, fault)
+    try:
+        assert run.forwarded == [], "a move was forwarded after the configuration changed"
+        assert "game_move_started" not in run.events
+        assert bool(server.requests) is asked_the_model, server.requests
+        assert survivors(tmp_path) == [], "the runtime path was not ended"
+        assert not run.runner.terminal
+    finally:
+        server.close()
+        run.tethers.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a link needs a privilege on Windows")
+def test_a_link_put_in_place_of_the_configuration_forwards_no_move(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The file becomes a symbolic link to a copy: the identity and the link state both say no."""
+    run, server = config_disturbed(monkeypatch, capsys, tmp_path, "link_config=tool")
+    try:
+        assert run.forwarded == []
+        assert survivors(tmp_path) == []
+    finally:
+        server.close()
+        run.tethers.close()
+
+
+@pytest.mark.windows_security
+def test_a_change_after_the_first_move_stops_the_match_before_its_second(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The first decision runs on the file as it was; the second, after a change, makes no move."""
+    server = FakeChatModel("move,move")
+    config = tmp_path / "home" / "openclaw.json"
+
+    def change(index: int) -> None:
+        # In the model's thread, before it answers the second decision's request: the change is in
+        # place before the runtime can ask to move.
+        if index == 1:
+            with config.open("ab") as handle:
+                handle.write(b" ")
+
+    server.before_request = change
+    try:
+        run = play(monkeypatch, capsys, tmp_path, server, turns=2)
+        assert moves_of(run, "white") == [MOVES["white"]], "the second move was forwarded"
+        assert len(server.requests) == 2
+        assert survivors(tmp_path) == []
+        run.tethers.close()
+    finally:
+        server.close()
+
+
+def test_the_launch_pins_metadata_and_copies_nothing(tmp_path: Path) -> None:
+    """The scratch stays empty, the runtime keeps its original file, and the pin has no content."""
+    server = FakeChatModel("move")
+    try:
+        handle = stand_in_handle(tmp_path, server)
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        launch = arena_driver_openclaw.OpenClawArenaDriver().launch(handle, scratch)
+        assert list(scratch.rglob("*")) == [], "something was put in the scratch"
+        assert launch.environment[openclaw_arena.CONFIG_ENV] == str(handle.config)
+        assert launch.environment[openclaw_arena.PROFILE_CONFIG_ENV] == str(handle.config)
+        text = handle.config.read_text(encoding="utf-8")
+        assert launch.pin and text not in launch.pin
+        assert launch.environment[openclaw_arena.PIN_ENV] == launch.pin
+        assert all(text not in value for value in launch.environment.values())
+        pinned = json.loads(launch.pin)
+        assert set(pinned) == {"config", "env"}
+        assert set(pinned["config"]) == {
+            "path",
+            "device",
+            "inode",
+            "size",
+            "modified_ns",
+            "changed_ns",
+            "kind",
+            "owner",
+        }
+    finally:
+        server.close()
+
+
+def test_a_launch_whose_file_state_cannot_be_pinned_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No provable identity, no match."""
+    server = FakeChatModel("move")
+    try:
+        handle = stand_in_handle(tmp_path, server)
+        monkeypatch.setattr(openclaw_arena, "config_fingerprint", lambda *args: None)
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        with pytest.raises(arena_driver.DriverRefusedError):
+            arena_driver_openclaw.OpenClawArenaDriver().launch(handle, scratch)
+    finally:
+        server.close()

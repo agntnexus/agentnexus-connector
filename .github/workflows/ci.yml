@@ -155,7 +155,9 @@ jobs:
         # stand-in for Hermes whose model blocks, is slow or is fast, whose closing request never
         # answers and whose cleanup hangs or raises: no late move, no match lost to a tail, no
         # process left. No network, no model, no credential and no real match.
-        run: python -m pytest ci/test_arena_turn_budget.py ci/test_arena_decision_worker.py -q
+        run: >-
+          python -m pytest ci/test_arena_turn_budget.py ci/test_arena_decision_worker.py
+          ci/test_arena_budget_gate.py -q
 
       - name: An Arena runtime is accepted for what it proves, never for a model or a provider
         # agntnexus/agentnexus#228. The Connector is model-agnostic: a runtime driver proves the
@@ -190,7 +192,8 @@ jobs:
         # no network beyond loopback.
         run: >-
           python -m pytest ci/test_arena_openclaw.py ci/test_arena_openclaw_driver.py
-          ci/test_arena_openclaw_auth.py -q
+          ci/test_arena_openclaw_auth.py ci/test_arena_openclaw_review.py
+          ci/test_check_windows_security_run.py -q
 
       - name: The release builder refuses what it must
         # `scripts/build_release.py` is the one file here that can hold a private signing key, so
@@ -296,3 +299,71 @@ jobs:
             exit 1
           fi
           echo "Every tracked file is either mirrored or declared repository-local."
+
+  windows-security:
+    # agntnexus/agentnexus#228. The Windows boundaries cannot be shown on Linux: the owner and
+    # access list that make a profile private, the job object a runtime starts in (suspended, put
+    # in the job, then resumed, with every Windows answer checked), the child and grandchild that
+    # end with it, and the pinned state of the configuration file and the profile secrets file with
+    # no move forwarded after a change. This repository runs only on GitHub-hosted runners, so this
+    # focused job runs them on `windows-latest`. A skipped security test is not a passed one: the
+    # report is read, and only a skip that cannot apply on Windows is allowed.
+    name: Windows boundaries (profile privacy, job object, pinned files)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install the pinned toolchain and the built package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r constraints-ci.txt
+          python -m build
+          python -m pip install dist/*.whl
+
+      - name: Show the owner and access list the tests will judge
+        # Diagnostic only: the identifiers of the runner account and what a directory locked to it
+        # looks like. It prints no secret and decides nothing.
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib
+          import subprocess
+          import tempfile
+
+          from agentnexus_sdk import openclaw_arena as arena
+
+          folder = pathlib.Path(tempfile.mkdtemp()) / "probe"
+          folder.mkdir()
+          sid = arena.windows_current_sid()
+          print("user", sid, "token owner", arena.windows_token_owner())
+          print("created", arena.windows_security(folder))
+          subprocess.run(
+              ["icacls", str(folder), "/inheritance:r", "/grant:r", f"*{sid}:(OI)(CI)F"], check=True
+          )
+          print("locked", arena.windows_security(folder), arena.windows_private(folder))
+          PY
+
+      - name: The Windows boundaries really run
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest ci/test_check_windows_security_run.py -q -p no:cacheprovider
+          python -m pytest \
+            ci/test_arena_openclaw_review.py ci/test_arena_openclaw.py \
+            ci/test_arena_budget_gate.py ci/test_arena_turn_budget.py \
+            ci/test_arena_decision_worker.py \
+            -m windows_security -q -rs -p no:cacheprovider --junitxml=windows-security.xml
+          python ci/check_windows_security_run.py windows-security.xml

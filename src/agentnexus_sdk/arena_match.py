@@ -114,6 +114,9 @@ SETTLE_SECONDS = 20
 #: runtime loads slowly on a small device, and a worker that is not ready is reported, not waited
 #: for.
 READY_SECONDS = 180
+#: A file a decision worker leaves in the match's scratch when it could not prove that the tree of
+#: its runtime is gone. The supervisor reads it when the run stops and claims nothing more.
+UNCONTAINED_MARKER = "uncontained"
 
 
 def diagnostic_bound(decisions: int) -> int:
@@ -195,6 +198,302 @@ def line_document(line: str) -> dict[str, Any]:
     return document
 
 
+# ---------------------------------------------------------------------------------------------
+# Process trees (agntnexus/agentnexus#223): a kill ends everything the process started
+# ---------------------------------------------------------------------------------------------
+
+#: The attribute on a started process that holds what ends its whole tree.
+TREE_ATTRIBUTE = "agentnexus_tree"
+_CREATE_SUSPENDED = 0x00000004
+_KILL_ON_JOB_CLOSE = 0x00002000
+
+
+def process_table() -> dict[int, list[int]]:
+    """Return every parent's children from the system's process table, or raise `OSError`.
+
+    A table that cannot be listed, that times out, that the lister refuses, that comes back empty or
+    that has even one line that is not a pid and a parent pid is an error and never an answer: an
+    empty one would read as "nothing below this process", and a kill would stop short of what it
+    could not see.
+    """
+    try:
+        listing = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid="],  # noqa: S607 - the system's own process lister
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise OSError("The process table could not be read.") from error
+    children: dict[int, list[int]] = {}
+    for line in (listing.stdout or "").splitlines():
+        if not line.strip():
+            continue
+        parts = line.split()
+        # Every line is a pid and a parent pid, and nothing else. A line that is not is not
+        # skipped: a table with one broken line may hide the very process that matters.
+        if len(parts) != 2 or not all(re.fullmatch(r"[0-9]+", part) for part in parts):
+            raise OSError("The process table could not be read.")  # malformed line
+        children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    if listing.returncode != 0 or not children:
+        raise OSError("The process table could not be read.")
+    return children
+
+
+def descendants(root: int) -> set[int]:
+    """Return the pids below `root` from the process table now; raise `OSError` if unreadable."""
+    children = process_table()
+    found: set[int] = set()
+    pending = [root]
+    while pending:
+        for child in children.get(pending.pop(), []):
+            if child not in found:
+                found.add(child)
+                pending.append(child)
+    return found
+
+
+class WindowsJob:
+    """A job object that ends every process in it when it is ended or its last handle closes."""
+
+    def __init__(self) -> None:
+        """Create the job with kill-on-close, so a killed owner leaves no runtime behind."""
+        import ctypes
+        from ctypes import wintypes
+
+        class Basic(ctypes.Structure):
+            _fields_ = (
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            )
+
+        class Counters(ctypes.Structure):
+            _fields_ = tuple((name, ctypes.c_uint64) for name in "abcdef")
+
+        class Extended(ctypes.Structure):
+            _fields_ = (
+                ("Basic", Basic),
+                ("Io", Counters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            )
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        kernel.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        ntdll = ctypes.WinDLL("ntdll")  # type: ignore[attr-defined]
+        ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+        self._kernel, self._ntdll = kernel, ntdll
+        self.handle = kernel.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise OSError("The process job could not be created.")
+        information = Extended()
+        information.Basic.LimitFlags = _KILL_ON_JOB_CLOSE
+        if not kernel.SetInformationJobObject(
+            self.handle, 9, ctypes.byref(information), ctypes.sizeof(information)
+        ):
+            self.close()
+            raise OSError("The process job could not be limited.")
+
+    def adopt(self, process: subprocess.Popen[Any]) -> None:
+        """Put a process that was started suspended in the job, then let it run."""
+        handle = int(process._handle)  # type: ignore[attr-defined]
+        if not self._kernel.AssignProcessToJobObject(self.handle, handle):
+            raise OSError("The process could not be put in its job.")
+        if self._ntdll.NtResumeProcess(handle) != 0:
+            raise OSError("The suspended process could not be resumed.")
+
+    def end(self) -> bool:
+        """End every process in the job now; say whether Windows did it."""
+        return bool(self.handle) and bool(self._kernel.TerminateJobObject(self.handle, 1))
+
+    def close(self) -> None:
+        """Release the job; whatever is still in it ends."""
+        handle, self.handle = self.handle, None
+        if handle:
+            self._kernel.CloseHandle(handle)
+
+
+class PosixTree:
+    """A process that leads a session of its own, and the pids below it that were seen."""
+
+    def __init__(self, pid: int) -> None:
+        """Remember the leader; its group is its own pid."""
+        self.pid = pid
+        self.known: set[int] = set()
+
+    def end(self, process: subprocess.Popen[Any]) -> bool:
+        """Kill the group and every descendant read from the process table before the first signal.
+
+        A runtime may put a child in a session of its own, which no group signal reaches, so the
+        table is read first and each pid found is killed. The group is signalled only while the
+        leader has not been reaped: the pid is then still ours and cannot name another process.
+        The answer is whether the tree is provably gone: if the table could not be read, what was
+        reachable is still killed, but the answer is `False` and the caller must trust nothing.
+        """
+        if sys.platform == "win32":  # a job object ends the tree there, not a group
+            return True
+        import signal
+
+        complete = True
+        members = set(self.known)
+        try:
+            members |= descendants(self.pid)  # table
+        except OSError:
+            complete = False
+        if process.returncode is None:
+            with contextlib.suppress(OSError):
+                os.killpg(self.pid, signal.SIGKILL)
+        try:
+            members |= descendants(self.pid)
+        except OSError:
+            complete = False
+        for pid in members:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+        return complete
+
+
+def start_in_tree(argv: list[str], **options: Any) -> subprocess.Popen[Any]:
+    """Start a process whose whole tree `end_tree` can end, however deep the runtime nests.
+
+    On Windows the process starts suspended, joins a job object that ends with its owner and only
+    then runs, so nothing it starts escapes the job. On POSIX it leads a session of its own. If the
+    tree cannot be set up, nothing is left running and the start fails.
+    """
+    if os.name == "nt":
+        job = WindowsJob()
+        flags = options.pop("creationflags", 0) | _CREATE_SUSPENDED
+        process = subprocess.Popen(argv, creationflags=flags, **options)  # noqa: S603 - reviewed
+        try:
+            job.adopt(process)
+        except BaseException:
+            job.end()
+            job.close()
+            with contextlib.suppress(OSError):
+                process.kill()
+            raise
+        setattr(process, TREE_ATTRIBUTE, job)
+    else:
+        process = subprocess.Popen(argv, start_new_session=True, **options)  # noqa: S603 - reviewed
+        setattr(process, TREE_ATTRIBUTE, PosixTree(process.pid))
+    return process
+
+
+def end_tree(process: Any) -> bool:
+    """End a process started by `start_in_tree` and everything it started; safe to repeat.
+
+    The answer says whether the tree is provably gone. A process that was not started that way (or
+    a stand-in) is killed alone and counts as gone.
+    """
+    tree = getattr(process, TREE_ATTRIBUTE, None)
+    complete = True
+    if isinstance(tree, WindowsJob):
+        complete = tree.end()
+        tree.close()
+    elif isinstance(tree, PosixTree):
+        complete = tree.end(process)
+    with contextlib.suppress(OSError):
+        process.kill()
+    return complete
+
+
+def run_in_tree(argv: list[str], *, seconds: float, **options: Any) -> tuple[int, str] | None:
+    """Run a command to its end inside a tree, and return its status and output.
+
+    Nothing the command started outlives the call. A command that does not finish within `seconds`
+    has its whole tree ended and yields None, so a caller can only ever be refused, never stuck.
+    """
+    try:
+        process = start_in_tree(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            **options,
+        )
+    except OSError:
+        return None
+    try:
+        try:
+            output, _ = process.communicate(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            end_tree(process)
+            with contextlib.suppress(subprocess.TimeoutExpired, OSError, ValueError):
+                process.communicate(timeout=5)
+            return None
+        return process.returncode, output or ""
+    finally:
+        end_tree(process)
+
+
+def prove_tree() -> bool:
+    """Show on this machine that one kill ends a process and the grandchildren it started.
+
+    One grandchild stays in the process's session and one leaves it. All hold the same pipe open,
+    so it can only end once the whole tree is gone. A machine that cannot list its processes cannot
+    show it, and is not trusted with a seat. The proof uses
+    the very functions that end a decision's tree, so a machine that cannot set up or end a tree
+    is found before a seat is claimed and not at a cutoff.
+    """
+    program = (
+        "import os, subprocess, sys, time\n"
+        "child = [sys.executable, '-c', 'import time; time.sleep(30)']\n"
+        "detached = {'start_new_session': True} if os.name != 'nt' else {'creationflags': 0x208}\n"
+        "subprocess.Popen(child, stdout=sys.stdout)\n"
+        "subprocess.Popen(child, stdout=sys.stdout, **detached)\n"
+        "print('up', flush=True)\n"
+        "time.sleep(30)\n"
+    )
+    try:
+        process = start_in_tree(
+            [sys.executable, "-c", program],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    chunks: queue.Queue[bytes] = queue.Queue()
+
+    def pump() -> None:
+        with contextlib.suppress(OSError, ValueError):
+            for chunk in iter(lambda: process.stdout.read(1), b""):  # type: ignore[union-attr]
+                chunks.put(chunk)
+        chunks.put(b"")
+
+    threading.Thread(target=pump, daemon=True).start()
+    try:
+        started = chunks.get(timeout=20) != b""
+    except queue.Empty:
+        started = False
+    complete = end_tree(process)
+    if not started or not complete:
+        return False
+    try:
+        while chunks.get(timeout=10) != b"":
+            pass
+    except queue.Empty:
+        return False
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=5)
+    return True
+
+
 class Worker:
     """One decision worker, spoken to over private stdio and ended by a kill.
 
@@ -207,7 +506,7 @@ class Worker:
 
         The command is the supervisor's: the runtime driver chose it, this process only runs it.
         """
-        self.process = subprocess.Popen(  # noqa: S603 - the supervisor's own driver command
+        self.process = start_in_tree(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -252,9 +551,8 @@ class Worker:
         return not self.ended and self.process.poll() is None
 
     def kill(self) -> None:
-        """End the worker now; a blocked model call cannot be asked to stop."""
-        with contextlib.suppress(OSError):
-            self.process.kill()
+        """End the worker and all it started now; a blocked model call cannot be asked to stop."""
+        end_tree(self.process)
 
     def close(self) -> None:
         """End the worker if it still runs, reap it and release its pipes and its reader.

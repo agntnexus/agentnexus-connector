@@ -401,10 +401,12 @@ def test_the_match_process_is_standard_library_only() -> None:
     """It runs isolated, under whichever interpreter a driver names, without the Connector."""
     stdlib = {
         "contextlib",
+        "ctypes",
         "json",
         "os",
         "queue",
         "re",
+        "signal",
         "subprocess",
         "sys",
         "threading",
@@ -457,7 +459,7 @@ def launched(
         seen.update(kwargs, command=command)
         return SimpleNamespace(stdin=stdin, stdout=io.StringIO())
 
-    monkeypatch.setattr(module.subprocess, "Popen", spawn)
+    monkeypatch.setattr(module.arena_match, "start_in_tree", spawn)
     monkeypatch.setattr(
         module.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None)
     )

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -11,7 +13,19 @@ from typing import Any
 from arena_process_harness import openclaw_stand_in
 from fake_chat_model import FakeChatModel
 
-from agentnexus_sdk import arena_driver_openclaw
+from agentnexus_sdk import arena_driver_openclaw, openclaw_arena
+
+
+def make_private(path: Path) -> None:
+    """Make a profile directory the user's alone: mode 0700, or an access list of the user only."""
+    path.chmod(0o700)
+    if sys.platform == "win32":
+        sid = openclaw_arena.windows_current_sid()
+        subprocess.run(  # noqa: S603 - fixed system tool on a test directory
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"*{sid}:(OI)(CI)F"],  # noqa: S607
+            check=True,
+            capture_output=True,
+        )
 
 
 def pid_alive(pid: int) -> bool:
@@ -46,6 +60,8 @@ def behavior_of(
             "FAKE_OPENCLAW_RECORD": str(tmp_path / "openclaw.stand-in-record"),
             "FAKE_OPENCLAW_FAULT": fault,
             "FAKE_OPENCLAW_OUTSIDE": str(tmp_path / "outside.stand-in-record"),
+            "FAKE_OPENCLAW_PROFILE_CONFIG": str(tmp_path / "home" / "openclaw.json"),
+            "FAKE_OPENCLAW_PROFILE_ENV": str(tmp_path / "home" / ".env"),
             **env,
         },
     }
@@ -74,9 +90,12 @@ def stand_in_handle(
     server: FakeChatModel,
     fault: str = "",
     profile: dict[str, Any] | None = None,
+    *,
+    no_profile_env: bool = False,
 ) -> arena_driver_openclaw.OpenClawRun:
     """Return the handle of a stand-in installation with a disposable profile."""
     behavior = behavior_of(server, tmp_path, fault)
+    behavior["no_profile_env"] = no_profile_env
     if profile is not None:
         behavior["profile"] = profile
     command, config, state = openclaw_stand_in(tmp_path, behavior)

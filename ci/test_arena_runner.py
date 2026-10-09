@@ -323,7 +323,11 @@ def test_shutdown_closes_both_pipes_after_a_dead_child_even_when_flush_refuses()
 
     output = io.StringIO()
     runner.child = SimpleNamespace(
-        poll=lambda: 0, wait=lambda **kwargs: None, stdin=DeadPipe(), stdout=output
+        poll=lambda: 0,
+        kill=lambda: None,
+        wait=lambda **kwargs: None,
+        stdin=DeadPipe(),
+        stdout=output,
     )
     runner.worker = None
     agent = str(uuid.uuid4())
@@ -339,7 +343,7 @@ def test_shutdown_refuses_to_release_a_worker_that_has_not_stopped() -> None:
     runner = object.__new__(arena_runner.ArenaRunner)
     source, output = io.StringIO(), io.StringIO()
     runner.child = SimpleNamespace(
-        poll=lambda: 0, wait=lambda **kwargs: None, stdin=source, stdout=output
+        poll=lambda: 0, kill=lambda: None, wait=lambda **kwargs: None, stdin=source, stdout=output
     )
     runner.worker = SimpleNamespace(join=lambda **kwargs: None, is_alive=lambda: True)
     active = runner.active = object()
@@ -656,7 +660,7 @@ def test_new_phase_channel_keeps_raw_child_stderr_discarded(
         spawned.append(kwargs)
         return SimpleNamespace(stdin=io.StringIO(), stdout=io.StringIO())
 
-    monkeypatch.setattr(arena_runner.subprocess, "Popen", spawn)
+    monkeypatch.setattr(arena_runner.arena_match, "start_in_tree", spawn)
     monkeypatch.setattr(
         arena_runner.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None)
     )

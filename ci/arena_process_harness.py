@@ -13,6 +13,7 @@ import hashlib
 import json
 import socket
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -34,6 +35,7 @@ from agentnexus_sdk import (
     arena_match,
     arena_runner,
     hermes_arena,
+    openclaw_arena,
 )
 
 #: The runtimes every process test runs through: the Hermes stand-in and a second, fake runtime.
@@ -290,6 +292,39 @@ def scaffold():
 
 
 scaffold()
+if BEHAVIOR.get("helper"):
+    # A process the runtime started on its own (a tool server, a transport helper): it holds a
+    # tether too, so the test can tell whether it outlived the decision that was cut off.
+    import subprocess
+    import sys
+
+    HELPER = "\\n".join(
+        [
+            "import os, socket, sys, threading",
+            "s = socket.create_connection(('127.0.0.1', int(sys.argv[1])))",
+            "def watch():",
+            "    try:",
+            "        s.recv(1)",
+            "    except OSError:",
+            "        pass",
+            "    os._exit(1)",
+            "threading.Thread(target=watch, daemon=True).start()",
+            "open(sys.argv[2], 'w').close()",
+            "threading.Event().wait()",
+        ]
+    )
+    # "inherit": it keeps this process's stdout (the pipe to the match process) open, as a helper of
+    # a real runtime may. Its readiness is a file, because a pipe it inherits is not for reading.
+    up = Path(__file__).with_name("helper-up.stand-in-record")
+    up.unlink(missing_ok=True)
+    quiet = {"stdin": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if BEHAVIOR["helper"] != "inherit":
+        quiet["stdout"] = subprocess.DEVNULL
+    subprocess.Popen([sys.executable, "-c", HELPER, str(BEHAVIOR["tether"]), str(up)], **quiet)
+    for _ in range(400):
+        if up.exists():
+            break
+        time.sleep(0.05)  # the helper is connected before the decision starts
 _environment_record = BEHAVIOR.get("environment")
 if _environment_record:
     with open(_environment_record, "a", encoding="utf-8") as _handle:
@@ -487,13 +522,23 @@ def openclaw_stand_in(root: Path, behavior: dict[str, Any]) -> tuple[tuple[str, 
     home = root / "home"
     (home / "state").mkdir(parents=True)
     home.chmod(0o700)
+    if sys.platform == "win32":
+        # The profile is judged by its owner and access list: lock it to the current user alone,
+        # as a profile of a real installation has to be.
+        sid = openclaw_arena.windows_current_sid()
+        subprocess.run(  # noqa: S603 - fixed system tool on a test directory
+            ["icacls", str(home), "/inheritance:r", "/grant:r", f"*{sid}:(OI)(CI)F"],  # noqa: S607
+            check=True,
+            capture_output=True,
+        )
     config = home / "openclaw.json"
     config.write_text(json.dumps(behavior["profile"]), encoding="utf-8")
     (home / "state" / "canary.txt").write_text("canary state, never rewritten\n", encoding="utf-8")
     auth_store = home / "state" / "agents" / "main" / "agent" / "openclaw-agent.sqlite"
     auth_store.parent.mkdir(parents=True)
     sqlite3.connect(auth_store).close()
-    (home / ".env").write_text("SYNTHETIC_KEY=synthetic-disposable-key\n", encoding="utf-8")
+    if not behavior.get("no_profile_env"):
+        (home / ".env").write_text("SYNTHETIC_KEY=synthetic-disposable-key\n", encoding="utf-8")
     target = str(Path(__file__).with_name("fake_openclaw.py").resolve())
     wrapper = root / "openclaw-wrapper.py"
     wrapper.write_text(OPENCLAW_WRAPPER.format(target=target), encoding="utf-8")
@@ -590,7 +635,12 @@ class StandInDriver:
         command[2:3] = [str(self.launcher), str(match), str(self.bound), str(self.cleanup)]
         if self.worker_file is not None:
             command[command.index("--") + 3] = str(self.worker_file)
-        return arena_driver.Launch(command, launch.environment)
+        return arena_driver.Launch(command, launch.environment, getattr(launch, "pin", None))
+
+    def still_pinned(self, handle: Any, pin: str) -> bool:
+        """Ask the real driver, when it has a check."""
+        check = getattr(self.real, "still_pinned", None)
+        return True if check is None else bool(check(handle, pin))
 
 
 class Tethers:
@@ -677,6 +727,7 @@ def run_process(
     arena: Path | None = None,
     worker: Path | None = None,
     driver_module: ModuleType = arena_driver_hermes,
+    openclaw_module: ModuleType = arena_driver_openclaw,
     runtime: str = "hermes",
     wait: float = 30.0,
 ) -> Process:
@@ -716,8 +767,8 @@ def run_process(
         real: Any = driver_module.HermesArenaDriver()
         runner.handle = driver_module.HermesRun(source, Path(sys.executable), home)
     elif runtime == "openclaw":
-        real = arena_driver_openclaw.OpenClawArenaDriver()
-        runner.handle = arena_driver_openclaw.OpenClawRun(
+        real = openclaw_module.OpenClawArenaDriver()
+        runner.handle = openclaw_module.OpenClawRun(
             command, "2026.9.9", config, state, config.parent
         )
     else:
