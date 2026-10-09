@@ -1061,25 +1061,106 @@ def test_the_generation_follows_the_profile_env(tmp_path: Path) -> None:
 POSIX = sys.platform != "win32"
 
 
-@pytest.mark.parametrize("failure", ["missing", "timeout", "status", "empty", "malformed"])
+GOOD_TABLE = "  1     0\n 10     1\n 11    10\n 12    11\n 20     1\n"
+PARTLY_BROKEN = {
+    "garbage-line": GOOD_TABLE + "GARBAGE\n",
+    "garbage-between-parent-and-grandchild": "  1     0\n 10     1\n GARBAGE\n 12    11\n",
+    "too-many-columns": GOOD_TABLE + " 13    12  extra\n",
+    "too-few-columns": GOOD_TABLE + " 13\n",
+    "negative-pid": GOOD_TABLE + " -13    12\n",
+    "signed-pid": GOOD_TABLE + " +13    12\n",
+    "non-integer-parent": GOOD_TABLE + " 13    1x\n",
+    "float-pid": GOOD_TABLE + " 13.5    12\n",
+}
+
+
+@pytest.mark.skipif(not POSIX, reason="the process table is the POSIX way to find a tree")
+@pytest.mark.parametrize(
+    "failure",
+    ["missing", "timeout", "status", "empty", "malformed", *PARTLY_BROKEN],
+)
 def test_a_process_table_that_cannot_be_read_is_an_error_never_an_empty_proof(
     monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    """Every way the table can fail raises; an empty set would read as 'nothing below'."""
+    """Every way the table can fail raises, whole or in part; nothing is skipped or guessed."""
 
     def run(*args: Any, **kwargs: Any) -> Any:
         if failure == "missing":
             raise FileNotFoundError("ps")
         if failure == "timeout":
             raise subprocess.TimeoutExpired("ps", 10)
-        text = {"status": "1 0\n", "empty": "", "malformed": "not a table\nat all\n"}[failure]
+        text = {"status": "1 0\n", "empty": "", "malformed": "not a table\nat all\n"}.get(
+            failure
+        ) or PARTLY_BROKEN[failure]
         return SimpleNamespace(returncode=1 if failure == "status" else 0, stdout=text)
 
     monkeypatch.setattr(openclaw_arena.subprocess, "run", run)
     with pytest.raises(OSError, match="process table"):
         openclaw_arena.descendants(1)
+    with pytest.raises(OSError, match="process table"):
+        openclaw_arena.process_table()
 
 
+@pytest.mark.skipif(not POSIX, reason="the process table is the POSIX way to find a tree")
+def test_a_table_of_only_valid_lines_is_parsed_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control: every line, parsed exactly, with blank lines allowed."""
+    monkeypatch.setattr(
+        openclaw_arena.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=GOOD_TABLE + "\n   \n"),
+    )
+    assert openclaw_arena.process_table() == {0: [1], 1: [10, 20], 10: [11], 11: [12]}
+
+
+@pytest.mark.skipif(not POSIX, reason="the process table is the POSIX way to find a tree")
+def test_a_partly_broken_table_gives_a_kill_that_is_not_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A table with one broken line is invalid as a whole: the kill is best effort, not proof."""
+    signalled: list[int] = []
+    monkeypatch.setattr(
+        openclaw_arena.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout=PARTLY_BROKEN["garbage-between-parent-and-grandchild"]
+        ),
+    )
+    monkeypatch.setattr(openclaw_arena, "alive", lambda pid: False)
+    monkeypatch.setattr(openclaw_arena.os, "kill", lambda pid, sig: signalled.append(pid))
+    assert openclaw_arena.kill_tree(10, {12}) is False
+    assert {10, 12} <= set(signalled), "the best-effort kill must still happen"
+
+
+def test_a_table_that_skips_a_broken_line_is_noticed(tmp_path: Path) -> None:
+    """Mutation: if a malformed line is skipped, the same oracle accepts a partly broken table."""
+    mutant = mutant_of(
+        tmp_path / "mutant",
+        'raise OSError("The process table could not be read.")  # malformed line',
+        "continue  # malformed line",
+    )
+    try:
+
+        def oracle(module: Any) -> None:
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(
+                    module.subprocess,
+                    "run",
+                    lambda *a, **k: SimpleNamespace(
+                        returncode=0, stdout=PARTLY_BROKEN["garbage-line"]
+                    ),
+                )
+                try:
+                    module.process_table()
+                except OSError:
+                    return
+                raise AssertionError("a table with a broken line was accepted")
+
+        expect_guard(oracle, openclaw_arena, mutant)
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+@pytest.mark.skipif(not POSIX, reason="the process table is the POSIX way to find a tree")
 def test_the_process_table_walk_finds_children_and_grandchildren(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
