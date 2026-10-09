@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -314,18 +313,16 @@ def test_a_change_after_the_first_move_stops_the_match_before_its_second(
     server = FakeChatModel("move,move")
     config = tmp_path / "home" / "openclaw.json"
 
-    def change() -> None:
-        deadline = time.monotonic() + 90
-        while len(server.requests) < 2 and time.monotonic() < deadline:
-            time.sleep(0.005)
-        with config.open("ab") as handle:
-            handle.write(b" ")
+    def change(index: int) -> None:
+        # In the model's thread, before it answers the second decision's request: the change is in
+        # place before the runtime can ask to move.
+        if index == 1:
+            with config.open("ab") as handle:
+                handle.write(b" ")
 
-    thread = threading.Thread(target=change, daemon=True)
-    thread.start()
+    server.before_request = change
     try:
         run = play(monkeypatch, capsys, tmp_path, server, turns=2)
-        thread.join(timeout=10)
         assert moves_of(run, "white") == [MOVES["white"]], "the second move was forwarded"
         assert len(server.requests) == 2
         assert survivors(tmp_path) == []
