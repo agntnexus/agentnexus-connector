@@ -4281,20 +4281,21 @@ def _target_profile_for_adapter(
         return {"disposition": "refused", "reason": "target_profile_not_creatable"}
     if not inspection.safe:
         return {"disposition": "refused", "reason": "target_profile_unsafe"}
-    if inspection.registration_present:
-        if (
-            state_matches
-            and inspection.registered_agent_id is not None
-            and inspection.registered_agent_id == state.agent_id
-        ):
-            return {"disposition": "resume", "reason": "matching_agentnexus_identity"}
+    registered_identity_matches = (
+        state_matches
+        and inspection.registered_agent_id is not None
+        and inspection.registered_agent_id == state.agent_id
+    )
+    if inspection.registration_present and not registered_identity_matches:
         return {"disposition": "refused", "reason": "target_bound_to_another_identity"}
-    if state_matches:
-        return {"disposition": "resume", "reason": "matching_interrupted_profile"}
     if inspection.active is True:
         return {"disposition": "refused", "reason": "target_profile_active"}
     if inspection.active is None:
         return {"disposition": "refused", "reason": "target_activity_unverified"}
+    if inspection.registration_present:
+        return {"disposition": "resume", "reason": "matching_agentnexus_identity"}
+    if state_matches:
+        return {"disposition": "resume", "reason": "matching_interrupted_profile"}
     return {"disposition": "adopt", "reason": "existing_unbound_inactive_target"}
 
 

@@ -20,7 +20,7 @@ from agentnexus_sdk.connector import (
     main,
     run_setup,
 )
-from agentnexus_sdk.runtimes import HermesAdapter
+from agentnexus_sdk.runtimes import HermesAdapter, RuntimeIntegrationError, ServerSpec
 
 
 def _environment() -> Environment:
@@ -319,7 +319,9 @@ def test_setup_plan_redacts_an_unverifiable_connector_profile_path(
 
     def refuse_profile_path(cls, install_root: Path, profile: str) -> Paths:
         del cls, install_root, profile
-        raise ConnectorError(f"Unsafe profile location: {private_path}")
+        raise ConnectorError(
+            f"Unsafe profile location: {private_path}", exit_code=connector_module.EXIT_USAGE
+        )
 
     monkeypatch.setattr(Paths, "for_profile", classmethod(refuse_profile_path))
     environment, _ = _hermes_environment(tmp_path, profiles=(), active=None)
@@ -409,7 +411,7 @@ def test_setup_plan_refuses_an_existing_target_when_activity_cannot_be_verified(
     )
 
     assert plan["target_profile"]["disposition"] == "refused"
-    assert plan["target_profile"]["reason"] == "activity_unverified"
+    assert plan["target_profile"]["reason"] == "target_activity_unverified"
     assert plan["invitation_input"] == "not_requested"
 
 
@@ -450,6 +452,41 @@ def test_setup_refuses_an_active_target_before_reading_the_invitation(
     assert not paths.root.exists()
 
 
+def test_hermes_configuration_refuses_a_target_that_became_active_after_planning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recheck immediately before configuration closes the plan/configuration race."""
+    environment, probe = _hermes_environment(
+        tmp_path, profiles=("operator-profile", "scout01"), active="scout01"
+    )
+    paths = Paths.for_profile(tmp_path, "scout01")
+    adapter = HermesAdapter(
+        which=environment.which,
+        runner=environment.run,
+        context=paths.runtime_context(),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "existing_entry",
+        lambda: {
+            "command": "agentnexus",
+            "args": [],
+            "env": {"AGENTNEXUS_AGENT_ID": "agent-1"},
+        },
+    )
+
+    with pytest.raises(RuntimeIntegrationError, match="selected Hermes target is active"):
+        adapter.configure(
+            ServerSpec(command="agentnexus", environment={"AGENTNEXUS_AGENT_ID": "agent-1"}),
+            backup_directory=paths.backups,
+            target_profile_disposition="resume",
+        )
+
+    assert not paths.root.exists()
+    assert not any(call[1:3] == ("profile", "create") for call in probe.calls)
+    assert not any(call[1:3] == ("mcp", "remove") for call in probe.calls)
+
+
 def test_setup_plan_refuses_a_target_bound_to_another_agent_without_echoing_its_id(
     tmp_path: Path,
 ) -> None:
@@ -475,7 +512,7 @@ def test_setup_plan_refuses_a_target_bound_to_another_agent_without_echoing_its_
     )
 
     assert plan["target_profile"]["disposition"] == "refused"
-    assert plan["target_profile"]["reason"] == "bound_to_another_agent"
+    assert plan["target_profile"]["reason"] == "target_bound_to_another_identity"
     assert plan["invitation_input"] == "not_requested"
     assert "other-agent-id-canary" not in json.dumps(plan)
     assert not any(call[1:3] == ("profile", "create") for call in probe.calls)
@@ -515,7 +552,7 @@ def test_creating_a_hermes_target_uses_its_official_fresh_profile_command(
     assert "HERMES_PROFILE" not in create_environment
     assert "AGENTNEXUS_PROFILE" not in create_environment
     assert "OPENAI_API_KEY" not in create_environment
-    assert "--from" not in create_call
+    assert not any(argument.startswith("--clone") for argument in create_call)
     assert not any("operator-profile" in argument for call in probe.calls for argument in call)
     assert not paths.root.exists()
 

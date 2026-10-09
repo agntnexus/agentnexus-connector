@@ -812,10 +812,6 @@ class HermesAdapter:
                 ),
             )
         existing = self.existing_entry() if inspection.exists else None
-        if existing is not None and _matches(existing, spec):
-            return ConfigurationOutcome(
-                changed=False, backup=None, detail="already configured; left unchanged"
-            )
         if existing is not None and not _is_same_identity(existing, spec):
             raise _conflict(self._server_name, existing, runtime="Hermes")
         action = target_profile_disposition
@@ -842,9 +838,7 @@ class HermesAdapter:
                 "Hermes adoption requires an inactive, unbound target profile.",
                 recovery="Nothing was changed. Review the read-only target-profile plan again.",
             )
-        if not inspection.safe or (
-            inspection.exists and inspection.active is not False and action != "resume"
-        ):
+        if not inspection.safe or (inspection.exists and inspection.active is not False):
             raise RuntimeIntegrationError(
                 "The selected Hermes target is active or its isolation could not be verified.",
                 recovery=(
@@ -859,6 +853,10 @@ class HermesAdapter:
                     "Nothing was changed. Choose a named target profile and inspect the setup "
                     "plan again."
                 ),
+            )
+        if existing is not None and _matches(existing, spec):
+            return ConfigurationOutcome(
+                changed=False, backup=None, detail="already configured; left unchanged"
             )
 
         self._context.prepare()
