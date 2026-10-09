@@ -1089,9 +1089,8 @@ def test_a_process_table_that_cannot_be_read_is_an_error_never_an_empty_proof(
             raise FileNotFoundError("ps")
         if failure == "timeout":
             raise subprocess.TimeoutExpired("ps", 10)
-        text = {"status": "1 0\n", "empty": "", "malformed": "not a table\nat all\n"}.get(
-            failure
-        ) or PARTLY_BROKEN[failure]
+        broken = {"status": "1 0\n", "empty": "", "malformed": "not a table\nat all\n"}
+        text = broken[failure] if failure in broken else PARTLY_BROKEN[failure]
         return SimpleNamespace(returncode=1 if failure == "status" else 0, stdout=text)
 
     monkeypatch.setattr(openclaw_arena.subprocess, "run", run)
