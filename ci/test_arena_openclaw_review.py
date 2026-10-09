@@ -609,7 +609,8 @@ def test_a_fingerprint_that_adds_a_content_digest_is_noticed(tmp_path: Path) -> 
     mutant = mutant_of(
         tmp_path / "mutant",
         '"kind": "file",  # metadata',
-        '"kind": __import__("hashlib").sha256(Path(config).read_bytes()).hexdigest(),  # metadata',
+        '"kind": __import__("hashlib")'
+        ".sha256(Path(profile_config).read_bytes()).hexdigest(),  # metadata",
     )
     try:
         expect_guard(
@@ -660,8 +661,8 @@ def test_the_relay_forwards_nothing_when_the_check_fails_or_cannot_be_made(how: 
 @pytest.mark.parametrize(
     ("original", "replacement"),
     [
-        ("if verify is not None and not verify():  # verify", "if False:  # verify"),
-        ("except Exception:  # verify", "except KeyError:  # verify"),
+        ("allowed = verify is None or verify()  # verify", "allowed = True  # verify"),
+        ("allowed = False  # unverifiable", "allowed = True  # unverifiable"),
     ],
     ids=["check-removed", "error-path-forwards"],
 )

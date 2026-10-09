@@ -81,6 +81,9 @@ class Launch:
 
     command: list[str]
     environment: dict[str, str]
+    #: What the driver pinned for this match, opaque to the supervisor. It is handed back to
+    #: `still_pinned` before every request is forwarded; a driver that pins nothing leaves it unset.
+    pin: str | None = None
 
 
 class ArenaRuntimeDriver(Protocol):

@@ -417,6 +417,8 @@ class ArenaRunner:
     """Poll as one signed identity; supervise one bounded child through the whole game."""
 
     scratch: Path | None = None  # the running child's throwaway runtime home
+    #: What the driver pinned for the running match (opaque), checked before every forward.
+    pin: str | None = None
 
     def __init__(
         self, paths: Any, providers: str, driver: arena_driver.ArenaRuntimeDriver, handle: Any
@@ -496,6 +498,26 @@ class ArenaRunner:
         if generation is not None:
             return f"generation:{generation}"
         return f"intent:{intent.intent_id}" if intent is not None else None
+
+    def _pinned(self) -> bool:
+        """Return whether the runtime's state is still the one this match was pinned to.
+
+        A driver that pinned nothing, or offers no check, has nothing to lose. One that cannot say
+        is treated as changed.
+        """
+        check = getattr(getattr(self, "driver", None), "still_pinned", None)
+        if check is None or self.pin is None:
+            return True
+        try:
+            return bool(check(self.handle, self.pin))
+        except Exception:
+            return False  # unverifiable
+
+    def _drop_proof(self) -> None:
+        """Void the proof: no claim is made until a new preflight succeeds while nothing runs."""
+        self.proven = None
+        self.refused = None
+        self._write_status()
 
     def _declared_model(self) -> str | None:
         """Return the driver's model text only if the one RMD-1 check the forum uses accepts it."""
@@ -674,6 +696,11 @@ class ArenaRunner:
                     diagnostic(intent, "late_move_refused", window.elapsed_ms())
                     window.expire()
                     break
+                if not self._pinned():
+                    # The runtime's state changed under this match: nothing more is forwarded, the
+                    # proof is void and the next claim waits for a new idle preflight.
+                    self._drop_proof()
+                    break
                 command = {**request, "match_id": intent.match_id, "seat": intent.seat}
                 started = time.monotonic()
                 if operation in {"game_join", "game_move"}:
@@ -787,6 +814,7 @@ class ArenaRunner:
             remove_scratch(scratch)  # scratch
             raise
         self.child, self.scratch = child, scratch
+        self.pin = getattr(launch, "pin", None)
         diagnostic(owned, "run_started")
         self.deadline = time.monotonic() + 3600
         if child.stdin is None:

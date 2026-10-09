@@ -28,6 +28,7 @@ import re
 import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,8 @@ SCRATCH_ENV = "AGENTNEXUS_ARENA_SCRATCH"
 PROFILE_ROOT_ENV = "AGENTNEXUS_OPENCLAW_PROFILE_ROOT"
 PROFILE_CONFIG_ENV = "AGENTNEXUS_OPENCLAW_PROFILE_CONFIG"
 PROFILE_STATE_ENV = "AGENTNEXUS_OPENCLAW_PROFILE_STATE"
+#: What the supervisor pinned about the profile's configuration file for this match: metadata only.
+PIN_ENV = "AGENTNEXUS_OPENCLAW_PIN"
 #: The server name of the bridge in the throwaway configuration; the runtime prefixes its tools.
 SERVER = "arena"
 PREFIXED = tuple(f"{SERVER}__{name}" for name in sorted(arena.TOOLS))
@@ -295,25 +298,56 @@ def profile_context_valid(profile_root: Path, profile_config: Path, profile_stat
     return True
 
 
-def pin_configuration(config: Path, scratch: Path) -> Path:
-    """Copy the profile's one configuration file into a private folder of this match's scratch.
+def config_fingerprint(
+    profile_root: Path, profile_config: Path, profile_state: Path
+) -> dict[str, str] | None:
+    """Describe the profile's configuration file by what can be said without opening it, or `None`.
 
-    The effective configuration of a match - its model, its route, its agent directories - is the
-    one the match started with; a later change to the profile is for the next match. Only that one
-    file is copied, never the authentication store or anything beside it, and it is never parsed,
-    logged or hashed here. A configuration that includes other files cannot be copied faithfully,
-    so it is refused. The copy is removed with the scratch.
+    The runtime alone reads its original configuration and its authentication store; the Connector
+    keeps only a fingerprint of the file's state: its canonical path, its identity (device and file
+    number), its size, its modification and status times, that it is a plain file and not a link,
+    and the owner and privacy boundary that `profile_context_valid` already checks. The file is
+    never opened, read, parsed, hashed or copied, and nothing derived from its content is in the
+    fingerprint. If any part cannot be proven, there is no fingerprint and the match is not played.
     """
-    data = Path(config).read_bytes()
-    if len(data) > ENVELOPE_BYTES * 16 or b"$include" in data:
-        raise ValueError("The profile configuration cannot be pinned for one match.")
-    folder = scratch / "pinned"
-    folder.mkdir(parents=True, exist_ok=True)
-    pinned = folder / Path(config).name
-    pinned.write_bytes(data)
-    with contextlib.suppress(OSError):
-        pinned.chmod(0o600)
-    return pinned
+    try:
+        if not profile_context_valid(profile_root, profile_config, profile_state):
+            return None
+        path = Path(profile_config).absolute()
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_ino == 0:
+            return None
+        return {
+            "path": str(path.resolve(strict=True)),
+            "device": str(info.st_dev),
+            "inode": str(info.st_ino),
+            "size": str(info.st_size),
+            "modified_ns": str(info.st_mtime_ns),
+            "changed_ns": str(info.st_ctime_ns),
+            "kind": "file",  # metadata
+        }
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def pin_text(fingerprint: dict[str, str]) -> str:
+    """Return the fingerprint as the one stable text that is carried to the worker."""
+    return json.dumps(fingerprint, sort_keys=True)
+
+
+def pinned_state_holds(
+    pin: str, profile_root: Path, profile_config: Path, profile_state: Path
+) -> bool:
+    """Return whether the configuration file is, provably, still the one that was pinned."""
+    current = config_fingerprint(profile_root, profile_config, profile_state)
+    return current is not None and pin_text(current) == pin
+
+
+class ProfileChangedError(RuntimeError):
+    """The profile's configuration file is no longer the one the match started with."""
+
+
+ProfileChanged = ProfileChangedError
 
 
 def agent_directories_valid(
@@ -875,6 +909,7 @@ class Decision:
         """Start with no move accepted."""
         self.accepted = threading.Event()
         self.over = threading.Event()
+        self.changed = threading.Event()
         self.lock = threading.Lock()
 
 
@@ -893,15 +928,21 @@ def worker_main(
     profile_root = Path(os.environ[PROFILE_ROOT_ENV])
     profile_config = Path(os.environ[PROFILE_CONFIG_ENV])
     profile_state = Path(os.environ[PROFILE_STATE_ENV])
-    # The configuration of this match is the pinned copy below the scratch, never the live profile.
+    pin = os.environ.get(PIN_ENV, "")
     if (
-        config is None
-        or config == profile_config
-        or not config.is_file()
-        or not config.resolve().is_relative_to(scratch.resolve())
+        not pin
+        or config != profile_config
         or not profile_context_valid(profile_root, profile_config, profile_state)
     ):
         raise RuntimeError("OpenClaw profile context is no longer owned.")
+
+    def unchanged() -> bool:
+        return pinned_state_holds(pin, profile_root, profile_config, profile_state)
+
+    def check() -> None:
+        """Raise unless the configuration file is, provably, as the match started with it."""
+        if not unchanged():
+            raise ProfileChanged("The profile's configuration changed during the match.")
 
     def pump() -> None:
         # The match process closing this pipe means it is gone. The guard ends the runtime's tree.
@@ -918,6 +959,7 @@ def worker_main(
     with contextlib.redirect_stdout(sys.stderr):
         boot = scratch / "boot"
         make_world(boot)
+        check()
         version, _ = bounded_run(
             [*command, "--version"],
             cli_environment(
@@ -936,6 +978,7 @@ def worker_main(
             raise RuntimeError("The runtime does not start.")
         # Asked once, before the worker is ready: a start of the runtime costs seconds that a
         # decision's budget does not have.
+        check()
         others = server_names(
             command,
             config,
@@ -961,6 +1004,8 @@ def worker_main(
                 profile_root,
                 profile_config,
                 profile_state,
+                check,
+                unchanged,
             )
 
 
@@ -975,8 +1020,15 @@ def run_decision(
     profile_root: Path,
     profile_config: Path,
     profile_state: Path,
+    check: Callable[[], None],
+    unchanged: Callable[[], bool],
 ) -> None:
-    """Make one decision with one run of the runtime; every ending is one fixed message."""
+    """Make one decision with one run of the runtime; every ending is one fixed message.
+
+    The configuration file is checked immediately before the runtime starts, again before each
+    request is relayed upstream and once more when the runtime has finished. A change at any of
+    them ends the runtime path, discards the decision and sends no move.
+    """
     work = Path(tempfile.mkdtemp(prefix="d", dir=scratch))
     state = Decision()
     run: Run | None = None
@@ -1006,9 +1058,12 @@ def run_decision(
                 disabled=others,
             ),
         )
-        threading.Thread(target=relay, args=(listener, state, incoming, send), daemon=True).start()
+        threading.Thread(
+            target=relay, args=(listener, state, incoming, send, unchanged), daemon=True
+        ).start()
         seconds = max(10, int(decision["seconds"]) - MARGIN_SECONDS)
         include_root = config.parent if config is not None else work
+        check()
         run = Run(
             exec_arguments(command, prompt, seconds, overlay, work),
             cli_environment(
@@ -1023,8 +1078,16 @@ def run_decision(
             work,
         )
         end = time.monotonic() + decision["seconds"] + MARGIN_SECONDS
-        while not state.accepted.is_set() and run.running() and time.monotonic() < end:
+        while (
+            not state.accepted.is_set()
+            and not state.changed.is_set()
+            and run.running()
+            and time.monotonic() < end
+        ):
             time.sleep(0.05)
+        if state.changed.is_set():
+            raise ProfileChanged("The profile's configuration changed during the decision.")
+        check()
         if state.accepted.is_set():
             outcome = "completed"
             send({"decision": "completed"})
@@ -1100,6 +1163,7 @@ def relay(
     state: Decision,
     incoming: queue.Queue[str],
     send: Callable[[dict[str, Any]], None],
+    verify: Callable[[], bool] | None = None,
 ) -> None:
     """Accept the bridge and answer its calls, one at a time, for the one bound match."""
     while not state.over.is_set():
@@ -1114,7 +1178,9 @@ def relay(
                 if not connection.poll(0.25):
                     continue
                 request = json.loads(connection.recv_bytes(65536))
-                connection.send_bytes(json.dumps(answer(request, state, incoming, send)).encode())
+                connection.send_bytes(
+                    json.dumps(answer(request, state, incoming, send, verify)).encode()
+                )
         with contextlib.suppress(Exception):
             connection.close()
 
@@ -1124,8 +1190,14 @@ def answer(
     state: Decision,
     incoming: queue.Queue[str],
     send: Callable[[dict[str, Any]], None],
+    verify: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """Validate one bridge call, ask the supervisor and shape the reply the bridge hands on."""
+    """Validate one bridge call, ask the supervisor and shape the reply the bridge hands on.
+
+    `verify` says whether the profile's configuration file is still the one the match started with.
+    If it says no, or cannot say, nothing is relayed upstream: the decision is over and sends no
+    move.
+    """
     with state.lock:
         if state.accepted.is_set():
             return {"text": "The move was already accepted. Stop.", "error": True}
@@ -1135,6 +1207,13 @@ def answer(
             bounded = arena.bounded_request(request["op"], request["arguments"])
         except ValueError:
             return {"text": "That request is outside the Arena contract.", "error": True}
+        try:
+            allowed = verify is None or verify()  # verify
+        except Exception:
+            allowed = False  # unverifiable
+        if not allowed:
+            state.changed.set()
+            return {"text": "The profile changed. Stop.", "error": True}
         send(bounded)
         reply = arena.line_document(incoming.get())
         if reply == {"complete": True}:
