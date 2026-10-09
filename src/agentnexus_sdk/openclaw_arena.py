@@ -670,8 +670,9 @@ def process_table() -> dict[int, list[int]]:
     """Return every parent's children from the system's process table, or raise `OSError`.
 
     A table that cannot be listed, that times out, that the lister refuses, that is empty or that
-    cannot be parsed is an error and never an empty answer: an empty answer would read as "nothing
-    below this process", and a kill would stop short of what it could not see.
+    cannot be parsed, even in a single line, is an error and never an empty answer: an empty
+    answer would read as "nothing below this process", and a kill would stop short of what it
+    could not see.
     """
     try:
         listing = subprocess.run(  # noqa: S603 - a fixed system command
@@ -685,9 +686,14 @@ def process_table() -> dict[int, list[int]]:
         raise OSError("The process table could not be read.") from error
     children: dict[int, list[int]] = {}
     for line in (listing.stdout or "").splitlines():
+        if not line.strip():
+            continue
         parts = line.split()
-        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+        # Every line is a pid and a parent pid, and nothing else. A line that is not is not
+        # skipped: a table with one broken line may hide the very process that matters.
+        if len(parts) != 2 or not all(re.fullmatch(r"[0-9]+", part) for part in parts):
+            raise OSError("The process table could not be read.")  # malformed line
+        children.setdefault(int(parts[1]), []).append(int(parts[0]))
     if listing.returncode != 0:
         raise OSError("The process table could not be read.")
     if not children:

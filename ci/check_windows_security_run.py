@@ -46,8 +46,21 @@ REQUIRED = frozenset(
 )
 #: How many tests must have passed in all: a job that ran a handful proved a handful.
 MINIMUM = 60
-#: A skip is allowed only for a reason that cannot apply on Windows.
-ALLOWED_SKIPS = ("privilege on Windows", "POSIX", "job object ends the tree")
+#: The only skips allowed: this test, with exactly this reason. A security test that is not
+#: listed here cannot be skipped, whatever its skip text says; one that is listed cannot be skipped
+#: for another reason. Each is a thing that cannot apply on Windows.
+_POSIX_TABLE = "the process table is the POSIX way to find a tree"
+ALLOWED_SKIPS = {
+    "test_a_symbolic_link_in_place_of_the_file_has_no_fingerprint": (
+        "a symbolic link needs a privilege on Windows"
+    ),
+    "test_a_run_whose_tree_cannot_be_listed_does_not_report_success": _POSIX_TABLE,
+    "test_without_a_process_table_the_proof_of_containment_fails": _POSIX_TABLE,
+    "test_a_process_table_that_cannot_be_read_is_an_error_never_an_empty_proof": _POSIX_TABLE,
+    "test_a_table_of_only_valid_lines_is_parsed_whole": _POSIX_TABLE,
+    "test_a_partly_broken_table_gives_a_kill_that_is_not_complete": _POSIX_TABLE,
+    "test_the_process_table_walk_finds_children_and_grandchildren": _POSIX_TABLE,
+}
 
 
 def problems(report: Path) -> list[str]:
@@ -70,8 +83,8 @@ def problems(report: Path) -> list[str]:
         skipped = case.find("skipped")
         if skipped is not None:
             reason = skipped.get("message", "") or (skipped.text or "")
-            if not any(allowed in reason for allowed in ALLOWED_SKIPS):
-                found.append(f"{name} was skipped for a reason Windows does not own: {reason!r}")
+            if ALLOWED_SKIPS.get(base) != reason:
+                found.append(f"{name} was skipped, which is not allowed for it: {reason!r}")
             missing[base] = missing.get(base, 0) + 1
             continue
         passed[base] = passed.get(base, 0) + 1
