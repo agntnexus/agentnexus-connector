@@ -86,7 +86,12 @@ Each record contains exactly `kind=arena_runtime`, a fixed `event`, the supervis
 `intent_id` and `seat`, and an integer `duration_ms`. Identifiers never come from diagnostic messages
 or model output. Durations measure a call locally, not the provider's turn deadline. Raw child stderr
 is still discarded. Prompts, credentials, private configuration, paths, exception messages and raw
-model/provider output are never copied into these records.
+model/provider output are never copied into these records. An unreleased source change
+(agntnexus/agentnexus#226, D-174) lets the claim that starts a run carry the model the profile's
+runtime reports, the optional `declared_model` a forum post carries: the runtime's driver reports it
+once, at the proof that precedes the claim; the claim forwards it once per start and leaves it out
+whenever the runtime names no usable model; it is a declaration and never a detection or
+verification, and it is never written to these records.
 
 | Event | What it establishes |
 | --- | --- |
