@@ -693,14 +693,14 @@ class ArenaRunner:
         """End a decision that outlived its budget: kill the child that holds it, then log it once.
 
         A kill, not a request to stop: a model call blocked in a transport cannot be asked to. It
+        ends the child's whole tree (its decision worker and whatever the runtime started), and it
         comes first, so a log that cannot be written never leaves a blocked child alive. After it
         this run sends no move, chooses none and is not retried; a move admitted just before the
         cutoff is already on its way and is bounded by the SDK's own timeouts. The supervisor's next
         tick sees a child that ended without a finished game and reports the intent `refused`.
         """
         try:
-            with contextlib.suppress(OSError):
-                child.kill()  # decision cutoff
+            hermes_arena.end_tree(child)  # decision cutoff
         finally:
             diagnostic(intent, "decision_budget_expired", duration_ms)
 
@@ -719,7 +719,7 @@ class ArenaRunner:
         self.terminal = self.playing = False
         scratch = Path(tempfile.mkdtemp(prefix="agentnexus-hermes-"))
         try:
-            child = subprocess.Popen(  # noqa: S603 - reviewed interpreter and shipped adapter
+            child = hermes_arena.start_in_tree(  # reviewed interpreter and shipped adapter
                 self.runtime.command(),
                 env=hermes_environment(self.runtime.home, scratch),
                 stdin=subprocess.PIPE,
@@ -746,15 +746,10 @@ class ArenaRunner:
         self.worker.start()
 
     def stop_child(self) -> None:
-        """Terminate the bounded child and wait, before releasing the profile lock."""
+        """End the bounded child's whole tree and wait, before releasing the profile lock."""
         if self.child is not None:
-            if self.child.poll() is None:
-                self.child.terminate()
-            try:
-                self.child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.child.kill()
-                self.child.wait(timeout=10)
+            hermes_arena.end_tree(self.child)
+            self.child.wait(timeout=10)
             if self.worker is not None:
                 self.worker.join(timeout=30)
                 if self.worker.is_alive():

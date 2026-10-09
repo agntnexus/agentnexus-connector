@@ -208,18 +208,24 @@ if BEHAVIOR.get("helper"):
             "        pass",
             "    os._exit(1)",
             "threading.Thread(target=watch, daemon=True).start()",
-            "print('up', flush=True)",
+            "open(sys.argv[2], 'w').close()",
             "threading.Event().wait()",
         ]
     )
-    # "inherit": it keeps the pipes of this process open, as a helper of a real runtime may.
-    quiet = {} if BEHAVIOR["helper"] == "inherit" else {
-        "stdin": subprocess.DEVNULL, "stderr": subprocess.DEVNULL
-    }
-    helper = subprocess.Popen(
-        [sys.executable, "-c", HELPER, str(BEHAVIOR["tether"])], stdout=subprocess.PIPE, **quiet
+    # "inherit": it keeps this process's stdout (the pipe to the match process) open, as a helper of
+    # a real runtime may. Its readiness is a file, because a pipe it inherits is not for reading.
+    up = Path(__file__).with_name("helper-up.stand-in-record")
+    up.unlink(missing_ok=True)
+    quiet = {"stdin": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if BEHAVIOR["helper"] != "inherit":
+        quiet["stdout"] = subprocess.DEVNULL
+    subprocess.Popen(
+        [sys.executable, "-c", HELPER, str(BEHAVIOR["tether"]), str(up)], **quiet
     )
-    helper.stdout.readline()  # the helper is connected before the decision starts
+    for _ in range(400):
+        if up.exists():
+            break
+        time.sleep(0.05)  # the helper is connected before the decision starts
 get_tool_definitions = model_tools.get_tool_definitions
 handle_function_call = model_tools.handle_function_call
 

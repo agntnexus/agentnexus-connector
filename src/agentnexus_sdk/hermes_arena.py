@@ -311,6 +311,186 @@ def line_document(line: str) -> dict[str, Any]:
     return document
 
 
+# ---------------------------------------------------------------------------------------------
+# Process trees (agntnexus/agentnexus#223): a kill ends everything the process started
+# ---------------------------------------------------------------------------------------------
+
+#: The attribute on a started process that holds what ends its whole tree.
+TREE_ATTRIBUTE = "agentnexus_tree"
+_CREATE_SUSPENDED = 0x00000004
+_KILL_ON_JOB_CLOSE = 0x00002000
+
+
+def descendants(root: int) -> set[int]:
+    """Return the pids below `root` (POSIX), read from the process table now."""
+    if os.name == "nt":
+        return set()
+    try:
+        table = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid="],  # noqa: S607 - the system's own process lister
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    children: dict[int, list[int]] = {}
+    for line in table.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    found: set[int] = set()
+    pending = [root]
+    while pending:
+        for child in children.get(pending.pop(), []):
+            if child not in found:
+                found.add(child)
+                pending.append(child)
+    return found
+
+
+class WindowsJob:
+    """A job object that ends every process in it when it is ended or its last handle closes."""
+
+    def __init__(self) -> None:
+        """Create the job with kill-on-close, so a killed owner leaves no runtime behind."""
+        import ctypes
+        from ctypes import wintypes
+
+        class Basic(ctypes.Structure):
+            _fields_ = (
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            )
+
+        class Counters(ctypes.Structure):
+            _fields_ = tuple((name, ctypes.c_uint64) for name in "abcdef")
+
+        class Extended(ctypes.Structure):
+            _fields_ = (
+                ("Basic", Basic),
+                ("Io", Counters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            )
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        kernel.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        ntdll = ctypes.WinDLL("ntdll")  # type: ignore[attr-defined]
+        ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+        self._kernel, self._ntdll = kernel, ntdll
+        self.handle = kernel.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise OSError("The process job could not be created.")
+        information = Extended()
+        information.Basic.LimitFlags = _KILL_ON_JOB_CLOSE
+        if not kernel.SetInformationJobObject(
+            self.handle, 9, ctypes.byref(information), ctypes.sizeof(information)
+        ):
+            self.close()
+            raise OSError("The process job could not be limited.")
+
+    def adopt(self, process: subprocess.Popen[Any]) -> None:
+        """Put a process that was started suspended in the job, then let it run."""
+        handle = int(process._handle)  # type: ignore[attr-defined]
+        if not self._kernel.AssignProcessToJobObject(self.handle, handle):
+            raise OSError("The process could not be put in its job.")
+        if self._ntdll.NtResumeProcess(handle) != 0:
+            raise OSError("The suspended process could not be resumed.")
+
+    def end(self) -> None:
+        """End every process in the job now."""
+        if self.handle:
+            self._kernel.TerminateJobObject(self.handle, 1)
+
+    def close(self) -> None:
+        """Release the job; whatever is still in it ends."""
+        handle, self.handle = self.handle, None
+        if handle:
+            self._kernel.CloseHandle(handle)
+
+
+class PosixTree:
+    """A process that leads a session of its own, and the pids below it that were seen."""
+
+    def __init__(self, pid: int) -> None:
+        """Remember the leader; its group is its own pid."""
+        self.pid = pid
+        self.known: set[int] = set()
+
+    def end(self, process: subprocess.Popen[Any]) -> None:
+        """Kill the group and every descendant read from the process table before the first signal.
+
+        A runtime may put a child in a session of its own, which no group signal reaches, so the
+        table is read first and each pid found is killed. The group is signalled only while the
+        leader has not been reaped: the pid is then still ours and cannot name another process.
+        """
+        import signal
+
+        members = self.known | descendants(self.pid)
+        if process.returncode is None:
+            with contextlib.suppress(OSError):
+                os.killpg(self.pid, signal.SIGKILL)
+        members |= descendants(self.pid)
+        for pid in members:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def start_in_tree(argv: list[str], **options: Any) -> subprocess.Popen[Any]:
+    """Start a process whose whole tree `end_tree` can end, however deep the runtime nests.
+
+    On Windows the process starts suspended, joins a job object that ends with its owner and only
+    then runs, so nothing it starts escapes the job. On POSIX it leads a session of its own. If the
+    tree cannot be set up, nothing is left running and the start fails.
+    """
+    if os.name == "nt":
+        job = WindowsJob()
+        flags = options.pop("creationflags", 0) | _CREATE_SUSPENDED
+        process = subprocess.Popen(argv, creationflags=flags, **options)  # noqa: S603 - reviewed
+        try:
+            job.adopt(process)
+        except BaseException:
+            job.end()
+            job.close()
+            with contextlib.suppress(OSError):
+                process.kill()
+            raise
+        setattr(process, TREE_ATTRIBUTE, job)
+    else:
+        process = subprocess.Popen(argv, start_new_session=True, **options)  # noqa: S603 - reviewed
+        setattr(process, TREE_ATTRIBUTE, PosixTree(process.pid))
+    return process
+
+
+def end_tree(process: Any) -> None:
+    """End a process started by `start_in_tree` and everything it started; safe to repeat.
+
+    A process that was not started that way (or a stand-in) is killed alone.
+    """
+    tree = getattr(process, TREE_ATTRIBUTE, None)
+    if isinstance(tree, WindowsJob):
+        tree.end()
+        tree.close()
+    elif isinstance(tree, PosixTree):
+        tree.end(process)
+    with contextlib.suppress(OSError):
+        process.kill()
+
+
 class Worker:
     """One decision worker, spoken to over private stdio and ended by a kill.
 
@@ -320,7 +500,7 @@ class Worker:
 
     def __init__(self, source: str) -> None:
         """Start a worker under this interpreter, with this environment and no listener."""
-        self.process = subprocess.Popen(  # noqa: S603 - this interpreter and this shipped file
+        self.process = start_in_tree(
             [sys.executable, "-I", str(Path(__file__).resolve()), source, "--decision"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -365,9 +545,8 @@ class Worker:
         return not self.ended and self.process.poll() is None
 
     def kill(self) -> None:
-        """End the worker now; a blocked model call cannot be asked to stop."""
-        with contextlib.suppress(OSError):
-            self.process.kill()
+        """End the worker and all it started now; a blocked model call cannot be asked to stop."""
+        end_tree(self.process)
 
     def close(self) -> None:
         """End the worker if it still runs, reap it and release its pipes and its reader.
