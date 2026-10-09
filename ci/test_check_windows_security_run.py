@@ -12,7 +12,6 @@ from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
 import check_windows_security_run as checker
-import pytest
 
 
 def junit(
@@ -81,25 +80,71 @@ def test_a_required_test_that_is_missing_is_refused(tmp_path: Path) -> None:
     assert any(required[0] in problem for problem in checker.problems(path))
 
 
-@pytest.mark.parametrize(
-    "reason",
-    [
-        "a symbolic link needs a privilege on Windows",
-        "owners and modes are a POSIX notion",
-        "the process table is the POSIX way to find a tree",
-    ],
-)
-def test_a_skip_that_cannot_apply_on_windows_is_allowed(tmp_path: Path, reason: str) -> None:
-    """Symbolic links and POSIX notions may be skipped; they prove nothing Windows owns."""
+def registered() -> list[tuple[str, str]]:
+    """Return every (test, reason) the check allows to be skipped, with a plain reason text."""
+    return [(name, reason) for name, reason in sorted(checker.ALLOWED_SKIPS.items())]
+
+
+def test_a_skip_registered_for_that_test_with_that_reason_is_allowed(tmp_path: Path) -> None:
+    """Each allowed skip is a named test and its exact reason; nothing else."""
+    assert checker.ALLOWED_SKIPS, "the Windows job allows no skip at all, which is not the case"
+    for name, reason in registered():
+        path = write(
+            tmp_path,
+            junit(all_required() + filler(checker.MINIMUM), skipped=[(name, reason)]),
+        )
+        assert checker.problems(path) == [], (name, reason)
+
+
+def test_a_test_that_is_not_registered_cannot_be_skipped_with_a_registered_reason(
+    tmp_path: Path,
+) -> None:
+    """A foreign test whose skip text sounds right is refused: the name has to be registered."""
+    _, reason = registered()[0]
     path = write(
         tmp_path,
-        junit(all_required() + filler(checker.MINIMUM), skipped=[("test_posix_only", reason)]),
+        junit(
+            all_required() + filler(checker.MINIMUM),
+            skipped=[("test_an_unregistered_security_test", reason)],
+        ),
     )
-    assert checker.problems(path) == []
+    assert any("test_an_unregistered_security_test" in p for p in checker.problems(path))
+
+
+def test_a_registered_test_skipped_for_another_reason_is_refused(tmp_path: Path) -> None:
+    """The right name with a reason that is not its own is a hole."""
+    name, reason = registered()[0]
+    other = next(r for n, r in registered() if r != reason)
+    for wrong in (other, reason + " today", "privilege on Windows", "POSIX"):
+        path = write(
+            tmp_path,
+            junit(all_required() + filler(checker.MINIMUM), skipped=[(name, wrong)]),
+        )
+        assert any(name in p for p in checker.problems(path)), wrong
+
+
+def test_a_registered_skip_never_excuses_a_required_test(tmp_path: Path) -> None:
+    """Even with its own text, a required test that was skipped is refused."""
+    required = all_required()[0]
+    _, reason = registered()[0]
+    path = write(
+        tmp_path,
+        junit(all_required()[1:] + filler(checker.MINIMUM), skipped=[(required, reason)]),
+    )
+    assert any(required in p for p in checker.problems(path))
+
+
+def test_every_registered_skip_names_a_test_that_exists_and_is_marked(tmp_path: Path) -> None:
+    """A registered name that no longer exists would allow a skip nobody can check."""
+    text = "\n".join(
+        path.read_text(encoding="utf-8") for path in Path(__file__).parent.glob("test_*.py")
+    )
+    for name in checker.ALLOWED_SKIPS:
+        assert f"def {name}(" in text, f"{name} is registered as skippable but does not exist"
 
 
 def test_a_skip_for_any_other_reason_is_refused(tmp_path: Path) -> None:
-    """A skip that is not one of those is a hole."""
+    """A skip that is not registered is a hole."""
     path = write(
         tmp_path,
         junit(
