@@ -191,6 +191,41 @@ def scaffold():
 
 
 scaffold()
+if BEHAVIOR.get("helper"):
+    # A process the runtime started on its own (a tool server, a transport helper): it holds a
+    # tether too, so the test can tell whether it outlived the decision that was cut off.
+    import subprocess
+    import sys
+
+    HELPER = "\\n".join(
+        [
+            "import os, socket, sys, threading",
+            "s = socket.create_connection(('127.0.0.1', int(sys.argv[1])))",
+            "def watch():",
+            "    try:",
+            "        s.recv(1)",
+            "    except OSError:",
+            "        pass",
+            "    os._exit(1)",
+            "threading.Thread(target=watch, daemon=True).start()",
+            "open(sys.argv[2], 'w').close()",
+            "threading.Event().wait()",
+        ]
+    )
+    # "inherit": it keeps this process's stdout (the pipe to the match process) open, as a helper of
+    # a real runtime may. Its readiness is a file, because a pipe it inherits is not for reading.
+    up = Path(__file__).with_name("helper-up.stand-in-record")
+    up.unlink(missing_ok=True)
+    quiet = {"stdin": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if BEHAVIOR["helper"] != "inherit":
+        quiet["stdout"] = subprocess.DEVNULL
+    subprocess.Popen(
+        [sys.executable, "-c", HELPER, str(BEHAVIOR["tether"]), str(up)], **quiet
+    )
+    for _ in range(400):
+        if up.exists():
+            break
+        time.sleep(0.05)  # the helper is connected before the decision starts
 get_tool_definitions = model_tools.get_tool_definitions
 handle_function_call = model_tools.handle_function_call
 
@@ -775,16 +810,24 @@ time.sleep(120)
 def test_ending_a_worker_does_not_wait_for_a_helper_that_holds_its_pipe(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The reader of a pipe that never closes must not make ending the worker take for ever."""
+    """The reader of a pipe that never closes must not make ending the worker take for ever.
+
+    The helper escapes the tree here (the kill reaches the worker alone), as a helper that left its
+    session and was orphaned would; a helper inside the tree dies with the worker and is proved by
+    the process-tree tests.
+    """
     script = tmp_path / "worker_with_helper.py"
     script.write_text(HELPER, encoding="utf-8")
     pid_file = tmp_path / "helper.pid"
     real = subprocess.Popen
 
     def popen(command: list[str], **kwargs: Any) -> Any:
+        if "--decision" not in command:
+            return real(command, **kwargs)
         return real([sys.executable, str(script), str(pid_file)], **kwargs)
 
     monkeypatch.setattr(hermes_arena.subprocess, "Popen", popen)
+    monkeypatch.setattr(hermes_arena, "end_tree", lambda process: process.kill())
     worker = hermes_arena.Worker("source")
     try:
         deadline = time.monotonic() + 20
@@ -911,7 +954,7 @@ def test_a_parent_that_does_not_kill_leaves_a_match_process_that_does_not_end_it
     """Without the parent's kill the second line is gone: the process-level proof notices."""
     lax = lax_match_process(tmp_path)
     broken = load_mutant(
-        tmp_path / "mutant", arena_runner, "child.kill()  # decision cutoff", "pass"
+        tmp_path / "mutant", arena_runner, "hermes_arena.end_tree(child)  # decision cutoff", "pass"
     )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -945,7 +988,7 @@ def test_a_worker_that_outlives_its_match_process_is_noticed(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    """Without the worker's own exit on a closed pipe, the parent's kill leaves a Hermes behind."""
+    """A match process killed alone leaves its worker unless the OS ends it (POSIX has no job)."""
     source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
     for original, replacement in (
         ("message = worker.get(remaining)", "message = worker.get(3600)"),
@@ -958,10 +1001,15 @@ def test_a_worker_that_outlives_its_match_process_is_noticed(
     broken.write_text(source, encoding="utf-8")
     run_dir = tmp_path / "run"
     run_dir.mkdir()
+    # The parent of this test kills the match process alone, as the parent did before the tree kill.
+    monkeypatch.setattr(hermes_arena, "end_tree", lambda process: process.kill())
     run = run_process(monkeypatch, capsys, run_dir, "white", {"mode": "block"}, arena=broken)
     assert run.forwarded == []
-    with pytest.raises(AssertionError, match="still alive"):
-        assert_no_residue(run)
+    if os.name == "nt":
+        assert_no_residue(run)  # the job object of the match process is the second line here
+    else:
+        with pytest.raises(AssertionError, match="still alive"):
+            assert_no_residue(run)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1108,3 +1156,96 @@ def test_an_adapter_that_reads_the_profile_from_the_wrong_place_is_noticed(
     with pytest.raises(AssertionError):
         assert_profile_untouched(run)
     run.tethers.close()
+
+
+# ---------------------------------------------------------------------------------------------
+# The whole tree ends with the decision (agntnexus/agentnexus#223, complete process tree)
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("helper", ["detached", "inherit"])
+@pytest.mark.parametrize("role", ["white", "first"])
+def test_the_cutoff_ends_every_process_the_runtime_started(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    role: str,
+    helper: str,
+) -> None:
+    """A model blocked at the cutoff: the worker and the helper it started are both gone."""
+    behavior = {"mode": "block", "helper": helper}
+    run = run_process(monkeypatch, capsys, tmp_path, role, behavior)
+    assert run.forwarded == []
+    assert run.events.count("decision_budget_expired") == 1
+    assert_no_residue(run)  # the helper holds a tether: it must be gone too
+
+
+def test_a_cleanup_that_is_cut_off_ends_the_whole_tree_of_the_worker_it_replaces(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The replaced worker's helper does not accumulate: every worker's tree ends with it."""
+    behavior = {"mode": "fast", "arguments": MOVES["white"], "close": "hang", "helper": "detached"}
+    run = run_process(monkeypatch, capsys, tmp_path, "white", behavior, bound=10.0, turns=2)
+    assert moves_of(run, "white") == [MOVES["white"], MOVES["white"]]
+    assert run.events.count("decision_cleanup_expired") == 2
+    assert_no_residue(run)
+
+
+def test_the_parent_ends_the_whole_tree_of_a_match_process_it_cuts_off(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The second line: the match process, its worker and the worker's helper all die."""
+    lax = lax_match_process(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    behavior = {"mode": "block", "helper": "detached"}
+    run = run_process(monkeypatch, capsys, run_dir, "white", behavior, arena=lax)
+    assert run.forwarded == []
+    assert run.events.count("decision_budget_expired") == 1
+    assert_no_residue(run)
+
+
+def untreed_match_process(tmp_path: Path) -> Path:
+    """Return a copy of the adapter that starts its decision worker outside a process tree."""
+    source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
+    for original, replacement in (
+        ("message = worker.get(remaining)", "message = worker.get(3600)"),
+        ("self.process = start_in_tree(", "self.process = subprocess.Popen("),
+    ):
+        assert source.count(original) == 1
+        source = source.replace(original, replacement)
+    path = tmp_path / "untreed" / "hermes_arena.py"
+    path.parent.mkdir()
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
+def test_a_worker_and_a_match_process_started_outside_a_tree_leave_the_helper_behind(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Mutation: with no tree under the worker or the match process, a kill reaches only one."""
+    untreed = untreed_match_process(tmp_path)
+    broken = load_mutant(
+        tmp_path / "mutant",
+        arena_runner,
+        "child = hermes_arena.start_in_tree(",
+        "child = subprocess.Popen(",
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    behavior = {"mode": "block", "helper": "detached"}
+    try:
+        run = run_process(
+            monkeypatch, capsys, run_dir, "white", behavior, module=broken, arena=untreed
+        )
+        assert run.forwarded == []
+        with pytest.raises(AssertionError, match="still alive"):
+            assert_no_residue(run)
+    finally:
+        sys.modules.pop(broken.__name__, None)

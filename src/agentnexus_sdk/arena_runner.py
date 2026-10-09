@@ -385,6 +385,43 @@ def remove_scratch(path: Path) -> None:
         time.sleep(0.2)
 
 
+#: The runtime must load and configure inside this long, measured on this machine by the preflight
+#: itself. A seat is joined only once a decision worker has configured Hermes (`READY_SECONDS`), so
+#: a runtime that cannot do it well inside that cannot be trusted with a turn.
+PREFLIGHT_SECONDS = 60
+
+
+def budget_problems(report: Any = None) -> list[str]:
+    """Name every way the turn budget fails to hold; the list is empty when it is guaranteed.
+
+    The decision bound leaves the reserve under each provider deadline, and the reserve holds a
+    stale observation, one bounded provider phase and a second of slack. The cleanup is short
+    beside it. A report from the adapter, when given, is the very budget the parent checked.
+    """
+    problems: list[str] = []
+    if hermes_arena.TURN_BUDGET_VERSION != 1:
+        problems.append("version")
+    turns, decisions = hermes_arena.PROVIDER_TURN_SECONDS, hermes_arena.DECISION_SECONDS
+    if not set(turns) == set(decisions) == set(hermes_arena.DECISIONS):
+        problems.append("games_disagree")
+    for game, turn in turns.items():
+        if not 0 < decisions.get(game, 0) <= turn - hermes_arena.TURN_RESERVE_SECONDS:
+            problems.append("decision_exceeds_turn")
+            break
+    needed = hermes_arena.STATE_POLL_SECONDS + games.PROVIDER_TIMEOUT_SECONDS + 1
+    if needed > hermes_arena.TURN_RESERVE_SECONDS:
+        problems.append("reserve_too_small")
+    if (
+        not 0
+        < hermes_arena.CLEANUP_SECONDS
+        < (hermes_arena.TURN_RESERVE_SECONDS - hermes_arena.STATE_POLL_SECONDS)
+    ):
+        problems.append("cleanup_too_long")
+    if report is not None and report != hermes_arena.budget_report():
+        problems.append("adapter_budget_differs")
+    return problems
+
+
 @dataclass(frozen=True)
 class HermesRun:
     """A verified installed runtime and one isolated credentials home."""
@@ -440,20 +477,30 @@ class HermesRun:
         """Run the adapter's check of the exact three-tool contract, which makes no inference.
 
         Importing Hermes fills its home, so the check runs with a throwaway one: the profile is
-        left exactly as it was.
+        left exactly as it was. It is also where the turn budget is found to hold or not, before
+        any seat is claimed: the adapter reports the budget it keeps and proves, in the runtime's
+        own interpreter, that one kill ends a whole tree; the parent compares the budget with its
+        own, proves the kill itself, and bounds the cold start. Anything missing refuses.
         """
         with tempfile.TemporaryDirectory(
             prefix="agentnexus-hermes-", ignore_cleanup_errors=True
         ) as scratch:
-            probe = subprocess.run(  # noqa: S603 - fixed local runtime or service command
+            done = hermes_arena.run_in_tree(
                 self.command("--preflight"),
+                seconds=PREFLIGHT_SECONDS,
                 env=hermes_environment(self.home, Path(scratch)),
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
             )
-        return probe.returncode == 0 and '"bounded": true' in probe.stdout
+        if done is None or done[0] != 0:
+            return False
+        try:
+            report = json.loads(done[1].strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            return False
+        if not isinstance(report, dict) or report.get("bounded") is not True:
+            return False
+        if report.get("tree") is not True:
+            return False
+        return not budget_problems(report.get("turn_budget")) and hermes_arena.prove_tree()
 
     def command(self, *arguments: str) -> list[str]:
         """Use Hermes' interpreter with this wheel's standalone compatible adapter."""
@@ -485,6 +532,9 @@ class ArenaRunner:
     """Poll as one signed identity; supervise one bounded child through the whole game."""
 
     scratch: Path | None = None  # the running child's throwaway Hermes home
+    #: Up from the moment a run is being stopped (cancelled, replaced, bounded out) until the next
+    #: launch. Whatever the child had already written is then not served: no late move.
+    stopping = False
 
     def __init__(self, paths: Any, providers: str, runtime: HermesRun) -> None:
         """Read only this profile's state and key; provider origins are local configuration."""
@@ -622,6 +672,9 @@ class ArenaRunner:
                     diagnostic(intent, "late_move_refused", window.elapsed_ms())
                     window.expire()
                     break
+                if self.stopping:  # stopping before the forward
+                    # A run being stopped serves nothing more, whatever the child had written.
+                    break
                 command = {**request, "match_id": intent.match_id, "seat": intent.seat}
                 started = time.monotonic()
                 if operation in {"game_join", "game_move"}:
@@ -693,19 +746,22 @@ class ArenaRunner:
         """End a decision that outlived its budget: kill the child that holds it, then log it once.
 
         A kill, not a request to stop: a model call blocked in a transport cannot be asked to. It
+        ends the child's whole tree (its decision worker and whatever the runtime started), and it
         comes first, so a log that cannot be written never leaves a blocked child alive. After it
         this run sends no move, chooses none and is not retried; a move admitted just before the
         cutoff is already on its way and is bounded by the SDK's own timeouts. The supervisor's next
         tick sees a child that ended without a finished game and reports the intent `refused`.
         """
         try:
-            with contextlib.suppress(OSError):
-                child.kill()  # decision cutoff
+            hermes_arena.end_tree(child)  # decision cutoff
         finally:
             diagnostic(intent, "decision_budget_expired", duration_ms)
 
     def _launch(self, intent: StartIntent) -> None:
         """Claim, reserve durably, then spawn; restart uncertainty never launches twice."""
+        if budget_problems():
+            # Before the claim: the seat stays queued, and no model work can start.
+            raise RunnerRefused("The Arena turn budget is not guaranteed.")
         claimed = self._post(f"/{intent.intent_id}/claim", {"runner_id": self.journal.runner_id})
         owned = StartIntent.parse(claimed, agent_id=self.config.agent_id)
         if owned.claimed_by != self.journal.runner_id:
@@ -717,9 +773,10 @@ class ArenaRunner:
             return
         self.finished.clear()
         self.terminal = self.playing = False
+        self.stopping = False
         scratch = Path(tempfile.mkdtemp(prefix="agentnexus-hermes-"))
         try:
-            child = subprocess.Popen(  # noqa: S603 - reviewed interpreter and shipped adapter
+            child = hermes_arena.start_in_tree(  # reviewed interpreter and shipped adapter
                 self.runtime.command(),
                 env=hermes_environment(self.runtime.home, scratch),
                 stdin=subprocess.PIPE,
@@ -746,15 +803,11 @@ class ArenaRunner:
         self.worker.start()
 
     def stop_child(self) -> None:
-        """Terminate the bounded child and wait, before releasing the profile lock."""
+        """End the bounded child's whole tree and wait, before releasing the profile lock."""
+        self.stopping = True  # first: nothing the child left behind is served from now on
         if self.child is not None:
-            if self.child.poll() is None:
-                self.child.terminate()
-            try:
-                self.child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.child.kill()
-                self.child.wait(timeout=10)
+            hermes_arena.end_tree(self.child)
+            self.child.wait(timeout=10)
             if self.worker is not None:
                 self.worker.join(timeout=30)
                 if self.worker.is_alive():
@@ -871,7 +924,16 @@ def command(namespace: Any, install_root: Path) -> int:
         return 0
     runtime = HermesRun.inspect(paths)
     if action == "preflight":
-        print(json.dumps({"profile": paths.profile, "bounded": True, "hermes": "0.21.3"}))
+        print(
+            json.dumps(
+                {
+                    "profile": paths.profile,
+                    "bounded": True,
+                    "hermes": "0.21.3",
+                    "turn_budget": hermes_arena.TURN_BUDGET_VERSION,
+                }
+            )
+        )
         return 0
     if action == "enable":
         providers = namespace.providers

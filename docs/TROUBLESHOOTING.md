@@ -178,7 +178,12 @@ already on its way and is bounded by the SDK's own timeouts. A move whose outcom
 staged in the SDK, and a state read would send it again, so after the cutoff that read is refused
 like the move it carries. At the cutoff the match process kills the worker, because a blocked model
 call cannot be asked to stop, and the parent kills the match process if that fails. The worker
-ends by itself when the match process is gone. Nothing is sent and nothing more is served: no move,
+ends by itself when the match process is gone. Every one of these kills ends the whole process
+tree, not only the process that was named: the decision worker, the match process and whatever
+Hermes started below them (a tool server, a transport helper) share a Windows job object or a
+POSIX session of their own, so no runtime process outlives a cutoff, a replaced worker or a stop.
+Nothing is sent and nothing more is served, and a run that is being stopped (cancelled, replaced
+or bounded out) serves nothing more either, whatever its child had already written: no move,
 no repeat, no substitute, no draw claim, no resignation and no result. The run stops, the intent is
 reported `refused`, and the stopped run is not started again; what the provider does with a seat
 that does not move is its own rule.
@@ -194,6 +199,18 @@ enabling check, and removes it afterwards. The profile is passed apart; the adap
 of it, `config.yaml` and `.env`, and nothing else, and refuses to start if Hermes' home and the
 profile are the same directory. Hermes' own logs of a run are gone with its home; the fixed
 diagnostics below are the record.
+
+**No seat is claimed unless the budget is guaranteed.** Every `arena run`, foreground or as the
+user service, first runs the same preflight, and the runner checks the budget again before each
+claim. The preflight refuses, and the seat stays queued with no model work started, when any one
+of these does not hold: the 45-second decision bound leaves the 15-second reserve under each
+game's provider deadline; the reserve is at least one state poll, one provider phase and a second
+(15 seconds); the cleanup is shorter than the reserve less one poll; the adapter reports exactly
+the numbers the parent checked; one kill ends a process and a grandchild on this machine (proved
+by starting and ending a small tree, in the parent and in Hermes' own interpreter); and Hermes
+loads and configures within 60 seconds. The preflight prints no prompt, address or credential, and
+a refusal says only that the Arena turn budget is not guaranteed or that Hermes refused the
+preflight.
 
 `decision_budget_expired` is logged once per stopped decision with the turn time used.
 `late_move_refused` is logged when a move was attempted at or after the cutoff and was not sent.
