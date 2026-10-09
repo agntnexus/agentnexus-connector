@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 from arena_fakes import expect_guard, load_mutant
-from arena_openclaw_support import stand_in_handle
+from arena_openclaw_support import make_private, stand_in_handle
 from fake_chat_model import FakeChatModel
 
 from agentnexus_sdk import (
@@ -50,8 +50,7 @@ def owned_profile(tmp_path: Path) -> tuple[Path, Path, Path]:
     (runtime / "state").mkdir(parents=True)
     config = runtime / "openclaw.json"
     config.write_text("{}", encoding="utf-8")
-    if POSIX:
-        profile.chmod(0o700)
+    make_private(profile)
     return profile, config, runtime / "state"
 
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -11,7 +13,19 @@ from typing import Any
 from arena_process_harness import openclaw_stand_in
 from fake_chat_model import FakeChatModel
 
-from agentnexus_sdk import arena_driver_openclaw
+from agentnexus_sdk import arena_driver_openclaw, openclaw_arena
+
+
+def make_private(path: Path) -> None:
+    """Make a profile directory the user's alone: mode 0700, or an access list of the user only."""
+    path.chmod(0o700)
+    if sys.platform == "win32":
+        sid = openclaw_arena.windows_current_sid()
+        subprocess.run(  # noqa: S603 - fixed system tool on a test directory
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"*{sid}:(OI)(CI)F"],  # noqa: S607
+            check=True,
+            capture_output=True,
+        )
 
 
 def pid_alive(pid: int) -> bool:

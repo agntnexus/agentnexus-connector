@@ -351,6 +351,13 @@ class OpenClawArenaDriver:
         """Return the match process command: it runs the OpenClaw worker as its decision worker."""
         match = Path(arena_match.__file__).resolve()
         worker = Path(openclaw_arena.__file__).resolve()
+        if handle.config is None:
+            raise DriverRefused("not_isolated", self.display_name)
+        try:
+            # One configuration for the whole match: a later change to the profile is for the next.
+            pinned = openclaw_arena.pin_configuration(handle.config, scratch)
+        except (OSError, ValueError) as error:
+            raise DriverRefused("not_isolated", self.display_name) from error
         environment = {
             key: value for key, value in os.environ.items() if key.upper() in openclaw_arena.KEPT
         }
@@ -358,7 +365,7 @@ class OpenClawArenaDriver:
             PYTHONUTF8="1",
             **{
                 openclaw_arena.COMMAND_ENV: json.dumps(list(handle.command)),
-                openclaw_arena.CONFIG_ENV: str(handle.config) if handle.config is not None else "",
+                openclaw_arena.CONFIG_ENV: str(pinned),  # pinned
                 openclaw_arena.SCRATCH_ENV: str(scratch),
                 openclaw_arena.PROFILE_ROOT_ENV: str(handle.profile_root or ""),
                 openclaw_arena.PROFILE_CONFIG_ENV: str(handle.config or ""),

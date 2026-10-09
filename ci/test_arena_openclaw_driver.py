@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 from arena_fakes import expect_guard, load_mutant
-from arena_openclaw_support import stand_in_handle, survivors
+from arena_openclaw_support import make_private, stand_in_handle, survivors
 from arena_process_harness import profile_changes, snapshot
 from fake_chat_model import FakeChatModel
 
@@ -84,7 +84,7 @@ def test_the_reviewed_openclaw_install_proves_its_isolated_three_tool_path(
     assert version.returncode == 0 and "OpenClaw 2026.9.9" in version.stdout
     config = tmp_path / "profile" / "openclaw.json"
     config.parent.mkdir()
-    config.parent.chmod(0o700)
+    make_private(config.parent)
     config.write_text(json.dumps(model.profile_config()), encoding="utf-8")
     state = tmp_path / "profile" / "state"
     state.mkdir()
@@ -205,7 +205,7 @@ def inspect_with(
     profile = tmp_path / "profile"
     runtime = profile / "runtime" / "openclaw"
     runtime.mkdir(parents=True)
-    profile.chmod(0o700)
+    make_private(profile)
     config = runtime / "openclaw.json"
     config.write_text("{}", encoding="utf-8")
     state = runtime / "state"
@@ -407,7 +407,7 @@ def test_profile_auth_state_and_per_decision_state_are_separate(tmp_path: Path) 
     profile = tmp_path / "profile"
     state = profile / "runtime" / "openclaw" / "state"
     state.mkdir(parents=True)
-    profile.chmod(0o700)
+    make_private(profile)
     profile_config = profile / "runtime" / "openclaw" / "openclaw.json"
     profile_config.write_text("{}", encoding="utf-8")
     work = tmp_path / "work"
@@ -435,7 +435,7 @@ def test_profile_auth_state_must_be_inside_the_owned_runtime_home(tmp_path: Path
     config = runtime / "openclaw.json"
     state = runtime / "state"
     state.mkdir(parents=True)
-    profile.chmod(0o700)
+    make_private(profile)
     config.write_text("{}", encoding="utf-8")
     assert openclaw_arena.profile_context_valid(profile, config, state)
 
@@ -446,7 +446,7 @@ def test_profile_auth_state_must_be_inside_the_owned_runtime_home(tmp_path: Path
     linked_profile = tmp_path / "linked-profile"
     linked_runtime = linked_profile / "runtime" / "openclaw"
     linked_runtime.mkdir(parents=True)
-    linked_profile.chmod(0o700)
+    make_private(linked_profile)
     (linked_runtime / "openclaw.json").write_text("{}", encoding="utf-8")
     try:
         (linked_runtime / "state").symlink_to(outside, target_is_directory=True)
@@ -463,7 +463,7 @@ def test_profile_auth_state_requires_private_profile_ownership(tmp_path: Path) -
     profile = tmp_path / "profile"
     runtime = profile / "runtime" / "openclaw"
     runtime.mkdir(parents=True)
-    profile.chmod(0o700)
+    make_private(profile)
     config = runtime / "openclaw.json"
     config.write_text("{}", encoding="utf-8")
     state = runtime / "state"
@@ -473,7 +473,7 @@ def test_profile_auth_state_requires_private_profile_ownership(tmp_path: Path) -
     try:
         assert not openclaw_arena.profile_context_valid(profile, config, state)
     finally:
-        profile.chmod(0o700)
+        make_private(profile)
 
 
 def test_openclaw_agent_directories_must_stay_in_the_owned_profile(tmp_path: Path) -> None:
@@ -481,7 +481,7 @@ def test_openclaw_agent_directories_must_stay_in_the_owned_profile(tmp_path: Pat
     profile = tmp_path / "profile"
     state = profile / "runtime" / "openclaw" / "state"
     state.mkdir(parents=True)
-    profile.chmod(0o700)
+    make_private(profile)
     owned = state / "agents" / "main" / "agent"
     escaped = tmp_path / "shared-openclaw-agent"
     assert openclaw_arena.agent_directories_valid(
@@ -507,7 +507,7 @@ def test_openclaw_agent_directory_path_guard_is_live(tmp_path: Path) -> None:
     profile = tmp_path / "profile"
     state = profile / "runtime" / "openclaw" / "state"
     state.mkdir(parents=True)
-    profile.chmod(0o700)
+    make_private(profile)
     entries = [{"id": "main", "agentDir": str(tmp_path / "outside-agent")}]
 
     def rejects_escape(module: ModuleType) -> None:

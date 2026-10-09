@@ -50,6 +50,7 @@ class FakeChatModel:
                 owner.requests.append(
                     {
                         "path": self.path,
+                        "model": body.get("model"),
                         "tools": sorted(names),
                         "roles": [m.get("role") for m in body.get("messages", [])],
                         "scheme": (self.headers.get("authorization") or "").partition(" ")[0],
