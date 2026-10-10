@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 from arena_fakes import Decision, Scripted, Staying, no_move, play
 
-from agentnexus_sdk import arena_runner, hermes_arena
+from agentnexus_sdk import arena_driver_hermes, arena_match, arena_runner, hermes_arena
 
 
 def intent(agent_id: str) -> dict[str, object]:
@@ -77,7 +77,7 @@ def test_hermes_environment_inherits_no_other_profiles_credentials(
     own = tmp_path / "own"
     own.mkdir()
     scratch = tmp_path / "scratch"
-    environment = arena_runner.hermes_environment(own, scratch)
+    environment = arena_driver_hermes.hermes_environment(own, scratch)
     # Hermes fills its home with state of its own; that home is a throwaway, never the profile,
     # which the adapter is only told about so that it can read two files of it.
     assert environment["HERMES_HOME"] == str(scratch)
@@ -104,16 +104,16 @@ def test_expired_or_unbounded_intent_is_refused() -> None:
 
 def test_a_chess_move_is_bounded_like_a_column() -> None:
     """#202: a Chess move is UCI, a claim or both; never a column with it, never free text."""
-    assert hermes_arena.bounded_request("game_move", {"move": "e2e4"}) == {
+    assert arena_match.bounded_request("game_move", {"move": "e2e4"}) == {
         "operation": "game_move",
         "move": "e2e4",
     }
-    assert hermes_arena.bounded_request("game_move", {"move": "e7e8q", "claim": "fifty_moves"}) == {
+    assert arena_match.bounded_request("game_move", {"move": "e7e8q", "claim": "fifty_moves"}) == {
         "operation": "game_move",
         "move": "e7e8q",
         "claim": "fifty_moves",
     }
-    assert hermes_arena.bounded_request("game_move", {"claim": "threefold_repetition"}) == {
+    assert arena_match.bounded_request("game_move", {"claim": "threefold_repetition"}) == {
         "operation": "game_move",
         "claim": "threefold_repetition",
     }
@@ -128,12 +128,12 @@ def test_a_chess_move_is_bounded_like_a_column() -> None:
         {},
     ):
         with pytest.raises(ValueError):
-            hermes_arena.bounded_request("game_move", arguments)
+            arena_match.bounded_request("game_move", arguments)
 
 
 def test_model_cannot_name_another_match_or_tool() -> None:
     """Refuse unknown tools, foreign match fields and a boolean masquerading as a column."""
-    assert hermes_arena.bounded_request("game_move", {"column": 3}) == {
+    assert arena_match.bounded_request("game_move", {"column": 3}) == {
         "operation": "game_move",
         "column": 3,
     }
@@ -144,8 +144,8 @@ def test_model_cannot_name_another_match_or_tool() -> None:
         ("game_move", {"column": True}),
     ):
         with pytest.raises(ValueError):
-            hermes_arena.bounded_request(operation, arguments)
-    definitions = [{"function": {"name": name}} for name in sorted(hermes_arena.TOOLS)]
+            arena_match.bounded_request(operation, arguments)
+    definitions = [{"function": {"name": name}} for name in sorted(arena_match.TOOLS)]
     hermes_arena.assert_tools(definitions)
     for altered in (
         [*definitions, {"function": {"name": "terminal"}}],
@@ -187,7 +187,7 @@ def test_hermes_waits_locally_for_its_turn_instead_of_spending_inference_on_wait
         decisions.append(state)
         return {"failed": False}
 
-    other = hermes_arena.ROLES[role]
+    other = arena_match.ROLES[role]
     provider = Scripted(
         [
             {"status": "active", "observation": {"you_are": role, "to_move": other}},
@@ -323,7 +323,11 @@ def test_shutdown_closes_both_pipes_after_a_dead_child_even_when_flush_refuses()
 
     output = io.StringIO()
     runner.child = SimpleNamespace(
-        poll=lambda: 0, wait=lambda **kwargs: None, stdin=DeadPipe(), stdout=output
+        poll=lambda: 0,
+        kill=lambda: None,
+        wait=lambda **kwargs: None,
+        stdin=DeadPipe(),
+        stdout=output,
     )
     runner.worker = None
     agent = str(uuid.uuid4())
@@ -339,7 +343,7 @@ def test_shutdown_refuses_to_release_a_worker_that_has_not_stopped() -> None:
     runner = object.__new__(arena_runner.ArenaRunner)
     source, output = io.StringIO(), io.StringIO()
     runner.child = SimpleNamespace(
-        poll=lambda: 0, wait=lambda **kwargs: None, stdin=source, stdout=output
+        poll=lambda: 0, kill=lambda: None, wait=lambda **kwargs: None, stdin=source, stdout=output
     )
     runner.worker = SimpleNamespace(join=lambda **kwargs: None, is_alive=lambda: True)
     active = runner.active = object()
@@ -645,7 +649,8 @@ def test_new_phase_channel_keeps_raw_child_stderr_discarded(
     runner_id = str(uuid.uuid4())
     runner.journal = SimpleNamespace(runner_id=runner_id, reserve=lambda identifier: True)
     runner.paths = SimpleNamespace(root=tmp_path)
-    runner.runtime = arena_runner.HermesRun(tmp_path, tmp_path, tmp_path)
+    runner.driver = arena_driver_hermes.driver()
+    runner.handle = arena_driver_hermes.HermesRun(tmp_path, tmp_path, tmp_path)
     document = {**intent(owned.agent_id), "status": "starting", "claimed_by": runner_id}
     document.update(intent_id=owned.intent_id, match_id=owned.match_id)
     runner._post = lambda suffix, payload: document
@@ -655,7 +660,7 @@ def test_new_phase_channel_keeps_raw_child_stderr_discarded(
         spawned.append(kwargs)
         return SimpleNamespace(stdin=io.StringIO(), stdout=io.StringIO())
 
-    monkeypatch.setattr(arena_runner.subprocess, "Popen", spawn)
+    monkeypatch.setattr(arena_runner.arena_match, "start_in_tree", spawn)
     monkeypatch.setattr(
         arena_runner.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None)
     )
@@ -764,12 +769,12 @@ def test_connect_four_keeps_its_64_decisions(monkeypatch: pytest.MonkeyPatch, ro
 
 def test_the_chess_decision_bound_is_finite(monkeypatch: pytest.MonkeyPatch) -> None:
     """200 own moves and Connect Four's 43 decisions without a move: 243, then the run stops."""
-    assert hermes_arena.DECISIONS == {"connect-four": 64, "chess": 243}
+    assert arena_match.DECISIONS == {"connect-four": 64, "chess": 243}
     code, decisions, events = run_decisions(monkeypatch, "white", 244, end=False)
     assert (code, decisions) == (3, 243)
     assert events[-1] == "run_bound_reached"
     # At most four diagnostics per decision and one as the run ends: the parent's bound.
-    assert len(events) <= hermes_arena.diagnostic_bound(243) == 973
+    assert len(events) <= arena_match.diagnostic_bound(243) == 973
 
 
 def serve_diagnostics(

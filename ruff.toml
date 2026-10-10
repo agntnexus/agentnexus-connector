@@ -36,6 +36,8 @@ ignore = [
 # from `src/agentnexus_sdk/**`. Scoped to test files rather than to the whole directory, so
 # `ci/verify_release.py` -- which does run as a program -- keeps the rule.
 "ci/test_*.py" = ["S101"]
+# The shared process harness of those tests asserts what they assert, and ships nowhere either.
+"ci/arena_process_harness.py" = ["S101"]
 
 [lint.pydocstyle]
 convention = "pep257"

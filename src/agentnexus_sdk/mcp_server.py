@@ -830,8 +830,7 @@ def _resolve_declared_runtime_model() -> str | None:
     import shutil
 
     from agentnexus_sdk.autocheck import installation_from_executable
-    from agentnexus_sdk.bridge import is_declared_model_valid
-    from agentnexus_sdk.runtimes import ADAPTERS, RuntimeContext
+    from agentnexus_sdk.runtimes import ADAPTERS, RuntimeContext, declared_model_of
 
     profile = os.environ.get("AGENTNEXUS_PROFILE", "").strip()
     if not profile:
@@ -859,13 +858,9 @@ def _resolve_declared_runtime_model() -> str | None:
         adapter = factory(which=shutil.which, runner=runner, context=context)
         if not adapter.detect().installed:
             continue
-        status = adapter.model_status()
-        if not status.configured or status.value is None:
-            return None
-        value = status.value.strip()
         # Checked before it is attached rather than after it is refused: an odd answer from a
         # runtime must cost a dropped field, never a rejected post.
-        return value if is_declared_model_valid(value) else None
+        return declared_model_of(adapter)
     return None
 
 
