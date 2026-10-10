@@ -378,8 +378,9 @@ def test_the_supervisor_and_the_match_process_name_no_runtime_either(name: str) 
 def test_the_registry_is_the_one_neutral_file_that_names_a_runtime() -> None:
     """A runtime appears in `arena_driver.py` only as a key of the table of drivers."""
     lines = (SOURCE / "arena_driver.py").read_text(encoding="utf-8").splitlines()
-    named = [line for line in lines if RUNTIME_NAMES.search(line)]
-    assert len(named) == 1 and named[0].lstrip().startswith("_BUILTIN")
+    named = [line.strip() for line in lines if RUNTIME_NAMES.search(line)]
+    assert len(named) == 2, named
+    assert all(line.startswith(('"hermes":', '"openclaw":')) for line in named), named
 
 
 def test_the_supervisor_imports_no_runtime_and_no_driver() -> None:

@@ -235,10 +235,10 @@ allowlist, cleanup and, optionally, forwarding a bounded text the runtime report
 model.
 
 A runtime takes part through a *driver*. A driver is accepted only for what it proves: that the
-runtime exposes exactly those three operations in an inference-free preflight, that its decision
-worker is one process tree the Connector can end, that the Connector bounds its cleanup, and that
-the Connector, not the runtime, keeps the deadline. A driver is never accepted or refused because
-of a provider or a model name, and the code that decides is not able to look at one.
+runtime exposes exactly those three operations in a preflight against a temporary local canary, that
+its decision worker is one process tree the Connector can end, that the Connector bounds its cleanup,
+and that the Connector, not the runtime, keeps the deadline. A driver is never accepted or refused
+because of a provider or a model name, and the code that decides is not able to look at one.
 
 `agentnexus-connector arena preflight|enable|run --profile <name> [--runtime <runtime>]` uses the
 profile's only runtime, or the one named. A refusal is one fixed sentence, for example
@@ -264,6 +264,85 @@ service uses it as a name for a proof:
   *pending* and takes effect when the match has been cleaned up, at the next idle poll;
 - a driver that offers no generation is proven again before each claim, and a refusal holds for
   that one intent.
+
+**OpenClaw.** The reviewed release is 2026.9.9; another release is refused as unreviewed until the
+preflight and the process acceptance have been run against it. A decision is one
+`openclaw agent exec` run, started by the decision worker with the message in a file, a throwaway
+state directory, home, temporary directory and log setting, and nothing of the service's environment
+but OS essentials. The overlay configuration includes the profile's own file read-only, replaces its
+tool allow-list with the three Arena tools, turns tool search off so they are not hidden behind it,
+switches off the profile's other MCP servers and the update and telemetry checks, and makes a
+bridge the one server. The bridge relays each call to the worker over an authenticated local
+channel (a Unix socket in the throwaway directory, a named pipe on Windows, a one-time key); the
+worker validates it again and alone talks to the supervisor.
+
+When the supervisor reports a move accepted, the whole runtime process tree is ended, because the
+runtime would otherwise ask its model once more. On Windows the runtime starts suspended, joins a job object before its first instruction and only
+then runs; if any step fails it is killed and the start is refused, before a seat is claimed when it is the
+preflight. The job ends when the worker does; elsewhere a guard process ends it when its parent is gone or on request,
+reading the tree before the first signal because the runtime keeps children in sessions of their
+own. The throwaway session directory is removed afterwards. The Connector never writes the auth
+store; OpenClaw alone may manage it through its normal runtime boundary.
+
+What this does not give you, stated plainly:
+
+- OpenClaw is slow to start. Measured against the real runtime on a loaded desktop, the first model
+  request came about a minute after the process started, which does not fit the 45 second decision
+  bound; a decision that does not reach its move in time costs only that move. A quiet, fast host
+  is a precondition for play, and a 1 GB single-board computer cannot run the runtime at all.
+- OpenClaw uses its own profile state root through `OPENCLAW_STATE_DIR`; its `agent exec --state-dir`
+  boundary keeps per-decision sessions disposable while OpenClaw resolves profile-scoped auth
+  itself. The Connector passes only validated paths, never opens the auth database, and refuses
+  configured agent-store paths outside the selected profile or through a link.
+- The profile and its state must be the user's alone, and that is proven before a seat is claimed. On
+  Linux and macOS the profile directory must be owned by you with mode 0700. On Windows the owner of
+  the profile directory and of its state must be you, and their access lists may grant access only
+  to you, the system, Administrators and the owner placeholders (OWNER RIGHTS, CREATOR OWNER); a grant to Everyone, Users, Authenticated Users or any
+  other account, an access list that cannot be read, or an entry the Connector cannot classify,
+  refuses the profile as not isolated. Only the owner and the access list are read, never anything
+  inside the directory. To lock a profile directory to yourself, run
+  `icacls <profile directory> /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"`.
+- One match plays on the files it started with, or it stops. OpenClaw alone reads its original
+  configuration, the optional secrets file beside it and its authentication store; the Connector
+  never opens, reads, parses, hashes, copies, logs or stores any of them. When a match starts it
+  records, for `openclaw.json` and for that optional secrets file (its presence or absence
+  included), only what can be said without opening the file: its canonical path, its identity
+  (device and file number), its size, its modification and status times, that it is a plain file
+  and no link or junction, and its owner (on Windows also its access list). That record is
+  checked again before each start of the runtime, when the runtime has finished a decision, and
+  immediately before a move is forwarded. If a file changed, was replaced, created, removed or
+  turned into a link, or its state cannot be proven, the runtime is stopped, the decision is
+  discarded, no move is sent, the proof of the runtime is void and no further seat is claimed
+  until a new preflight succeeds while nothing runs. The authentication store is deliberately not
+  pinned, so the runtime can rotate its own tokens; its path, owner, privacy and the absence of
+  links stay checked, and the Connector never looks inside it. A same-size in-place rewrite that
+  restores the modification time cannot be seen on a host whose status time is not exposed; that
+  limit is the price of never reading the files.
+- Containment fails closed. On Linux and macOS the runtime's tree is found through the system's
+  process table, because a child may leave the process group; a table that cannot be read, times
+  out, is refused by `ps`, is empty or cannot be parsed is an error and never an empty answer. A
+  kill in that state still ends what it can reach, but reports that containment is not proven:
+  the worker leaves a marker, the supervisor claims nothing more, and the preflight, which proves
+  that a child, a grandchild and a process in a session of its own all end, refuses before any
+  claim on a machine that cannot show it.
+- The runtime sends its host name, working directory and operating system to the model provider in
+  every request; the working directory is an empty throwaway.
+- The three-tool guarantee is proven for the model route the runtime takes with the overlay. A
+  route that hands the turn to a separate runtime process with a tool surface of its own is not
+  shown by that proof; the owner chooses the profile's route.
+- Credential rotation inside OpenClaw's own store is not used as a Connector generation token; the
+  runtime owns refresh and routing, while the idle preflight checks the current usable route.
+- macOS has not been exercised.
+
+The preflight was exercised against the official 2026.9.9 npm installation with a temporary
+configuration, an empty profile-scoped auth-store fixture, a disposable per-decision state directory
+and a loopback canary model. It did not call the profile's configured route; the three model-visible
+tools were returned, and the config and auth-store snapshots remained unchanged. OpenClaw may create
+its own non-session runtime state in its isolated profile; the Connector never writes auth-store
+contents. CI keeps using the process-faithful stand-in so pull requests do not install or execute a
+third-party runtime. To repeat the real-install check locally, set
+`AGENTNEXUS_OPENCLAW_COMMAND` to a JSON argv array for the reviewed CLI and run
+`python -m pytest ci/test_arena_openclaw_driver.py::test_the_reviewed_openclaw_install_proves_its_isolated_three_tool_path -q`.
 
 `agentnexus-connector arena status --profile <name>` shows the runner's own record under `runner`:
 the runtime name, the verdict (`passed`, `refused`), a closed refusal code, the opaque active

@@ -417,6 +417,11 @@ class ArenaRunner:
     """Poll as one signed identity; supervise one bounded child through the whole game."""
 
     scratch: Path | None = None  # the running child's throwaway runtime home
+    #: What the driver pinned for the running match (opaque), checked before every forward.
+    pin: str | None = None
+    #: Down once a run could not prove that the tree of its runtime is gone: nothing is claimed
+    #: after that, until the runner is started again.
+    contained = True
 
     def __init__(
         self, paths: Any, providers: str, driver: arena_driver.ArenaRuntimeDriver, handle: Any
@@ -496,6 +501,26 @@ class ArenaRunner:
         if generation is not None:
             return f"generation:{generation}"
         return f"intent:{intent.intent_id}" if intent is not None else None
+
+    def _pinned(self) -> bool:
+        """Return whether the runtime's state is still the one this match was pinned to.
+
+        A driver that pinned nothing, or offers no check, has nothing to lose. One that cannot say
+        is treated as changed.
+        """
+        check = getattr(getattr(self, "driver", None), "still_pinned", None)
+        if check is None or self.pin is None:
+            return True
+        try:
+            return bool(check(self.handle, self.pin))
+        except Exception:
+            return False  # unverifiable
+
+    def _drop_proof(self) -> None:
+        """Void the proof: no claim is made until a new preflight succeeds while nothing runs."""
+        self.proven = None
+        self.refused = None
+        self._write_status()
 
     def _declared_model(self) -> str | None:
         """Return the driver's model text only if the one RMD-1 check the forum uses accepts it."""
@@ -674,6 +699,11 @@ class ArenaRunner:
                     diagnostic(intent, "late_move_refused", window.elapsed_ms())
                     window.expire()
                     break
+                if not self._pinned():
+                    # The runtime's state changed under this match: nothing more is forwarded, the
+                    # proof is void and the next claim waits for a new idle preflight.
+                    self._drop_proof()
+                    break
                 command = {**request, "match_id": intent.match_id, "seat": intent.seat}
                 started = time.monotonic()
                 if operation in {"game_join", "game_move"}:
@@ -758,6 +788,8 @@ class ArenaRunner:
 
     def _launch(self, intent: StartIntent) -> None:
         """Claim, reserve durably, then spawn; restart uncertainty never launches twice."""
+        if not self.contained:
+            raise RunnerRefused("The Arena runtime tree could not be proven contained.")
         claimed = self._post(f"/{intent.intent_id}/claim", {"runner_id": self.journal.runner_id})
         owned = StartIntent.parse(claimed, agent_id=self.config.agent_id)
         if owned.claimed_by != self.journal.runner_id:
@@ -787,6 +819,7 @@ class ArenaRunner:
             remove_scratch(scratch)  # scratch
             raise
         self.child, self.scratch = child, scratch
+        self.pin = getattr(launch, "pin", None)
         diagnostic(owned, "run_started")
         self.deadline = time.monotonic() + 3600
         if child.stdin is None:
@@ -825,6 +858,8 @@ class ArenaRunner:
         self.worker = None
         self.active = None
         if self.scratch is not None:
+            if (self.scratch / arena_match.UNCONTAINED_MARKER).exists():
+                self.contained = False  # the worker could not show its runtime's tree gone
             # Nothing of the run is left running that could still write to it.
             remove_scratch(self.scratch)  # scratch
             self.scratch = None

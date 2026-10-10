@@ -12,6 +12,8 @@ import contextlib
 import hashlib
 import json
 import socket
+import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -29,9 +31,11 @@ from arena_fakes import PRIVATE, intent, supervisor
 from agentnexus_sdk import (
     arena_driver,
     arena_driver_hermes,
+    arena_driver_openclaw,
     arena_match,
     arena_runner,
     hermes_arena,
+    openclaw_arena,
 )
 
 #: The runtimes every process test runs through: the Hermes stand-in and a second, fake runtime.
@@ -455,6 +459,60 @@ def hermes_stand_in(root: Path, behavior: dict[str, Any]) -> tuple[Path, Path]:
     return source, home
 
 
+OPENCLAW_WRAPPER = """import json
+import os
+import runpy
+import sys
+from pathlib import Path
+
+here = Path(__file__).resolve().parent
+extra = json.loads((here / "openclaw-env.json").read_text(encoding="utf-8"))
+if extra.get("FAKE_OPENCLAW_RECORD"):
+    # What the worker handed the runtime, before the stand-in's own knobs are added.
+    with open(extra["FAKE_OPENCLAW_RECORD"], "a", encoding="utf-8") as handle:
+        line = dict(event="environ", pid=os.getpid(), environ=dict(os.environ))
+        handle.write(json.dumps(line) + chr(10))
+os.environ.update(extra)
+target = {target!r}
+sys.argv = [target, *sys.argv[1:]]
+runpy.run_path(target, run_name="__main__")
+"""
+
+
+def openclaw_stand_in(root: Path, behavior: dict[str, Any]) -> tuple[tuple[str, ...], Path, Path]:
+    """Write a stand-in OpenClaw installation and a disposable profile; return how to run it.
+
+    `behavior["profile"]` is the profile configuration (a fake provider that points at a loopback
+    model) and `behavior["env"]` the stand-in's own knobs, which its wrapper sets because a decision
+    passes the runtime nothing of the service's environment.
+    """
+    home = root / "home"
+    (home / "state").mkdir(parents=True)
+    home.chmod(0o700)
+    if sys.platform == "win32":
+        # The profile is judged by its owner and access list: lock it to the current user alone,
+        # as a profile of a real installation has to be.
+        sid = openclaw_arena.windows_current_sid()
+        subprocess.run(  # noqa: S603 - fixed system tool on a test directory
+            ["icacls", str(home), "/inheritance:r", "/grant:r", f"*{sid}:(OI)(CI)F"],  # noqa: S607
+            check=True,
+            capture_output=True,
+        )
+    config = home / "openclaw.json"
+    config.write_text(json.dumps(behavior["profile"]), encoding="utf-8")
+    (home / "state" / "canary.txt").write_text("canary state, never rewritten\n", encoding="utf-8")
+    auth_store = home / "state" / "agents" / "main" / "agent" / "openclaw-agent.sqlite"
+    auth_store.parent.mkdir(parents=True)
+    sqlite3.connect(auth_store).close()
+    if not behavior.get("no_profile_env"):
+        (home / ".env").write_text("SYNTHETIC_KEY=synthetic-disposable-key\n", encoding="utf-8")
+    target = str(Path(__file__).with_name("fake_openclaw.py").resolve())
+    wrapper = root / "openclaw-wrapper.py"
+    wrapper.write_text(OPENCLAW_WRAPPER.format(target=target), encoding="utf-8")
+    (root / "openclaw-env.json").write_text(json.dumps(behavior.get("env", {})), encoding="utf-8")
+    return (sys.executable, str(wrapper)), config, home / "state"
+
+
 def fake_runtime(root: Path, behavior: dict[str, Any]) -> tuple[Path, Path]:
     """Write the fake runtime's behaviour file and its disposable profile; return both paths."""
     home = root / "home"
@@ -544,7 +602,12 @@ class StandInDriver:
         command[2:3] = [str(self.launcher), str(match), str(self.bound), str(self.cleanup)]
         if self.worker_file is not None:
             command[command.index("--") + 3] = str(self.worker_file)
-        return arena_driver.Launch(command, launch.environment)
+        return arena_driver.Launch(command, launch.environment, getattr(launch, "pin", None))
+
+    def still_pinned(self, handle: Any, pin: str) -> bool:
+        """Ask the real driver, when it has a check."""
+        check = getattr(self.real, "still_pinned", None)
+        return True if check is None else bool(check(handle, pin))
 
 
 class Tethers:
@@ -631,6 +694,7 @@ def run_process(
     arena: Path | None = None,
     worker: Path | None = None,
     driver_module: ModuleType = arena_driver_hermes,
+    openclaw_module: ModuleType = arena_driver_openclaw,
     runtime: str = "hermes",
     wait: float = 30.0,
 ) -> Process:
@@ -645,6 +709,10 @@ def run_process(
     if runtime == "hermes":
         source, home = hermes_stand_in(tmp_path, full)
         env_record = source / "dotenv-reads.stand-in-record"
+    elif runtime == "openclaw":
+        env_record = tmp_path / "unused.stand-in-record"
+        command, config, state = openclaw_stand_in(tmp_path, full)
+        home = config.parent
     else:
         env_record = tmp_path / "fake-env-reads.stand-in-record"
         home, behavior_file = fake_runtime(tmp_path, {**full, "env_reads": str(env_record)})
@@ -665,6 +733,11 @@ def run_process(
     if runtime == "hermes":
         real: Any = driver_module.HermesArenaDriver()
         runner.handle = driver_module.HermesRun(source, Path(sys.executable), home)
+    elif runtime == "openclaw":
+        real = openclaw_module.OpenClawArenaDriver()
+        runner.handle = openclaw_module.OpenClawRun(
+            command, "2026.9.9", config, state, config.parent
+        )
     else:
         real = FakeArenaDriver(behavior_file, home)
         runner.handle = real.inspect(None)
@@ -788,17 +861,23 @@ def mutated_programs(
     *,
     match: tuple[tuple[str, str], ...] = (),
     worker: tuple[tuple[str, str], ...] = (),
+    worker_module: ModuleType = hermes_arena,
+    siblings: tuple[ModuleType, ...] = (),
 ) -> tuple[Path, Path]:
-    """Write the match program and the Hermes worker side by side with these lines replaced.
+    """Write the match program and a worker side by side with these lines replaced.
 
-    The worker loads its sibling `arena_match.py` by path, so both files live in one folder. Each
-    replaced line must occur exactly once in its file.
+    The worker loads its sibling `arena_match.py` by path, so both files live in one folder, and so
+    does any other program it starts (`siblings`). Each replaced line must occur exactly once.
     """
     folder.mkdir(parents=True)
+    for sibling in siblings:
+        (folder / Path(str(sibling.__file__)).name).write_text(
+            Path(str(sibling.__file__)).read_text(encoding="utf-8"), encoding="utf-8"
+        )
     paths = []
     for module, name, replacements in (
         (arena_match, "arena_match.py", match),
-        (hermes_arena, "hermes_arena.py", worker),
+        (worker_module, Path(str(worker_module.__file__)).name, worker),
     ):
         source = Path(module.__file__).read_text(encoding="utf-8")
         for original, replacement in replacements:

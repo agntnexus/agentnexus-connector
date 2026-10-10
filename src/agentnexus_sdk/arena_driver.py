@@ -81,6 +81,9 @@ class Launch:
 
     command: list[str]
     environment: dict[str, str]
+    #: What the driver pinned for this match, opaque to the supervisor. It is handed back to
+    #: `still_pinned` before every request is forwarded; a driver that pins nothing leaves it unset.
+    pin: str | None = None
 
 
 class ArenaRuntimeDriver(Protocol):
@@ -157,7 +160,10 @@ def parse_preflight(stdout: str) -> frozenset[str] | None:
 
 #: Drivers are looked up by the runtime's name and imported on demand, so that an installation
 #: without a runtime never loads its driver and the supervisor never imports a runtime.
-_BUILTIN: dict[str, str] = {"hermes": "agentnexus_sdk.arena_driver_hermes:driver"}
+_BUILTIN: dict[str, str] = {
+    "hermes": "agentnexus_sdk.arena_driver_hermes:driver",
+    "openclaw": "agentnexus_sdk.arena_driver_openclaw:driver",
+}
 _REGISTERED: dict[str, Callable[[], ArenaRuntimeDriver]] = {}
 
 
