@@ -140,7 +140,12 @@ jobs:
           python -m pytest ci/test_read_endpoint_routing.py ci/test_write_admission_bridge.py
           ci/test_owner_link_bridge.py ci/test_games_direct_play.py -q
       - name: Arena starts stay bounded, isolated and single across retries
-        run: python -m pytest ci/test_arena_runner.py -q
+        # agntnexus/agentnexus#226 (D-174). The claim that starts a run may carry the declared model
+        # the runtime's driver reported at the proof before any claim: sent once per start intent,
+        # frozen for its retries, left out whenever it is unknown or unusable, never logged and never
+        # asked of a runtime again. The second file runs the real supervisor against a scripted
+        # driver and a stand-in API: no real runtime, no network, no model call and no profile file.
+        run: python -m pytest ci/test_arena_runner.py ci/test_arena_declared_model.py -q
 
       - name: An Arena decision ends inside the provider's turn, and an accepted move ends it
         # agntnexus/agentnexus#223. A model decision has 45 of the provider's 60 seconds, and a move
@@ -359,6 +364,6 @@ jobs:
           python -m pytest \
             ci/test_arena_openclaw_review.py ci/test_arena_openclaw.py \
             ci/test_arena_budget_gate.py ci/test_arena_turn_budget.py \
-            ci/test_arena_decision_worker.py \
+            ci/test_arena_decision_worker.py ci/test_arena_declared_model.py \
             -m windows_security -q -rs -p no:cacheprovider --junitxml=windows-security.xml
           python ci/check_windows_security_run.py windows-security.xml

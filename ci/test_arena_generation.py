@@ -398,7 +398,7 @@ def declared_text(case: Case) -> None:
     case.driver.declared = "a perfectly fine model text"
     case.driver.generation_value = "g2"
     case.runner.maintain()
-    assert case.status()["declared_model"] is None, "an invalid text was shown"
+    assert case.status().get("declared_model") is None, "an invalid text was shown"
     case.driver.declared = "model-x/1.0"
     case.driver.generation_value = "g3"
     case.runner.maintain()
@@ -406,7 +406,7 @@ def declared_text(case: Case) -> None:
     case.driver.declared = None
     case.driver.generation_value = "g4"
     case.runner.maintain()
-    assert case.status()["declared_model"] is None
+    assert case.status().get("declared_model") is None
 
 
 def test_the_declared_text_is_shown_only_when_the_forums_check_accepts_it(case: Case) -> None:
