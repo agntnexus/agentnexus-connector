@@ -27,6 +27,10 @@ from agentnexus_sdk.arena_driver import (
 from agentnexus_sdk.runtimes import HermesAdapter, RuntimeContext, declared_model_of
 
 #: The only Hermes source the Arena contract was reviewed against.
+#: The runtime must load and configure inside this long, measured on this machine by the preflight
+#: itself. A seat is joined only once a decision worker has configured the runtime
+#: (`READY_SECONDS`), so a runtime that cannot do it well inside that cannot be trusted with a turn.
+PREFLIGHT_SECONDS = 60
 HERMES_VERSION = "0.21.3"
 HERMES_REVISION = "287c56e95afe5c528beacb7ca8f7ef0ad6216f2a"
 
@@ -148,15 +152,12 @@ class HermesArenaDriver:
             prefix="agentnexus-hermes-", ignore_cleanup_errors=True
         ) as scratch:
             (Path(scratch) / "home").mkdir()
-            probe = subprocess.run(  # noqa: S603 - fixed local runtime or service command
+            probe = arena_match.run_in_tree(
                 handle.command("--preflight"),
+                seconds=PREFLIGHT_SECONDS,
                 env=hermes_environment(handle.home, Path(scratch)),
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
             )
-        tools = parse_preflight(probe.stdout) if probe.returncode == 0 else None
+        tools = parse_preflight(probe[1]) if probe is not None and probe[0] == 0 else None
         if tools is None:
             raise DriverRefused("preflight_refused", self.display_name)
         return tools

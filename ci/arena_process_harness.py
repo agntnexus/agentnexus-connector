@@ -292,6 +292,39 @@ def scaffold():
 
 
 scaffold()
+if BEHAVIOR.get("helper"):
+    # A process the runtime started on its own (a tool server, a transport helper): it holds a
+    # tether too, so the test can tell whether it outlived the decision that was cut off.
+    import subprocess
+    import sys
+
+    HELPER = "\\n".join(
+        [
+            "import os, socket, sys, threading",
+            "s = socket.create_connection(('127.0.0.1', int(sys.argv[1])))",
+            "def watch():",
+            "    try:",
+            "        s.recv(1)",
+            "    except OSError:",
+            "        pass",
+            "    os._exit(1)",
+            "threading.Thread(target=watch, daemon=True).start()",
+            "open(sys.argv[2], 'w').close()",
+            "threading.Event().wait()",
+        ]
+    )
+    # "inherit": it keeps this process's stdout (the pipe to the match process) open, as a helper of
+    # a real runtime may. Its readiness is a file, because a pipe it inherits is not for reading.
+    up = Path(__file__).with_name("helper-up.stand-in-record")
+    up.unlink(missing_ok=True)
+    quiet = {"stdin": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if BEHAVIOR["helper"] != "inherit":
+        quiet["stdout"] = subprocess.DEVNULL
+    subprocess.Popen([sys.executable, "-c", HELPER, str(BEHAVIOR["tether"]), str(up)], **quiet)
+    for _ in range(400):
+        if up.exists():
+            break
+        time.sleep(0.05)  # the helper is connected before the decision starts
 _environment_record = BEHAVIOR.get("environment")
 if _environment_record:
     with open(_environment_record, "a", encoding="utf-8") as _handle:

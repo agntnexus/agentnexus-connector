@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import queue
+import sys
 import threading
 import time
 import uuid
@@ -49,8 +51,10 @@ from arena_fakes import (
     play,
     supervisor,
 )
+from arena_openclaw_support import stand_in_handle
+from fake_chat_model import FakeChatModel
 
-from agentnexus_sdk import arena_match, arena_runner, games
+from agentnexus_sdk import arena_driver_openclaw, arena_match, arena_runner, games
 
 PROVIDER_TURN = 60.0
 RESERVE = 15.0
@@ -2011,3 +2015,374 @@ def test_parent_guards_detect_a_weakened_source(
     """The parent's gate, its window, its elapsed accounting and its log lock are load-bearing."""
     mutant = load_mutant(tmp_path, arena_runner, original, replacement)
     expect_guard(lambda module: oracle(module, monkeypatch, capsys), arena_runner, mutant)
+
+
+# ---------------------------------------------------------------------------------------------
+# No late move after the intent was cancelled or the run stopped (agntnexus/agentnexus#223)
+# ---------------------------------------------------------------------------------------------
+
+
+def stopped_run(
+    module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    stop_after_the_line_is_read: bool,
+) -> list[str]:
+    """Stop the runner while the match process's move is still unread, and list what was served."""
+    runner, owned = supervisor(module)
+    served: list[str] = []
+
+    def game(command: dict[str, Any], **kwargs: object) -> dict[str, Any]:
+        served.append(command["operation"])
+        return {"status": "active", "game_version": "connect-four-1-solo"}
+
+    monkeypatch.setattr(module.bridge, "_run_game_command", game)
+    stop = lambda: setattr(runner, "stopping", True)  # noqa: E731 - what `stop_child` does first
+    if stop_after_the_line_is_read:
+        real = module.arena_match.bounded_request
+
+        def bounded(operation: str, arguments: Any) -> Any:
+            if operation == "game_move":
+                stop()
+            return real(operation, arguments)
+
+        monkeypatch.setattr(module.arena_match, "bounded_request", bounded)
+        items: list[str | Callable[[], None]] = [JOIN, started(), MOVE, RETURNED, FINISHED]
+    else:
+        items = [JOIN, started(), stop, MOVE, RETURNED, FINISHED]
+    module.ArenaRunner._serve(runner, FakeChild(Pipe(items)), owned)
+    capsys.readouterr()
+    return served
+
+
+@pytest.mark.parametrize("after_the_line_is_read", [False, True])
+def test_a_move_still_in_the_pipe_when_the_run_is_stopped_is_never_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    after_the_line_is_read: bool,
+) -> None:
+    """A cancelled intent or a replaced run has no late move, whatever the child had written."""
+    served = stopped_run(
+        arena_runner, monkeypatch, capsys, stop_after_the_line_is_read=after_the_line_is_read
+    )
+    assert served == ["game_join"]
+
+
+@pytest.mark.parametrize("after_the_line_is_read", [False, True])
+def test_a_parent_that_serves_after_a_stop_is_noticed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    after_the_line_is_read: bool,
+) -> None:
+    """Mutation: with the check removed, the stopped run forwards its move."""
+    mutant = load_mutant(
+        tmp_path, arena_runner, "if self.stopping:  # stopping before the forward", "if False:"
+    )
+    try:
+        served = stopped_run(
+            mutant, monkeypatch, capsys, stop_after_the_line_is_read=after_the_line_is_read
+        )
+        assert served == ["game_join", "game_move"]
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+def test_stopping_a_run_says_so_before_it_ends_the_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flag is up before the child dies, so nothing it left behind is served."""
+    runner = object.__new__(arena_runner.ArenaRunner)
+    runner.child = SimpleNamespace(
+        poll=lambda: 0, kill=lambda: None, wait=lambda **kwargs: None, stdin=None, stdout=None
+    )
+    runner.worker = None
+    runner.active = None
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        arena_runner.arena_match, "end_tree", lambda process: seen.append(runner.stopping)
+    )
+    runner.stop_child()
+    assert seen == [True]
+
+
+@pytest.mark.windows_security
+def test_a_stop_cannot_begin_between_the_check_and_the_forward(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exact interleaving: a stop that starts inside the forward waits for it, then forwards none.
+
+    The stop begins while the move is being forwarded, after the check that let it through. It
+    cannot take effect until the forward is over, and the next move, in the next decision, is not
+    forwarded at all. Ending the process alone would not order the two.
+    """
+    runner, owned = supervisor()
+    runner.child = SimpleNamespace(
+        poll=lambda: 0, kill=lambda: None, wait=lambda **kwargs: None, stdin=None, stdout=None
+    )
+    runner.worker = None
+    runner.active = None
+    monkeypatch.setattr(arena_runner.arena_match, "end_tree", lambda process: True)
+    served: list[str] = []
+    inside: list[bool] = []
+    stopper: list[threading.Thread] = []
+
+    def game(command: dict[str, Any], **kwargs: object) -> dict[str, Any]:
+        served.append(command["operation"])
+        if command["operation"] == "game_move":
+            stopper.append(threading.Thread(target=runner.stop_child))
+            stopper[0].start()
+            time.sleep(0.3)
+            inside.append(runner.stopping)
+        return {"status": "active", "game_version": "connect-four-1-solo"}
+
+    monkeypatch.setattr(arena_runner.bridge, "_run_game_command", game)
+
+    def wait_for_the_stop() -> None:
+        stopper[0].join(timeout=10)
+
+    items: list[str | Callable[[], None]] = [
+        JOIN,
+        started(),
+        MOVE,
+        RETURNED,
+        started(),
+        wait_for_the_stop,
+        MOVE,
+        FINISHED,
+    ]
+    arena_runner.ArenaRunner._serve(runner, FakeChild(Pipe(items)), owned)
+    capsys.readouterr()
+    assert inside == [False], "a stop took effect while a move was being forwarded"
+    assert runner.stopping is True
+    assert served == ["game_join", "game_move"], served
+
+
+def test_a_parent_whose_stop_does_not_wait_for_the_forward_is_noticed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Mutation: with the gate removed, the stop takes effect inside the forward."""
+    mutant = load_mutant(
+        tmp_path,
+        arena_runner,
+        "with self._gate:  # forward gate",
+        "with contextlib.nullcontext():  # forward gate",
+    )
+    try:
+        runner, owned = supervisor(mutant)
+        runner.child = SimpleNamespace(
+            poll=lambda: 0, kill=lambda: None, wait=lambda **kwargs: None, stdin=None, stdout=None
+        )
+        runner.worker = None
+        runner.active = None
+        monkeypatch.setattr(mutant.arena_match, "end_tree", lambda process: True)
+        inside: list[bool] = []
+        stopper: list[threading.Thread] = []
+
+        def game(command: dict[str, Any], **kwargs: object) -> dict[str, Any]:
+            if command["operation"] == "game_move":
+                stopper.append(threading.Thread(target=runner.stop_child))
+                stopper[0].start()
+                time.sleep(0.3)
+                inside.append(runner.stopping)
+            return {"status": "active", "game_version": "connect-four-1-solo"}
+
+        monkeypatch.setattr(mutant.bridge, "_run_game_command", game)
+        items: list[str | Callable[[], None]] = [JOIN, started(), MOVE, RETURNED, FINISHED]
+        mutant.ArenaRunner._serve(runner, FakeChild(Pipe(items)), owned)
+        capsys.readouterr()
+        stopper[0].join(timeout=10)
+        assert inside == [True], "the weakened parent still ordered the stop after the forward"
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+# ---------------------------------------------------------------------------------------------
+# A changed runtime state and a stop meet at the gate (agntnexus/agentnexus#228, #223)
+# ---------------------------------------------------------------------------------------------
+
+
+def pinned_run(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    still_pinned: bool,
+    module: ModuleType = arena_runner,
+    handle: Any = None,
+    pin: str = "pin",
+    answer: Callable[[Any, str], bool] | None = None,
+) -> tuple[list[str], list[bool], Any, Any]:
+    """Serve one move; the driver's pin check starts a stop and then answers `still_pinned`.
+
+    The stop begins exactly inside the check, after the forward was allowed to be considered and
+    before it happens. Returns what was forwarded, whether the stop had taken effect inside the
+    check, the runner and the thread of the stop.
+    """
+    runner, owned = supervisor(module)
+    runner.child = SimpleNamespace(
+        poll=lambda: 0, kill=lambda: None, wait=lambda **kwargs: None, stdin=None, stdout=None
+    )
+    runner.worker = None
+    runner.active = None
+    runner.handle, runner.pin = object() if handle is None else handle, pin
+    runner.proven, runner.refused = "generation:abc", None
+    runner._write_status = lambda: None
+    monkeypatch.setattr(module.arena_match, "end_tree", lambda process: True)
+    stopper: list[threading.Thread] = []
+    inside: list[bool] = []
+
+    def hook(given: Any, pinned: str) -> bool:
+        stopper.append(threading.Thread(target=runner.stop_child))
+        stopper[0].start()
+        time.sleep(0.3)
+        inside.append(runner.stopping)
+        return still_pinned if answer is None else answer(given, pinned)
+
+    runner.driver = SimpleNamespace(still_pinned=hook)
+    forwarded: list[str] = []
+
+    def game(command: dict[str, Any], **kwargs: object) -> dict[str, Any]:
+        forwarded.append(command["operation"])
+        return {"status": "active", "game_version": "connect-four-1-solo"}
+
+    monkeypatch.setattr(module.bridge, "_run_game_command", game)
+    items: list[str | Callable[[], None]] = [started(), MOVE, RETURNED, FINISHED]
+    module.ArenaRunner._serve(runner, FakeChild(Pipe(items)), owned)
+    capsys.readouterr()
+    for thread in stopper:
+        thread.join(timeout=10)
+    return forwarded, inside, runner, (stopper[0] if stopper else None)
+
+
+@pytest.mark.windows_security
+def test_a_changed_state_found_while_a_stop_begins_forwards_no_move(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Config change, then stop, at the exact interleaving: the join goes, the move does not.
+
+    The stop waits for the check, the check says the state changed, and nothing is forwarded for
+    the move; the proof is void, and the stop then completes.
+    """
+    forwarded, inside, runner, _ = pinned_run(monkeypatch, capsys, still_pinned=False)
+    assert inside, "the check never ran"
+    assert set(inside) == {False}, "a stop took effect inside the check, before it could decide"
+    assert forwarded == [], forwarded
+    assert runner.proven is None and runner.stopping is True
+
+
+def test_an_unchanged_state_checked_while_a_stop_begins_still_forwards_exactly_once(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The control: the stop waits for the check and the forward, and then takes effect."""
+    forwarded, inside, runner, _ = pinned_run(monkeypatch, capsys, still_pinned=True)
+    assert set(inside) == {False}
+    assert forwarded.count("game_move") == 1
+    assert runner.stopping is True and runner.proven == "generation:abc"
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement", "what"),
+    [
+        ("if not self._pinned():  # pinned before the forward", "if False:", "check-removed"),
+        (
+            "with self._gate:  # forward gate",
+            "with contextlib.nullcontext():  # forward gate",
+            "gate-removed",
+        ),
+        (
+            "with self._gate:  # forward gate",
+            "if not self._pinned():\n"
+            "                        self._drop_proof()\n"
+            "                        break\n"
+            "                    with self._gate:  # forward gate",
+            "check-before-the-gate",
+        ),
+    ],
+)
+def test_a_parent_whose_pin_check_leaves_the_gate_or_is_gone_is_noticed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    original: str,
+    replacement: str,
+    what: str,
+) -> None:
+    """Mutation: without the check, or outside the gate, the exact interleaving is not held."""
+    mutant = load_mutant(tmp_path, arena_runner, original, replacement)
+    try:
+
+        def oracle(module: ModuleType) -> None:
+            with pytest.MonkeyPatch.context() as patch:
+                forwarded, inside, _, _ = pinned_run(
+                    patch, capsys, still_pinned=False, module=module
+                )
+            assert set(inside) == {False}
+            assert forwarded == []
+
+        expect_guard(oracle, arena_runner, mutant)
+    finally:
+        sys.modules.pop(mutant.__name__, None)
+
+
+@pytest.mark.windows_security
+@pytest.mark.parametrize(
+    ("what", "no_env"),
+    [
+        ("create_env", True),
+        ("remove_env", False),
+        ("replace_env", False),
+        ("append_config", False),
+    ],
+)
+def test_a_profile_file_changed_after_the_decision_forwards_no_move_as_a_stop_begins(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    what: str,
+    no_env: bool,
+) -> None:
+    """The real driver's pin, the real files, and a stop that begins inside the check.
+
+    After the decision, before the forward, the profile's `.env` appears, disappears or is replaced,
+    or the configuration grows. The stop waits for the check, the check says changed, and nothing
+    reaches the API or the provider.
+    """
+    server = FakeChatModel("move")
+    try:
+        handle = stand_in_handle(tmp_path, server, no_profile_env=no_env)
+        driver = arena_driver_openclaw.OpenClawArenaDriver()
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        pin = driver.launch(handle, scratch).pin
+        assert pin
+        config = Path(str(handle.config))
+        env = config.parent / ".env"
+
+        def after_the_decision(given: Any, pinned: str) -> bool:
+            if what == "create_env":
+                env.write_text("SYNTHETIC_KEY=created-after-the-decision\n", encoding="utf-8")
+            elif what == "remove_env":
+                env.unlink()
+            elif what == "replace_env":
+                stamp = env.stat()
+                other = env.with_name("other.env")
+                other.write_bytes(env.read_bytes())
+                os.utime(other, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                os.replace(other, env)
+            else:
+                with config.open("ab") as handle_:
+                    handle_.write(b" ")
+            return driver.still_pinned(given, pinned)
+
+        forwarded, inside, runner, _ = pinned_run(
+            monkeypatch,
+            capsys,
+            still_pinned=False,
+            handle=handle,
+            pin=pin,
+            answer=after_the_decision,
+        )
+        assert set(inside) == {False}, "a stop took effect inside the check"
+        assert forwarded == [], "a move reached the API after the profile changed"
+        assert runner.proven is None and runner.stopping is True
+    finally:
+        server.close()

@@ -413,15 +413,60 @@ def profile_storage(paths: Any) -> None:
             raise RunnerRefused("Arena storage must remain inside this profile without links.")
 
 
+def budget_problems() -> list[str]:
+    """Name every way the turn budget fails to hold; the list is empty when it is guaranteed.
+
+    The decision bound leaves the reserve under each provider deadline, and the reserve holds a
+    stale observation, one bounded provider phase and a second of slack. The cleanup is short
+    beside it. This is the same for every runtime: the bound belongs to the match process.
+    """
+    problems: list[str] = []
+    if arena_match.TURN_BUDGET_VERSION != 1:
+        problems.append("version")
+    turns, decisions = arena_match.PROVIDER_TURN_SECONDS, arena_match.DECISION_SECONDS
+    if not set(turns) == set(decisions) == set(arena_match.DECISIONS):
+        problems.append("games_disagree")
+    for game, turn in turns.items():
+        if not 0 < decisions.get(game, 0) <= turn - arena_match.TURN_RESERVE_SECONDS:
+            problems.append("decision_exceeds_turn")
+            break
+    needed = arena_match.STATE_POLL_SECONDS + games.PROVIDER_TIMEOUT_SECONDS + 1
+    if needed > arena_match.TURN_RESERVE_SECONDS:
+        problems.append("reserve_too_small")
+    if (
+        not 0
+        < arena_match.CLEANUP_SECONDS
+        < (arena_match.TURN_RESERVE_SECONDS - arena_match.STATE_POLL_SECONDS)
+    ):
+        problems.append("cleanup_too_long")
+    return problems
+
+
+def require_budget() -> None:
+    """Refuse, before any runtime is asked and any seat is claimed, unless the budget holds.
+
+    The numbers must hold, and one kill must end a process and the grandchild it started on this
+    machine: the proof uses the very functions that end a decision's tree.
+    """
+    if budget_problems() or not arena_match.prove_tree():
+        raise RunnerRefused("The Arena turn budget is not guaranteed.")
+
+
 class ArenaRunner:
     """Poll as one signed identity; supervise one bounded child through the whole game."""
 
     scratch: Path | None = None  # the running child's throwaway runtime home
+    #: Up from the moment a run is being stopped (cancelled, replaced, bounded out) until the next
+    #: launch. Whatever the child had already written is then not served: no late move.
+    stopping = False
+    #: Down once a kill, or a worker's marker, says a tree could not be proven gone: nothing is
+    #: claimed after that, until the runner is started again.
+    contained = True
+    #: Taken to set `stopping` and, for the whole forward, to check it: after a stop begins no
+    #: request is forwarded, and a stop waits for a forward that has already begun.
+    _gate = threading.Lock()
     #: What the driver pinned for the running match (opaque), checked before every forward.
     pin: str | None = None
-    #: Down once a run could not prove that the tree of its runtime is gone: nothing is claimed
-    #: after that, until the runner is started again.
-    contained = True
 
     def __init__(
         self, paths: Any, providers: str, driver: arena_driver.ArenaRuntimeDriver, handle: Any
@@ -699,19 +744,24 @@ class ArenaRunner:
                     diagnostic(intent, "late_move_refused", window.elapsed_ms())
                     window.expire()
                     break
-                if not self._pinned():
-                    # The runtime's state changed under this match: nothing more is forwarded, the
-                    # proof is void and the next claim waits for a new idle preflight.
-                    self._drop_proof()
-                    break
                 command = {**request, "match_id": intent.match_id, "seat": intent.seat}
                 started = time.monotonic()
                 if operation in {"game_join", "game_move"}:
                     diagnostic(intent, f"{operation}_started")
                 try:
-                    result = bridge._run_game_command(
-                        command, config=self.config, client=self.client
-                    )
+                    with self._gate:  # forward gate
+                        if self.stopping:  # stopping before the forward
+                            # A run being stopped forwards nothing more, whatever its child had
+                            # written, and a stop that begins now waits for this forward to end.
+                            break
+                        if not self._pinned():  # pinned before the forward
+                            # The runtime's state changed under this match: nothing is forwarded,
+                            # the proof is void and the next claim waits for a new idle preflight.
+                            self._drop_proof()
+                            break
+                        result = bridge._run_game_command(
+                            command, config=self.config, client=self.client
+                        )
                     if operation in {"game_join", "game_move"}:
                         diagnostic(
                             intent,
@@ -775,19 +825,23 @@ class ArenaRunner:
         """End a decision that outlived its budget: kill the child that holds it, then log it once.
 
         A kill, not a request to stop: a model call blocked in a transport cannot be asked to. It
+        ends the child's whole tree (its decision worker and whatever the runtime started) and
         comes first, so a log that cannot be written never leaves a blocked child alive. After it
         this run sends no move, chooses none and is not retried; a move admitted just before the
         cutoff is already on its way and is bounded by the SDK's own timeouts. The supervisor's next
         tick sees a child that ended without a finished game and reports the intent `refused`.
         """
         try:
-            with contextlib.suppress(OSError):
-                child.kill()  # decision cutoff
+            if not arena_match.end_tree(child):  # decision cutoff
+                self.contained = False
         finally:
             diagnostic(intent, "decision_budget_expired", duration_ms)
 
     def _launch(self, intent: StartIntent) -> None:
         """Claim, reserve durably, then spawn; restart uncertainty never launches twice."""
+        if budget_problems():
+            # Before the claim: the seat stays queued, and no model work can start.
+            raise RunnerRefused("The Arena turn budget is not guaranteed.")
         if not self.contained:
             raise RunnerRefused("The Arena runtime tree could not be proven contained.")
         claimed = self._post(f"/{intent.intent_id}/claim", {"runner_id": self.journal.runner_id})
@@ -801,10 +855,11 @@ class ArenaRunner:
             return
         self.finished.clear()
         self.terminal = self.playing = False
+        self.stopping = False
         scratch = Path(tempfile.mkdtemp(prefix="agentnexus-runtime-"))
         try:
             launch = self.driver.launch(self.handle, scratch)
-            child = subprocess.Popen(  # noqa: S603 - the driver's reviewed match command
+            child = arena_match.start_in_tree(  # the driver's reviewed match command
                 launch.command,
                 env=launch.environment,
                 stdin=subprocess.PIPE,
@@ -832,15 +887,13 @@ class ArenaRunner:
         self.worker.start()
 
     def stop_child(self) -> None:
-        """Terminate the bounded child and wait, before releasing the profile lock."""
+        """End the bounded child's whole tree and wait, before releasing the profile lock."""
+        with self._gate:
+            self.stopping = True  # first: nothing the child left behind is forwarded from now on
         if self.child is not None:
-            if self.child.poll() is None:
-                self.child.terminate()
-            try:
-                self.child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.child.kill()
-                self.child.wait(timeout=10)
+            if not arena_match.end_tree(self.child):
+                self.contained = False
+            self.child.wait(timeout=10)
             if self.worker is not None:
                 self.worker.join(timeout=30)
                 if self.worker.is_alive():
@@ -950,6 +1003,7 @@ def inspected_runtime(
     Nothing about a model or a provider is consulted: the driver inspects the installation and
     the profile, and its preflight must expose exactly the three Arena operations.
     """
+    require_budget()
     from agentnexus_sdk.connector import State
 
     recorded = State.load(paths.state_file).runtimes

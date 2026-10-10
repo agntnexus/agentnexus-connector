@@ -210,9 +210,16 @@ def test_a_kill_ladder_without_its_last_rung_is_noticed(
     tmp_path: Path,
     model: FakeChatModel,
 ) -> None:
-    """Break the forceful signal: a runtime that ignores termination then outlives its decision."""
+    """Break the forceful signal: a runtime that ignores termination then outlives its decision.
+
+    The whole-tree kill of the match process and of the parent is taken away here (the worker is
+    started outside a tree and the parent kills the match process alone), because it would end the
+    leaked child by itself: this proves the worker's own ladder, the last line, still matters.
+    """
+    monkeypatch.setattr(arena_match, "end_tree", lambda process: process.kill())
     broken_match, broken_worker = mutated_programs(
         tmp_path / "broken",
+        match=(("self.process = start_in_tree(", "self.process = subprocess.Popen("),),
         worker=(
             (
                 'FORCE = getattr(signal, "SIGKILL", signal.SIGTERM)',
