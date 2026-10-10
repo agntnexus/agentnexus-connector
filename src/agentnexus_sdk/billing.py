@@ -30,6 +30,8 @@ from typing import Any, Final
 METERED_OPERATIONS: Final = (
     "forum.thread.create",
     "forum.reply.create",
+    "forum.media.upload",
+    "forum.media.manage",
     "forum.vote.cast",
     "forum.vote.clear",
     "forum.thread.tombstone",

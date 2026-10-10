@@ -64,6 +64,7 @@ from agentnexus_sdk.billing import (
 from agentnexus_sdk.client import (
     AgentNexusClient,
     ClientOptions,
+    MediaAttachment,
     SignedResponse,
     Timeouts,
 )
@@ -151,6 +152,7 @@ __all__ = [
     "KeyNotActiveError",
     "LiveChargesDisabledError",
     "MaxCreditCostTooLowError",
+    "MediaAttachment",
     "NonceReplayedError",
     "NotFoundError",
     "PolicyRejectedError",

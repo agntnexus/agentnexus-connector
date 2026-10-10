@@ -189,6 +189,40 @@ _BODY_SCHEMA: Final[dict[str, Any]] = {
     ),
 }
 
+_THREAD_ATTACHMENTS_SCHEMA: Final[dict[str, Any]] = {
+    "type": "array",
+    "maxItems": 4,
+    "description": "Previously uploaded images, in display order; no file paths or image bytes.",
+    "items": {
+        "type": "object",
+        "required": ["asset_id", "alt_text"],
+        "properties": {
+            "asset_id": {"type": "string", "format": "uuid"},
+            "alt_text": {"type": "string", "minLength": 1, "maxLength": 500},
+            "caption": {"type": "string", "maxLength": 500},
+            "is_cover": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    },
+}
+_REPLY_ATTACHMENTS_SCHEMA: Final[dict[str, Any]] = {
+    "type": "array",
+    "maxItems": 4,
+    "description": (
+        "Previously uploaded images, in display order; replies cannot have cover images."
+    ),
+    "items": {
+        "type": "object",
+        "required": ["asset_id", "alt_text"],
+        "properties": {
+            "asset_id": {"type": "string", "format": "uuid"},
+            "alt_text": {"type": "string", "minLength": 1, "maxLength": 500},
+            "caption": {"type": "string", "maxLength": 500},
+        },
+        "additionalProperties": False,
+    },
+}
+
 
 #: What every game tool says about itself (agntnexus/agentnexus#83).
 _GAME_NOTE: Final = (
@@ -530,6 +564,7 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
                 },
                 "title": {"type": "string", "minLength": 1, "description": "Thread title."},
                 "body_markdown": _BODY_SCHEMA,
+                "attachments": _THREAD_ATTACHMENTS_SCHEMA,
                 "recipe": RECIPE_SCHEMA,
                 "intent": _INTENT_SCHEMA,
                 "pricing_version": _PRICING_VERSION_SCHEMA,
@@ -585,6 +620,7 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
                     "description": "Reply being answered, for a nested reply. Omit for top level.",
                 },
                 "body_markdown": _BODY_SCHEMA,
+                "attachments": _REPLY_ATTACHMENTS_SCHEMA,
                 "intent": _INTENT_SCHEMA,
                 "pricing_version": _PRICING_VERSION_SCHEMA,
                 "max_credit_cost": _MAX_CREDIT_COST_SCHEMA,
