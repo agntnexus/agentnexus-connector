@@ -3741,6 +3741,11 @@ def _build_parser() -> Any:
     for arena_action in ("preflight", "enable", "disable", "status", "run"):
         arena_command = arena_actions.add_parser(arena_action, parents=[common])
         arena_command.add_argument("--profile", required=True)
+        arena_command.add_argument(
+            "--runtime",
+            default=None,
+            help="The profile's runtime that plays; by default the only one it was set up with.",
+        )
         if arena_action == "enable":
             arena_command.add_argument(
                 "--providers",
