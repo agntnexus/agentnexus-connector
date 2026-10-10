@@ -116,6 +116,12 @@ jobs:
           print(f"{len(names)} modules imported from the built wheel")
           PY
 
+      - name: Agent-led setup plans stay bounded, resumable and secret-free
+        # agntnexus/agentnexus#230. Exercise the built wheel after its declared dependencies are
+        # installed: no invitation, credential, post, match, inference or service is created, and
+        # #228's runtime-driver work is not duplicated.
+        run: python -m pytest ci/test_agent_led_setup.py -q
+
       - name: Termux/Android support, and a release chain that still refuses
         # Run against the wheel installed by the step above rather than against the source tree,
         # because an operator installs a wheel and the platform decision these cases check is made
@@ -139,8 +145,15 @@ jobs:
         run: >-
           python -m pytest ci/test_read_endpoint_routing.py ci/test_write_admission_bridge.py
           ci/test_owner_link_bridge.py ci/test_games_direct_play.py -q
+      - name: Recipe payload stays bounded and text-only
+        run: python -m pytest ci/test_recipe_payload.py -q
       - name: Arena starts stay bounded, isolated and single across retries
-        run: python -m pytest ci/test_arena_runner.py -q
+        # agntnexus/agentnexus#226 (D-174). The claim that starts a run may carry the declared model
+        # the runtime's driver reported at the proof before any claim: sent once per start intent,
+        # frozen for its retries, left out whenever it is unknown or unusable, never logged and never
+        # asked of a runtime again. The second file runs the real supervisor against a scripted
+        # driver and a stand-in API: no real runtime, no network, no model call and no profile file.
+        run: python -m pytest ci/test_arena_runner.py ci/test_arena_declared_model.py -q
 
       - name: An Arena decision ends inside the provider's turn, and an accepted move ends it
         # agntnexus/agentnexus#223. A model decision has 45 of the provider's 60 seconds, and a move
@@ -150,7 +163,45 @@ jobs:
         # stand-in for Hermes whose model blocks, is slow or is fast, whose closing request never
         # answers and whose cleanup hangs or raises: no late move, no match lost to a tail, no
         # process left. No network, no model, no credential and no real match.
-        run: python -m pytest ci/test_arena_turn_budget.py ci/test_arena_decision_worker.py -q
+        run: >-
+          python -m pytest ci/test_arena_turn_budget.py ci/test_arena_decision_worker.py
+          ci/test_arena_budget_gate.py -q
+
+      - name: An Arena runtime is accepted for what it proves, never for a model or a provider
+        # agntnexus/agentnexus#228. The Connector is model-agnostic: a runtime driver proves the
+        # three-operation contract, a killable worker, a bounded cleanup and a deadline the
+        # supervisor keeps, and the runtime-neutral code names no model, provider or runtime. A
+        # second, fake runtime runs through the same state machine, and the discussion forum's model
+        # declaration stays what it was. The runtime in effect is proven before a seat is claimed
+        # and a match stays on the generation it began with; a refused generation claims nothing and
+        # is not retried by itself. No network and no credential.
+        run: python -m pytest ci/test_arena_driver.py ci/test_forum_declared_model.py ci/test_arena_generation.py -q
+
+      - name: Hermes plays on its profile's own provider and credential, a subscription included
+        # agntnexus/agentnexus#228. A stand-in Hermes with a resolver, a home override, a secret
+        # scope and an authentication error shaped like the reviewed ones, and a fake subscription
+        # backend on loopback, show that a profile with no API key plays: the credential is resolved
+        # by Hermes in the narrowest window, reaches only the transport, is never copied or logged,
+        # one request makes one move, a hanging backend is ended at the cutoff, and a match keeps the
+        # model it started with. Each guard is then broken on purpose and must be noticed. No
+        # network beyond loopback, no real credential, account or model, and no paid call.
+        run: python -m pytest ci/test_arena_hermes_subscription.py ci/test_arena_hermes_generation.py -q
+
+      - name: OpenClaw takes part through the same driver contract
+        # agntnexus/agentnexus#228. A stand-in OpenClaw with the real process topology (launcher,
+        # child, a runtime in a session of its own, the MCP bridge below it) and a loopback chat
+        # model show that a decision is offered exactly the three operations, makes one request and
+        # one move, is ended at the accepted move so no closing request follows, and leaves no
+        # process and no file behind - also when the model never answers, when the runtime ignores
+        # termination and when the worker is killed. The preflight's canary refuses a fourth tool.
+        # The auth-state proofs use only an empty/synthetic store to check profile ownership, path
+        # containment, disposable sessions and pre-claim refusal. Each guard is then broken on
+        # purpose and must be noticed. No real OpenClaw, profile, credential, account or model, and
+        # no network beyond loopback.
+        run: >-
+          python -m pytest ci/test_arena_openclaw.py ci/test_arena_openclaw_driver.py
+          ci/test_arena_openclaw_auth.py ci/test_arena_openclaw_review.py
+          ci/test_check_windows_security_run.py -q
 
       - name: The release builder refuses what it must
         # `scripts/build_release.py` is the one file here that can hold a private signing key, so
@@ -256,3 +307,71 @@ jobs:
             exit 1
           fi
           echo "Every tracked file is either mirrored or declared repository-local."
+
+  windows-security:
+    # agntnexus/agentnexus#228. The Windows boundaries cannot be shown on Linux: the owner and
+    # access list that make a profile private, the job object a runtime starts in (suspended, put
+    # in the job, then resumed, with every Windows answer checked), the child and grandchild that
+    # end with it, and the pinned state of the configuration file and the profile secrets file with
+    # no move forwarded after a change. This repository runs only on GitHub-hosted runners, so this
+    # focused job runs them on `windows-latest`. A skipped security test is not a passed one: the
+    # report is read, and only a skip that cannot apply on Windows is allowed.
+    name: Windows boundaries (profile privacy, job object, pinned files)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install the pinned toolchain and the built package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r constraints-ci.txt
+          python -m build
+          python -m pip install dist/*.whl
+
+      - name: Show the owner and access list the tests will judge
+        # Diagnostic only: the identifiers of the runner account and what a directory locked to it
+        # looks like. It prints no secret and decides nothing.
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib
+          import subprocess
+          import tempfile
+
+          from agentnexus_sdk import openclaw_arena as arena
+
+          folder = pathlib.Path(tempfile.mkdtemp()) / "probe"
+          folder.mkdir()
+          sid = arena.windows_current_sid()
+          print("user", sid, "token owner", arena.windows_token_owner())
+          print("created", arena.windows_security(folder))
+          subprocess.run(
+              ["icacls", str(folder), "/inheritance:r", "/grant:r", f"*{sid}:(OI)(CI)F"], check=True
+          )
+          print("locked", arena.windows_security(folder), arena.windows_private(folder))
+          PY
+
+      - name: The Windows boundaries really run
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest ci/test_check_windows_security_run.py -q -p no:cacheprovider
+          python -m pytest \
+            ci/test_arena_openclaw_review.py ci/test_arena_openclaw.py \
+            ci/test_arena_budget_gate.py ci/test_arena_turn_budget.py \
+            ci/test_arena_decision_worker.py ci/test_arena_declared_model.py \
+            -m windows_security -q -rs -p no:cacheprovider --junitxml=windows-security.xml
+          python ci/check_windows_security_run.py windows-security.xml

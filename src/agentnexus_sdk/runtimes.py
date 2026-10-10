@@ -424,6 +424,19 @@ class ConfigurationOutcome:
     detail: str
 
 
+@dataclass(frozen=True, slots=True)
+class TargetProfileInspection:
+    """Read-only evidence about a runtime target, without paths or configuration contents."""
+
+    available: bool
+    exists: bool | None
+    active: bool | None
+    safe: bool
+    can_create: bool
+    registration_present: bool = False
+    registered_agent_id: str | None = None
+
+
 class RuntimeAdapter(Protocol):
     """One agent runtime. Implementations hold no protocol logic of their own."""
 
@@ -438,7 +451,17 @@ class RuntimeAdapter(Protocol):
         """Return the AgentNexus MCP entry this runtime already has, if any."""
         ...
 
-    def configure(self, spec: ServerSpec, *, backup_directory: Path) -> ConfigurationOutcome:
+    def inspect_target_profile(self) -> TargetProfileInspection:
+        """Inspect the explicit target without creating files or returning local configuration."""
+        ...
+
+    def configure(
+        self,
+        spec: ServerSpec,
+        *,
+        backup_directory: Path,
+        target_profile_disposition: str | None = None,
+    ) -> ConfigurationOutcome:
         """Register or update the entry, backing up whatever it replaces."""
         ...
 
@@ -486,6 +509,25 @@ class RuntimeAdapter(Protocol):
     def soul_location(self) -> SoulLocation:
         """Where this profile's instruction document lives, as the runtime itself reports it."""
         ...
+
+
+def declared_model_of(adapter: RuntimeAdapter) -> str | None:
+    """Return the text a runtime reports for its model, if RMD-1 would send it, else `None`.
+
+    The one place that turns a runtime's own model report into an optional `declared_model`. The
+    discussion forum and the Arena both ask it, so that both forward exactly the same opaque text
+    under exactly the same check. The runtime's report is read through its adapter only: no profile
+    file, no provider configuration and no credential is opened, and the text is never interpreted.
+    The validator is applied before the text is attached, so an odd answer costs a dropped field and
+    never a rejected post or match.
+    """
+    status = adapter.model_status()
+    if not status.configured or status.value is None:
+        return None
+    from agentnexus_sdk.bridge import is_declared_model_valid
+
+    value = status.value.strip()
+    return value if is_declared_model_valid(value) else None
 
 
 #: What Hermes' own confirmation prompts take as their documented default.
@@ -609,8 +651,47 @@ class HermesAdapter:
         return self._context
 
     def _environment(self) -> dict[str, str] | None:
-        """Return the environment every `hermes` invocation here runs with."""
-        return self._context.process_environment()
+        """Run profile-scoped commands against this target, not the invoking Hermes session."""
+        environment = dict(self._context.process_environment() or os.environ)
+        environment.pop("HERMES_PROFILE", None)
+        environment.pop("AGENTNEXUS_PROFILE", None)
+        return environment
+
+    def _profile_creation_environment(self) -> dict[str, str]:
+        """Give Hermes' global profile manager only runtime/system settings, never caller data.
+
+        Hermes profile creation is global and takes an explicit target name. Do not let selectors
+        from the tool-capable Hermes session choose the target, and do not pass provider/model
+        credential variables or OpenClaw state into a fresh profile.
+        """
+        allowed = {
+            "APPDATA",
+            "COMSPEC",
+            "HERMES_HOME",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "LOCALAPPDATA",
+            "PATH",
+            "PATHEXT",
+            "SYSTEMROOT",
+            "TEMP",
+            "TERM",
+            "TMP",
+            "TMPDIR",
+            "USERPROFILE",
+            "WINDIR",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+        }
+        environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
+        # Resolve the actual installation home with the clean manager environment, then pin it for
+        # the official create command. The path stays local and is never emitted in the plan.
+        environment["HERMES_HOME"] = str(self._config(shared=True, environment=environment).parent)
+        return environment
 
     def _command(self, executable: str, *arguments: str) -> list[str]:
         """Build one `hermes` invocation with this profile's selector already in place.
@@ -637,7 +718,7 @@ class HermesAdapter:
             verified_against="a real Hermes v0.20.6 installation",
         )
 
-    def _config(self, *, shared: bool = False) -> Path:
+    def _config(self, *, shared: bool = False, environment: dict[str, str] | None = None) -> Path:
         """Where Hermes keeps the file this adapter inspects, backs up, and checks after writing.
 
         Asked of Hermes rather than guessed, and asked *for this profile*: `hermes -p X config
@@ -661,7 +742,8 @@ class HermesAdapter:
                 if shared
                 else self._command(executable, "config", "path")
             )
-            completed = _run(self._runner, arguments, env=self._environment())
+            command_environment = environment if environment is not None else self._environment()
+            completed = _run(self._runner, arguments, env=command_environment)
             reported = (completed.stdout or "").strip().splitlines()
             if completed.returncode == 0 and reported:
                 candidate = Path(reported[-1].strip())
@@ -669,10 +751,11 @@ class HermesAdapter:
                     return candidate
 
         # Older Hermes releases without `config path`: fall back to its documented locations.
-        home = os.environ.get("HERMES_HOME")
+        fallback_environment = environment if environment is not None else os.environ
+        home = fallback_environment.get("HERMES_HOME")
         if home:
             return Path(home) / "config.yaml"
-        base = os.environ.get("LOCALAPPDATA")
+        base = fallback_environment.get("LOCALAPPDATA")
         if base:
             candidate = Path(base) / "hermes" / "config.yaml"
             if candidate.parent.exists():
@@ -725,22 +808,81 @@ class HermesAdapter:
         entry = servers.get(name)
         return entry if isinstance(entry, dict) else None
 
-    def configure(self, spec: ServerSpec, *, backup_directory: Path) -> ConfigurationOutcome:
+    def configure(
+        self,
+        spec: ServerSpec,
+        *,
+        backup_directory: Path,
+        target_profile_disposition: str | None = None,
+    ) -> ConfigurationOutcome:
         """Register or update the entry, backing up whatever it replaces."""
         executable = self._which("hermes")
         if executable is None:
             message = "Hermes disappeared from PATH between preflight and configuration."
             raise RuntimeIntegrationError(message)
 
-        self._context.prepare()
-        self._ensure_profile(executable)
-        self._require_isolated_profile()
-
-        existing = self.existing_entry()
+        inspection = self.inspect_target_profile()
+        if not inspection.available or inspection.exists is None:
+            raise RuntimeIntegrationError(
+                "Hermes could not inspect the explicitly selected target profile.",
+                recovery=(
+                    "Nothing was changed. Re-run the read-only setup plan before using the "
+                    "invitation."
+                ),
+            )
+        existing = self.existing_entry() if inspection.exists else None
+        if existing is not None and not _is_same_identity(existing, spec):
+            raise _conflict(self._server_name, existing, runtime="Hermes")
+        action = target_profile_disposition
+        if action is None:
+            action = "create" if not inspection.exists else ("resume" if existing else "adopt")
+        if action not in {"create", "adopt", "resume", "refused"}:
+            raise RuntimeIntegrationError("The target-profile disposition is unsupported.")
+        if action == "refused":
+            raise RuntimeIntegrationError("The read-only plan refused the selected Hermes target.")
+        if action == "create" and inspection.exists:
+            raise RuntimeIntegrationError(
+                "The target Hermes profile changed after its create plan was reviewed.",
+                recovery="Nothing was changed. Re-run the read-only setup plan for the target.",
+            )
+        if action in {"adopt", "resume"} and not inspection.exists:
+            raise RuntimeIntegrationError(
+                "The target Hermes profile disappeared after it was reviewed.",
+                recovery="Nothing was changed. Re-run the read-only setup plan for the target.",
+            )
+        if action == "adopt" and (
+            inspection.active is not False or inspection.registration_present
+        ):
+            raise RuntimeIntegrationError(
+                "Hermes adoption requires an inactive, unbound target profile.",
+                recovery="Nothing was changed. Review the read-only target-profile plan again.",
+            )
+        if not inspection.safe or (inspection.exists and inspection.active is not False):
+            raise RuntimeIntegrationError(
+                "The selected Hermes target is active or its isolation could not be verified.",
+                recovery=(
+                    "Stop the target profile or resolve its isolation, then inspect the Connector "
+                    "setup plan again. Nothing was changed."
+                ),
+            )
+        if not inspection.exists and not inspection.can_create:
+            raise RuntimeIntegrationError(
+                "Hermes cannot safely create the selected target profile.",
+                recovery=(
+                    "Nothing was changed. Choose a named target profile and inspect the setup "
+                    "plan again."
+                ),
+            )
         if existing is not None and _matches(existing, spec):
             return ConfigurationOutcome(
                 changed=False, backup=None, detail="already configured; left unchanged"
             )
+
+        self._context.prepare()
+        self._ensure_profile(executable, target_profile_disposition=action)
+        self._require_isolated_profile()
+
+        existing = self.existing_entry()
         if existing is not None and not _is_same_identity(existing, spec):
             # Fail closed. An entry under this name that signs as a different agent belongs to
             # another profile or another person's setup, and replacing it would retire that agent
@@ -843,11 +985,11 @@ class HermesAdapter:
             changed=True, backup=backup, detail=f"registered with {executable}"
         )
 
-    def existing_profiles(self) -> set[str]:
-        """Return the Hermes profiles this installation already has, by name."""
+    def _profile_listing(self) -> tuple[dict[str, bool], bool]:
+        """Read Hermes' profile names and its active marker, without selecting a target for it."""
         executable = self._which("hermes")
         if executable is None:
-            return set()
+            return {}, False
         completed = _run(self._runner, [executable, "profile", "list"])
         if completed.returncode != 0:
             message = "`hermes profile list` failed, so this connector cannot tell which Hermes "
@@ -857,18 +999,84 @@ class HermesAdapter:
             )
         # A rendered table, not a machine format: read the first column of each row and ignore
         # the header, the rules, and the marker Hermes puts beside the active profile.
-        names: set[str] = set()
+        profiles: dict[str, bool] = {}
+        active_marker_seen = False
         for line in (completed.stdout or "").splitlines():
-            stripped = line.strip().lstrip("◆*>").strip()
+            raw = line.strip()
+            active = bool(raw and raw[0] in "◆*>")
+            active_marker_seen = active_marker_seen or active
+            stripped = raw.lstrip("◆*>").strip()
             if not stripped or stripped.startswith(("─", "-", "=")):
                 continue
             first = stripped.split()[0]
             if first.lower() in {"profile", "name"}:
                 continue
-            names.add(first)
-        return names
+            profiles[first] = active
+        return profiles, active_marker_seen
 
-    def _ensure_profile(self, executable: str) -> None:
+    def existing_profiles(self) -> set[str]:
+        """Return the Hermes profiles this installation already has, by name."""
+        executable = self._which("hermes")
+        if executable is None:
+            return set()
+        profiles, _ = self._profile_listing()
+        return set(profiles)
+
+    def inspect_target_profile(self) -> TargetProfileInspection:
+        """Read target existence, activity, isolation and AgentNexus binding without writing."""
+        executable = self._which("hermes")
+        if executable is None:
+            return TargetProfileInspection(
+                available=False,
+                exists=None,
+                active=None,
+                safe=False,
+                can_create=False,
+            )
+        profiles, active_marker_seen = self._profile_listing()
+        target = self._context.hermes_profile or DEFAULT_PROFILE_NAME
+        if target not in profiles:
+            return TargetProfileInspection(
+                available=True,
+                exists=False,
+                active=False,
+                safe=True,
+                can_create=self._context.hermes_profile is not None,
+            )
+
+        active = profiles[target] if active_marker_seen else None
+        safe = True
+        try:
+            self._require_isolated_profile()
+        except RuntimeIntegrationError:
+            safe = False
+        if not safe:
+            return TargetProfileInspection(
+                available=True,
+                exists=True,
+                active=active,
+                safe=False,
+                can_create=False,
+            )
+        entry = self.existing_entry()
+        environment = entry.get("env") if isinstance(entry, dict) else None
+        agent_id = None
+        if isinstance(environment, dict):
+            value = environment.get("AGENTNEXUS_AGENT_ID")
+            agent_id = value if isinstance(value, str) and value else None
+        return TargetProfileInspection(
+            available=True,
+            exists=True,
+            active=active,
+            safe=safe,
+            can_create=False,
+            registration_present=entry is not None,
+            registered_agent_id=agent_id,
+        )
+
+    def _ensure_profile(
+        self, executable: str, *, target_profile_disposition: str | None = None
+    ) -> None:
         """Create this profile in Hermes if it does not exist yet, using Hermes' own command.
 
         Created rather than assumed, because `hermes -p <unknown>` exits non-zero: without this a
@@ -884,8 +1092,35 @@ class HermesAdapter:
         `hermes profile alias <name>`.
         """
         target = self._context.hermes_profile
-        if target is None or target in self.existing_profiles():
+        if target is None:
+            if target_profile_disposition == "create":
+                raise RuntimeIntegrationError(
+                    "The shared Hermes default cannot be created as a target profile."
+                )
             return
+        profiles, active_markers_known = self._profile_listing()
+        if target in profiles:
+            active = profiles[target] if active_markers_known else None
+            if target_profile_disposition == "create":
+                raise RuntimeIntegrationError(
+                    "The target Hermes profile appeared after the read-only create plan.",
+                    recovery=(
+                        "Nothing was changed. Re-run the read-only setup plan before proceeding."
+                    ),
+                )
+            if target_profile_disposition == "adopt" and active is not False:
+                raise RuntimeIntegrationError(
+                    "Hermes adoption requires an inactive target profile.",
+                    recovery=(
+                        "Nothing was changed. Re-run the read-only setup plan before proceeding."
+                    ),
+                )
+            return
+        if target_profile_disposition in {"adopt", "resume"}:
+            raise RuntimeIntegrationError(
+                "The target Hermes profile disappeared after the read-only plan.",
+                recovery="Nothing was changed. Re-run the read-only setup plan before proceeding.",
+            )
         completed = _run(
             self._runner,
             [
@@ -899,6 +1134,7 @@ class HermesAdapter:
             ],
             timeout=300.0,
             stdin="\n",
+            env=self._profile_creation_environment(),
         )
         if completed.returncode != 0 or target not in self.existing_profiles():
             detail = (completed.stderr or completed.stdout or "").strip()[-300:]
@@ -1394,6 +1630,53 @@ class OpenClawAdapter:
         """Return this profile's AgentNexus MCP entry, if the runtime already has it."""
         return self._entry_named(self._server_name, environment=self._environment())
 
+    def inspect_target_profile(self) -> TargetProfileInspection:
+        """Inspect this Connector-owned OpenClaw context without creating its config directory."""
+        if self._which("openclaw") is None:
+            return TargetProfileInspection(
+                available=False,
+                exists=None,
+                active=None,
+                safe=False,
+                can_create=False,
+            )
+        config = self._context.openclaw_config
+        if not self._context.isolated or config is None:
+            # The legacy default targets OpenClaw's shared configuration. It can only be resumed
+            # when its existing AgentNexus registration is proven to belong to this saved state.
+            entry = self.existing_entry()
+            entry_environment = _entry_environment(entry) if isinstance(entry, dict) else {}
+            agent_id = entry_environment.get(IDENTITY_ENVIRONMENT_VARIABLE)
+            return TargetProfileInspection(
+                available=True,
+                exists=True,
+                active=None,
+                safe=True,
+                can_create=False,
+                registration_present=entry is not None,
+                registered_agent_id=agent_id if isinstance(agent_id, str) else None,
+            )
+        if not config.is_file():
+            return TargetProfileInspection(
+                available=True,
+                exists=False,
+                active=False,
+                safe=True,
+                can_create=True,
+            )
+        entry = self.existing_entry()
+        entry_environment = _entry_environment(entry) if isinstance(entry, dict) else {}
+        agent_id = entry_environment.get(IDENTITY_ENVIRONMENT_VARIABLE)
+        return TargetProfileInspection(
+            available=True,
+            exists=True,
+            active=None,
+            safe=True,
+            can_create=False,
+            registration_present=entry is not None,
+            registered_agent_id=agent_id if isinstance(agent_id, str) else None,
+        )
+
     def model_status(self) -> ModelStatus:
         """Report unknown: OpenClaw exposes no model-configuration query this connector calls.
 
@@ -1451,12 +1734,22 @@ class OpenClawAdapter:
                     return candidate
         return None
 
-    def configure(self, spec: ServerSpec, *, backup_directory: Path) -> ConfigurationOutcome:
+    def configure(
+        self,
+        spec: ServerSpec,
+        *,
+        backup_directory: Path,
+        target_profile_disposition: str | None = None,
+    ) -> ConfigurationOutcome:
         """Register or update the entry, backing up whatever it replaces."""
         executable = self._require_supported()
-        self._context.prepare()
-
-        existing = self.existing_entry()
+        inspection = self.inspect_target_profile()
+        if not inspection.available or inspection.exists is None:
+            raise RuntimeIntegrationError(
+                "OpenClaw could not inspect the explicitly selected target context.",
+                recovery="Nothing was changed. Re-run the read-only setup plan for the target.",
+            )
+        existing = self.existing_entry() if inspection.exists else None
         if existing is not None:
             if _matches(existing, spec):
                 return ConfigurationOutcome(
@@ -1466,6 +1759,40 @@ class OpenClawAdapter:
                 # A different AgentNexus entry is a conflict, not something to overwrite: it points
                 # at another identity's key, and replacing it would silently retire that agent.
                 raise _conflict(self._server_name, existing, runtime="OpenClaw")
+
+        action = target_profile_disposition
+        if action is None:
+            action = "create" if not inspection.exists else ("resume" if existing else "adopt")
+        if action not in {"create", "adopt", "resume", "refused"}:
+            raise RuntimeIntegrationError("The target-profile disposition is unsupported.")
+        if action == "refused":
+            raise RuntimeIntegrationError(
+                "The read-only plan refused the selected OpenClaw target."
+            )
+        if action == "create" and inspection.exists:
+            raise RuntimeIntegrationError(
+                "The selected OpenClaw context changed after its create plan was reviewed.",
+                recovery="Nothing was changed. Re-run the read-only setup plan for the target.",
+            )
+        if action in {"adopt", "resume"} and not inspection.exists:
+            raise RuntimeIntegrationError(
+                "The selected OpenClaw context disappeared after it was reviewed.",
+                recovery="Nothing was changed. Re-run the read-only setup plan for the target.",
+            )
+        if action == "adopt" and (
+            not inspection.safe or inspection.active is not False or existing is not None
+        ):
+            raise RuntimeIntegrationError(
+                "OpenClaw adoption requires an inactive, safe, unbound target context.",
+                recovery="Nothing was changed. Review the read-only target-profile plan again.",
+            )
+        if action == "resume" and not inspection.safe:
+            raise RuntimeIntegrationError(
+                "The saved OpenClaw target context could not be verified.",
+                recovery="Nothing was changed. Review the read-only target-profile plan again.",
+            )
+
+        self._context.prepare()
 
         # The recoverable state OpenClaw itself can produce, rather than a guess at its file layout.
         backup: Path | None = _timestamped(

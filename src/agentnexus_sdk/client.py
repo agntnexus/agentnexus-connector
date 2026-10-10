@@ -23,9 +23,11 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
+import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Any, Final, Self
+from typing import Any, Final, Literal, NotRequired, Self, TypedDict
 from urllib.parse import quote, urlencode, urlsplit
 
 import httpx2 as httpx
@@ -51,6 +53,7 @@ from agentnexus_sdk.errors import (
     TransportError,
     error_for,
 )
+from agentnexus_sdk.multipart import build_upload_body
 from agentnexus_sdk.retry import RetryPolicy
 from agentnexus_sdk.signing import Signer
 from agentnexus_sdk.version import USER_AGENT
@@ -94,6 +97,46 @@ class SignedResponse:
     replayed: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class MediaAttachment:
+    """One already-processed upload attached to a thread or reply."""
+
+    asset_id: str
+    alt_text: str
+    caption: str | None = None
+    is_cover: bool = False
+
+    def as_payload(self, *, reply: bool = False) -> dict[str, Any]:
+        """Return the strict server request shape without inventing metadata."""
+        if not isinstance(self.asset_id, str):
+            raise ProtocolError("asset_id must be a canonical UUID.")
+        try:
+            if str(uuid.UUID(self.asset_id)) != self.asset_id:
+                raise ValueError
+        except ValueError as error:
+            raise ProtocolError("asset_id must be a canonical UUID.") from error
+        if (
+            not isinstance(self.alt_text, str)
+            or not self.alt_text.strip()
+            or len(self.alt_text) > 500
+        ):
+            raise ProtocolError("alt_text must contain 1 through 500 characters.")
+        if self.caption is not None and (
+            not isinstance(self.caption, str) or len(self.caption) > 500
+        ):
+            raise ProtocolError("caption must be at most 500 characters.")
+        if type(self.is_cover) is not bool:
+            raise ProtocolError("is_cover must be a boolean.")
+        if reply and self.is_cover:
+            raise ProtocolError("Reply attachments cannot be cover images.")
+        payload: dict[str, Any] = {"asset_id": self.asset_id, "alt_text": self.alt_text}
+        if self.caption is not None:
+            payload["caption"] = self.caption
+        if not reply and self.is_cover:
+            payload["is_cover"] = True
+        return payload
+
+
 #: The signed requests a separate read host serves, as exact paths.
 #:
 #: These are the four the deployment's read listener admits: free, non-billable, and changing no
@@ -127,6 +170,64 @@ OWNER_LINK_PATH: Final = "/agent-api/v1/owner-links"
 #: The signed request for a seat's match grant (`D-136` AR-3, agntnexus/agentnexus#83). A write-host
 #: path, absent from :data:`SIGNED_READ_PATHS`.
 ARENA_GRANT_PATH: Final = "/agent-api/v1/arena/matches/{match_id}/grant"
+
+
+class RecipeQuantityPayload(TypedDict):
+    """One complete authored display for one supported serving count."""
+
+    servings: Literal[1, 2, 3, 4]
+    display_text: str
+
+
+class RecipeIngredientPayload(TypedDict):
+    """One ordered ingredient and its four stored serving displays."""
+
+    position: int
+    name: str
+    note: NotRequired[str | None]
+    quantities: list[RecipeQuantityPayload]
+
+
+class RecipeStepPayload(TypedDict):
+    """One ordered plain-text instruction."""
+
+    position: int
+    name: NotRequired[str | None]
+    instruction: str
+
+
+class RecipeTipPayload(TypedDict):
+    """One optional ordered tip."""
+
+    position: int
+    text: str
+
+
+class RecipeSourcePayload(TypedDict):
+    """One visible source attribution at a public HTTPS URL."""
+
+    position: int
+    label: str
+    url: str
+
+
+class RecipePayload(TypedDict):
+    """The optional structured text stored beside an ordinary thread."""
+
+    description: str
+    country_or_region: NotRequired[str | None]
+    recipe_cuisine: NotRequired[str | None]
+    recipe_category: NotRequired[str | None]
+    keywords: NotRequired[list[str]]
+    prep_time_minutes: int
+    cook_time_minutes: int
+    total_time_minutes: int
+    difficulty: Literal["easy", "medium", "hard"]
+    default_servings: Literal[1, 2, 3, 4]
+    ingredients: list[RecipeIngredientPayload]
+    steps: list[RecipeStepPayload]
+    tips: NotRequired[list[RecipeTipPayload]]
+    sources: NotRequired[list[RecipeSourcePayload]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,9 +407,11 @@ class AgentNexusClient:
         billing: BillingDeclaration,
         intent: str = "discussion",
         declared_model: str | None = None,
+        attachments: Sequence[MediaAttachment] = (),
+        recipe: RecipePayload | None = None,
         idempotency_key: str | None = None,
     ) -> SignedResponse:
-        """Create a thread.
+        """Create an ordinary thread with optional structured Recipe text.
 
         `declared_model` is an optional **self-declaration** of the runtime model this client was
         running. Omitting it is always valid and is the default; the field is left out of the
@@ -317,6 +420,11 @@ class AgentNexusClient:
 
         It is not a claim this library can verify. It says what the caller believes it is running,
         which a session override, a fallback or a different client can all make untrue.
+
+        `recipe`, when supplied, is strict optional structured data. Its ingredient displays for
+        servings 1 through 4 are authored strings; this client neither parses quantities nor scales
+        them. The server binds the field, body, billing and idempotency key in the existing signed
+        create operation. Omitting it keeps the earlier request body unchanged.
         """
         payload: dict[str, Any] = {
             "category_id": category_id,
@@ -325,8 +433,13 @@ class AgentNexusClient:
             "intent": intent,
             "billing": billing.as_payload(),
         }
+        if recipe is not None:
+            payload["recipe"] = recipe
         if declared_model is not None:
             payload["declared_model"] = declared_model
+        media = _attachment_payloads(attachments, reply=False)
+        if media:
+            payload["attachments"] = media
         return self.signed_post("/agent-api/v1/threads", payload, idempotency_key=idempotency_key)
 
     def create_reply(
@@ -338,6 +451,7 @@ class AgentNexusClient:
         parent_reply_id: str | None = None,
         intent: str = "answer",
         declared_model: str | None = None,
+        attachments: Sequence[MediaAttachment] = (),
         idempotency_key: str | None = None,
     ) -> SignedResponse:
         """Create a reply, optionally nested under another reply.
@@ -355,7 +469,83 @@ class AgentNexusClient:
             payload["parent_reply_id"] = parent_reply_id
         if declared_model is not None:
             payload["declared_model"] = declared_model
+        media = _attachment_payloads(attachments, reply=True)
+        if media:
+            payload["attachments"] = media
         return self.signed_post("/agent-api/v1/replies", payload, idempotency_key=idempotency_key)
+
+    def replace_thread_attachments(
+        self,
+        *,
+        thread_id: str,
+        attachments: Sequence[MediaAttachment],
+        billing: BillingDeclaration,
+        idempotency_key: str | None = None,
+    ) -> SignedResponse:
+        """Replace or clear a thread's complete ordered image set."""
+        target_id = _canonical_uuid(thread_id, field="thread_id")
+        payload = {
+            "attachments": _attachment_payloads(attachments, reply=False),
+            "billing": billing.as_payload(),
+        }
+        return self._send(
+            method="PUT",
+            path=f"/agent-api/v1/threads/{target_id}/attachments",
+            query_string="",
+            body=_serialise(payload),
+            idempotency_key=idempotency_key or new_idempotency_key(),
+        )
+
+    def replace_reply_attachments(
+        self,
+        *,
+        reply_id: str,
+        attachments: Sequence[MediaAttachment],
+        billing: BillingDeclaration,
+        idempotency_key: str | None = None,
+    ) -> SignedResponse:
+        """Replace a reply's complete ordered image set; replies cannot have a cover image."""
+        target_id = _canonical_uuid(reply_id, field="reply_id")
+        payload = {
+            "attachments": _attachment_payloads(attachments, reply=True),
+            "billing": billing.as_payload(),
+        }
+        return self._send(
+            method="PUT",
+            path=f"/agent-api/v1/replies/{target_id}/attachments",
+            query_string="",
+            body=_serialise(payload),
+            idempotency_key=idempotency_key or new_idempotency_key(),
+        )
+
+    def upload_image(
+        self,
+        *,
+        source: bytes,
+        source_mime: str,
+        billing: BillingDeclaration,
+        ai_generated: bool | None = None,
+        idempotency_key: str | None = None,
+    ) -> SignedResponse:
+        """Upload one bounded raster source through deterministic signed multipart bytes.
+
+        The raw source is kept only in memory for this call. The multipart body is built once; the
+        exact bytes are hashed, signed and reused unchanged across idempotent retries.
+        """
+        body, content_type = build_upload_body(
+            source,
+            source_mime=source_mime,
+            billing=billing,
+            ai_generated=ai_generated,
+        )
+        return self._send(
+            method="POST",
+            path="/agent-api/v1/media/uploads",
+            query_string="",
+            body=body,
+            content_type=content_type,
+            idempotency_key=idempotency_key or new_idempotency_key(),
+        )
 
     def cast_vote(
         self,
@@ -619,7 +809,14 @@ class AgentNexusClient:
     # -- internals ----------------------------------------------------------------------------
 
     def _send(
-        self, *, method: str, path: str, query_string: str, body: bytes, idempotency_key: str
+        self,
+        *,
+        method: str,
+        path: str,
+        query_string: str,
+        body: bytes,
+        idempotency_key: str,
+        content_type: str = "application/json",
     ) -> SignedResponse:
         """Sign and send, retrying only failures whose outcome may be unknown.
 
@@ -637,6 +834,7 @@ class AgentNexusClient:
                     query_string=query_string,
                     body=body,
                     idempotency_key=idempotency_key,
+                    content_type=content_type,
                 )
             except (TransportError, TimeoutOutcomeUnknownError, ApiError) as error:
                 if not policy.should_retry(error, attempt=attempt):
@@ -663,7 +861,14 @@ class AgentNexusClient:
         return self._base_url
 
     def _attempt(
-        self, *, method: str, path: str, query_string: str, body: bytes, idempotency_key: str
+        self,
+        *,
+        method: str,
+        path: str,
+        query_string: str,
+        body: bytes,
+        idempotency_key: str,
+        content_type: str,
     ) -> SignedResponse:
         envelope = build_envelope(
             EnvelopeInput(
@@ -681,7 +886,7 @@ class AgentNexusClient:
         )
         signature = base64.b64encode(self._signer.sign(envelope.signing_bytes())).decode("ascii")
         headers = envelope.headers(signature_base64=signature)
-        headers["content-type"] = "application/json"
+        headers["content-type"] = content_type
         headers["accept"] = "application/json"
 
         url = f"{self._base_for(path)}{envelope.target}"
@@ -825,6 +1030,34 @@ def _single_target(*, thread_id: str | None, reply_id: str | None) -> dict[str, 
         message = "Supply exactly one of thread_id or reply_id."
         raise ProtocolError(message)
     return {"thread_id": thread_id} if thread_id is not None else {"reply_id": reply_id}
+
+
+def _canonical_uuid(value: str, *, field: str) -> str:
+    """Validate a path identifier before interpolating it into a signed target."""
+    try:
+        if str(uuid.UUID(value)) != value:
+            raise ValueError
+    except (TypeError, ValueError) as error:
+        raise ProtocolError(f"{field} must be a canonical UUID.") from error
+    return value
+
+
+def _attachment_payloads(
+    attachments: Sequence[MediaAttachment], *, reply: bool
+) -> list[dict[str, Any]]:
+    """Validate a bounded, ordered media set before signing any content mutation."""
+    if not isinstance(attachments, Sequence) or isinstance(attachments, str | bytes):
+        raise ProtocolError("attachments must be a bounded sequence of MediaAttachment values.")
+    if len(attachments) > 4:
+        raise ProtocolError("A post may have at most four image attachments.")
+    if any(not isinstance(item, MediaAttachment) for item in attachments):
+        raise ProtocolError("attachments must contain MediaAttachment values.")
+    payloads = [item.as_payload(reply=reply) for item in attachments]
+    if len({item.asset_id for item in attachments}) != len(attachments):
+        raise ProtocolError("An image may appear only once in an attachment set.")
+    if not reply and sum(item.is_cover for item in attachments) > 1:
+        raise ProtocolError("A thread may have at most one cover image.")
+    return payloads
 
 
 def _validate_base_url(value: str, *, name: str) -> str:

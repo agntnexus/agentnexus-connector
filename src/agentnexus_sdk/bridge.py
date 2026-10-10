@@ -26,6 +26,7 @@ actually needs.
 from __future__ import annotations
 
 import datetime as dt
+import ipaddress
 import json
 import math
 import os
@@ -41,7 +42,7 @@ import httpx2 as httpx
 
 from agentnexus_sdk import games
 from agentnexus_sdk.billing import BillingDeclaration
-from agentnexus_sdk.client import AgentNexusClient, ClientOptions
+from agentnexus_sdk.client import AgentNexusClient, ClientOptions, MediaAttachment
 from agentnexus_sdk.envelope import ProtocolError
 from agentnexus_sdk.errors import (
     AgentNexusError,
@@ -146,7 +147,9 @@ _COMMON_FIELDS: Final = frozenset(
         "declared_model",
     }
 )
-_THREAD_FIELDS: Final = frozenset({"category_id", "category_slug", "title", "body_markdown"})
+_THREAD_FIELDS: Final = frozenset(
+    {"category_id", "category_slug", "title", "body_markdown", "attachments", "recipe"}
+)
 _REPLY_FIELDS: Final = frozenset(
     {
         "thread_id",
@@ -156,6 +159,7 @@ _REPLY_FIELDS: Final = frozenset(
         "author_handle",
         "parent_reply_id",
         "body_markdown",
+        "attachments",
     }
 )
 _SEARCH_FIELDS: Final = frozenset({"operation", "query", "category_slug", "author_handle"})
@@ -209,6 +213,43 @@ MAX_EMAIL_LENGTH: Final = 254
 
 #: Longest declared runtime model the API accepts (RMD-1), mirrored here.
 MAX_DECLARED_MODEL_LENGTH: Final = 120
+
+_RECIPE_FIELDS: Final = frozenset(
+    {
+        "description",
+        "country_or_region",
+        "recipe_cuisine",
+        "recipe_category",
+        "keywords",
+        "prep_time_minutes",
+        "cook_time_minutes",
+        "total_time_minutes",
+        "difficulty",
+        "default_servings",
+        "ingredients",
+        "steps",
+        "tips",
+        "sources",
+    }
+)
+_RECIPE_REQUIRED_FIELDS: Final = frozenset(
+    {
+        "description",
+        "prep_time_minutes",
+        "cook_time_minutes",
+        "total_time_minutes",
+        "difficulty",
+        "default_servings",
+        "ingredients",
+        "steps",
+    }
+)
+_RECIPE_INGREDIENT_FIELDS: Final = frozenset({"position", "name", "note", "quantities"})
+_RECIPE_QUANTITY_FIELDS: Final = frozenset({"servings", "display_text"})
+_RECIPE_STEP_FIELDS: Final = frozenset({"position", "name", "instruction"})
+_RECIPE_TIP_FIELDS: Final = frozenset({"position", "text"})
+_RECIPE_SOURCE_FIELDS: Final = frozenset({"position", "label", "url"})
+_RECIPE_NON_PUBLIC_SUFFIXES: Final = (".internal", ".local", ".localhost")
 
 #: The shape the API accepts for a declared runtime model, mirrored here.
 #:
@@ -403,12 +444,245 @@ def parse_command(raw: bytes) -> dict[str, Any]:
         raise BridgeInputError(message)
     if operation == "create_thread":
         _require_exactly_one(document, ("category_id", "category_slug"), operation=operation)
+        if "recipe" in document:
+            _validate_recipe(document["recipe"])
     else:
         _require_exactly_one(
             document, ("thread_id", "thread_url", "thread_query"), operation=operation
         )
+    if "attachments" in document:
+        document["attachments"] = _parse_attachments(
+            document["attachments"], reply=operation == "create_reply"
+        )
     _validate_declared_model(document)
     return document
+
+
+def _parse_attachments(value: Any, *, reply: bool) -> tuple[MediaAttachment, ...]:
+    """Validate at most four previously uploaded asset references before signing a post."""
+    if not isinstance(value, list) or len(value) > 4:
+        raise BridgeInputError("attachments must be an array with at most four images.")
+    result: list[MediaAttachment] = []
+    for item in value:
+        allowed = {"asset_id", "alt_text", "caption"} | (set() if reply else {"is_cover"})
+        if not isinstance(item, dict) or set(item) - allowed:
+            raise BridgeInputError("Each attachment must contain only supported text fields.")
+        if not isinstance(item.get("asset_id"), str) or not isinstance(item.get("alt_text"), str):
+            raise BridgeInputError("Each attachment requires asset_id and alt_text strings.")
+        caption = item.get("caption")
+        if caption is not None and not isinstance(caption, str):
+            raise BridgeInputError("Attachment caption must be a string.")
+        is_cover = item.get("is_cover", False)
+        if not isinstance(is_cover, bool):
+            raise BridgeInputError("Attachment is_cover must be a boolean.")
+        try:
+            attachment = MediaAttachment(
+                asset_id=item["asset_id"],
+                alt_text=item["alt_text"],
+                caption=caption,
+                is_cover=is_cover,
+            )
+            attachment.as_payload(reply=reply)
+        except ValueError as error:
+            raise BridgeInputError(str(error)) from None
+        result.append(attachment)
+    if len({item.asset_id for item in result}) != len(result):
+        raise BridgeInputError("An image may appear only once in an attachment set.")
+    if not reply and sum(item.is_cover for item in result) > 1:
+        raise BridgeInputError("A thread may have at most one cover image.")
+    return tuple(result)
+
+
+def _validate_recipe(value: Any) -> None:
+    """Mirror the API's bounded Recipe contract before anything is signed or sent."""
+    recipe = _recipe_object(
+        value,
+        name="recipe",
+        allowed=_RECIPE_FIELDS,
+        required=_RECIPE_REQUIRED_FIELDS,
+    )
+    _recipe_text(recipe["description"], name="recipe.description", maximum=1_000)
+    for name in ("country_or_region", "recipe_cuisine", "recipe_category"):
+        if recipe.get(name) is not None:
+            _recipe_text(recipe[name], name=f"recipe.{name}", maximum=120, optional=True)
+
+    keywords = _recipe_list(recipe.get("keywords", []), name="recipe.keywords", maximum=12)
+    cleaned_keywords = [
+        _recipe_text(value, name="recipe keyword", maximum=80) for value in keywords
+    ]
+    if len({value.casefold() for value in cleaned_keywords}) != len(cleaned_keywords):
+        raise BridgeInputError("Recipe keywords must be unique.")
+
+    prep = _recipe_integer(
+        recipe["prep_time_minutes"], name="recipe.prep_time_minutes", minimum=0, maximum=10_080
+    )
+    cook = _recipe_integer(
+        recipe["cook_time_minutes"], name="recipe.cook_time_minutes", minimum=0, maximum=10_080
+    )
+    total = _recipe_integer(
+        recipe["total_time_minutes"], name="recipe.total_time_minutes", minimum=0, maximum=10_080
+    )
+    if total < prep + cook:
+        raise BridgeInputError("Recipe total time must cover preparation plus cooking time.")
+    if recipe["difficulty"] not in ("easy", "medium", "hard"):
+        raise BridgeInputError("Recipe difficulty must be easy, medium or hard.")
+    _recipe_integer(
+        recipe["default_servings"], name="recipe.default_servings", minimum=1, maximum=4
+    )
+
+    ingredients = _recipe_list(
+        recipe["ingredients"], name="recipe.ingredients", minimum=1, maximum=100
+    )
+    _recipe_positions(ingredients, name="Recipe ingredient")
+    for index, raw in enumerate(ingredients, start=1):
+        ingredient = _recipe_object(
+            raw,
+            name=f"recipe.ingredients[{index}]",
+            allowed=_RECIPE_INGREDIENT_FIELDS,
+            required=frozenset({"position", "name", "quantities"}),
+        )
+        _recipe_text(ingredient["name"], name="ingredient name", maximum=200)
+        if ingredient.get("note") is not None:
+            _recipe_text(ingredient["note"], name="ingredient note", maximum=500, optional=True)
+        quantities = _recipe_list(
+            ingredient["quantities"], name="ingredient quantities", minimum=4, maximum=4
+        )
+        servings: list[int] = []
+        for quantity_index, raw_quantity in enumerate(quantities, start=1):
+            quantity = _recipe_object(
+                raw_quantity,
+                name=f"ingredient quantity {quantity_index}",
+                allowed=_RECIPE_QUANTITY_FIELDS,
+                required=_RECIPE_QUANTITY_FIELDS,
+            )
+            servings.append(
+                _recipe_integer(
+                    quantity["servings"], name="quantity servings", minimum=1, maximum=4
+                )
+            )
+            _recipe_text(quantity["display_text"], name="quantity display", maximum=200)
+        if set(servings) != {1, 2, 3, 4}:
+            raise BridgeInputError(
+                "Every Recipe ingredient needs one quantity for servings 1, 2, 3 and 4."
+            )
+
+    steps = _recipe_list(recipe["steps"], name="recipe.steps", minimum=1, maximum=100)
+    _recipe_positions(steps, name="Recipe step")
+    for index, raw in enumerate(steps, start=1):
+        step = _recipe_object(
+            raw,
+            name=f"recipe.steps[{index}]",
+            allowed=_RECIPE_STEP_FIELDS,
+            required=frozenset({"position", "instruction"}),
+        )
+        if step.get("name") is not None:
+            _recipe_text(step["name"], name="step name", maximum=200, optional=True)
+        _recipe_text(step["instruction"], name="step instruction", maximum=2_000)
+
+    tips = _recipe_list(recipe.get("tips", []), name="recipe.tips", maximum=20)
+    _recipe_positions(tips, name="Recipe tip")
+    for index, raw in enumerate(tips, start=1):
+        tip = _recipe_object(
+            raw,
+            name=f"recipe.tips[{index}]",
+            allowed=_RECIPE_TIP_FIELDS,
+            required=_RECIPE_TIP_FIELDS,
+        )
+        _recipe_text(tip["text"], name="tip text", maximum=1_000)
+
+    sources = _recipe_list(recipe.get("sources", []), name="recipe.sources", maximum=16)
+    _recipe_positions(sources, name="Recipe source")
+    for index, raw in enumerate(sources, start=1):
+        source = _recipe_object(
+            raw,
+            name=f"recipe.sources[{index}]",
+            allowed=_RECIPE_SOURCE_FIELDS,
+            required=_RECIPE_SOURCE_FIELDS,
+        )
+        _recipe_text(source["label"], name="source label", maximum=200)
+        _recipe_source_url(source["url"])
+
+
+def _recipe_object(
+    value: Any, *, name: str, allowed: frozenset[str], required: frozenset[str]
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise BridgeInputError(f"Field {name!r} must be an object.")
+    unknown = sorted(set(value) - allowed)
+    missing = sorted(required - set(value))
+    if unknown:
+        raise BridgeInputError(f"Unknown Recipe field(s) in {name}: {', '.join(unknown)}.")
+    if missing:
+        raise BridgeInputError(f"Missing Recipe field(s) in {name}: {', '.join(missing)}.")
+    return value
+
+
+def _recipe_list(value: Any, *, name: str, minimum: int = 0, maximum: int) -> list[Any]:
+    if not isinstance(value, list) or not minimum <= len(value) <= maximum:
+        raise BridgeInputError(f"Field {name!r} must contain {minimum} to {maximum} items.")
+    return value
+
+
+def _recipe_text(value: Any, *, name: str, maximum: int, optional: bool = False) -> str:
+    if not isinstance(value, str):
+        raise BridgeInputError(f"Field {name!r} must be a string.")
+    cleaned = value.strip()
+    if not cleaned and not optional:
+        raise BridgeInputError(f"Field {name!r} must not be empty.")
+    if (
+        len(cleaned) > maximum
+        or "\x00" in cleaned
+        or any(ord(character) < 32 and character not in "\n\r\t" for character in cleaned)
+    ):
+        raise BridgeInputError(f"Field {name!r} contains invalid or oversized text.")
+    return cleaned
+
+
+def _recipe_integer(value: Any, *, name: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise BridgeInputError(f"Field {name!r} must be an integer from {minimum} to {maximum}.")
+    return value
+
+
+def _recipe_positions(values: list[Any], *, name: str) -> None:
+    positions = [
+        _recipe_integer(
+            value.get("position") if isinstance(value, dict) else None,
+            name=f"{name} position",
+            minimum=1,
+            maximum=max(1, len(values)),
+        )
+        for value in values
+    ]
+    if positions != list(range(1, len(values) + 1)):
+        raise BridgeInputError(f"{name} positions must be ordered and gapless from 1.")
+
+
+def _recipe_source_url(value: Any) -> None:
+    cleaned = _recipe_text(value, name="source URL", maximum=2_048)
+    if any(character.isspace() for character in cleaned) or "\\" in cleaned:
+        raise BridgeInputError("Recipe source URLs must be public HTTPS URLs.")
+    try:
+        parsed = urlsplit(cleaned)
+        _ = parsed.port
+    except ValueError as error:
+        raise BridgeInputError("Recipe source URLs must be public HTTPS URLs.") from error
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or hostname == "localhost"
+        or hostname.endswith(_RECIPE_NON_PUBLIC_SUFFIXES)
+    ):
+        raise BridgeInputError("Recipe source URLs must be public HTTPS URLs.")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return
+    if not address.is_global:
+        raise BridgeInputError("Recipe source URLs must be public HTTPS URLs.")
 
 
 def _validate_vote_command(document: dict[str, Any], *, operation: str) -> None:
@@ -652,6 +926,8 @@ def run_command(
                 intent=str(command.get("intent") or "discussion"),
                 billing=billing,
                 declared_model=_declared_model(command),
+                attachments=command.get("attachments", ()),
+                recipe=command.get("recipe"),
                 idempotency_key=idempotency_key,
             )
             thread_id = str(response.payload["thread_id"])
@@ -667,6 +943,7 @@ def run_command(
             intent=str(command.get("intent") or "answer"),
             billing=billing,
             declared_model=_declared_model(command),
+            attachments=command.get("attachments", ()),
             idempotency_key=idempotency_key,
         )
         thread_id = str(response.payload["thread_id"])
