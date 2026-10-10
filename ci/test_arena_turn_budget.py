@@ -15,7 +15,7 @@ constants cannot also change what these tests demand.
 
 Two layers live in this file, each against the same behaviour:
 
-* the match process (`hermes_arena.main`) with a fake clock, a scripted provider and fake workers;
+* the match process (`arena_match.main`) with a fake clock, a scripted provider and fake workers;
 * the supervisor (`ArenaRunner._serve`) with scripted streams, a fake clock and a real timer.
 
 `test_arena_decision_worker.py` runs the real worker as a real process.
@@ -50,7 +50,7 @@ from arena_fakes import (
     supervisor,
 )
 
-from agentnexus_sdk import arena_runner, games, hermes_arena
+from agentnexus_sdk import arena_match, arena_runner, games
 
 PROVIDER_TURN = 60.0
 RESERVE = 15.0
@@ -69,24 +69,24 @@ def test_the_local_bound_leaves_the_documented_reserve_under_each_provider_deadl
     game: str,
 ) -> None:
     """The decision bound is a named, versioned value; the provider's 60 seconds are not touched."""
-    assert hermes_arena.TURN_BUDGET_VERSION == 1
-    assert hermes_arena.PROVIDER_TURN_SECONDS[game] == PROVIDER_TURN
-    assert hermes_arena.DECISION_SECONDS[game] <= LIMIT
-    assert PROVIDER_TURN - hermes_arena.DECISION_SECONDS[game] >= RESERVE
-    assert set(hermes_arena.DECISION_SECONDS) == set(hermes_arena.DECISIONS)
+    assert arena_match.TURN_BUDGET_VERSION == 1
+    assert arena_match.PROVIDER_TURN_SECONDS[game] == PROVIDER_TURN
+    assert arena_match.DECISION_SECONDS[game] <= LIMIT
+    assert PROVIDER_TURN - arena_match.DECISION_SECONDS[game] >= RESERVE
+    assert set(arena_match.DECISION_SECONDS) == set(arena_match.DECISIONS)
 
 
 def test_the_reserve_covers_a_stale_observation_and_one_bounded_provider_phase() -> None:
     """15 seconds hold one poll interval, one provider phase's timeout and a second of slack."""
-    assert hermes_arena.STATE_POLL_SECONDS == POLL
-    assert hermes_arena.TURN_RESERVE_SECONDS >= RESERVE
-    assert hermes_arena.TURN_RESERVE_SECONDS >= POLL + games.PROVIDER_TIMEOUT_SECONDS + 1
+    assert arena_match.STATE_POLL_SECONDS == POLL
+    assert arena_match.TURN_RESERVE_SECONDS >= RESERVE
+    assert arena_match.TURN_RESERVE_SECONDS >= POLL + games.PROVIDER_TIMEOUT_SECONDS + 1
 
 
 def test_the_cleanup_bound_is_short_beside_the_reserve() -> None:
     """A cleanup that never ends costs the next turn at most this: a few seconds."""
-    assert 0 < hermes_arena.CLEANUP_SECONDS <= 5
-    assert hermes_arena.CLEANUP_SECONDS < hermes_arena.TURN_RESERVE_SECONDS - POLL
+    assert 0 < arena_match.CLEANUP_SECONDS <= 5
+    assert arena_match.CLEANUP_SECONDS < arena_match.TURN_RESERVE_SECONDS - POLL
 
 
 def test_the_state_reads_the_match_makes_are_spaced_by_the_documented_interval(
@@ -125,10 +125,10 @@ def test_the_sdk_bounds_each_phase_of_a_provider_message() -> None:
 def test_the_decision_prompt_names_its_own_game_and_carries_the_state_once() -> None:
     """A decision is told its game's fixed instruction; the state is data inside the message."""
     state = {"observation": {"you_are": "white", "to_move": "white"}}
-    chess = hermes_arena.decision_prompt("chess", "white", "first", state)
-    four = hermes_arena.decision_prompt("connect-four", "second", "second", state)
-    assert hermes_arena.system_prompt("chess") == hermes_arena.CHESS_PROMPT
-    assert hermes_arena.system_prompt("connect-four") == hermes_arena.PROMPT
+    chess = arena_match.decision_prompt("chess", "white", "first", state)
+    four = arena_match.decision_prompt("connect-four", "second", "second", state)
+    assert arena_match.system_prompt("chess") == arena_match.CHESS_PROMPT
+    assert arena_match.system_prompt("connect-four") == arena_match.PROMPT
     assert "chess match" in chess and "Connect Four" not in chess
     assert "Connect Four" in four and "chess match" not in four
     for prompt in (chess, four):
@@ -359,7 +359,7 @@ def test_diagnostics_stay_closed_and_carry_no_private_data(
     assert played.diagnostics
     for message in played.diagnostics:
         assert set(message) == {"diagnostic", "duration_ms"}
-        assert message["diagnostic"] in hermes_arena.DIAGNOSTICS
+        assert message["diagnostic"] in arena_match.DIAGNOSTICS
         assert type(message["duration_ms"]) is int
         assert 0 <= message["duration_ms"] <= 3600000
     assert "synthetic-private" not in played.parent.raw
@@ -370,13 +370,13 @@ def test_diagnostics_stay_closed_and_carry_no_private_data(
         "decision_cleanup_expired",
         "decision_cleanup_failed",
     }
-    assert new <= hermes_arena.DIAGNOSTICS
+    assert new <= arena_match.DIAGNOSTICS
 
 
 def test_a_decision_stays_inside_the_diagnostic_bound() -> None:
     """Four per decision (started, cleanup, returned, a verdict) and one as the run ends."""
-    assert hermes_arena.diagnostic_bound(hermes_arena.DECISIONS["chess"]) == 4 * 243 + 1
-    assert hermes_arena.diagnostic_bound(hermes_arena.DECISIONS["connect-four"]) == 4 * 64 + 1
+    assert arena_match.diagnostic_bound(arena_match.DECISIONS["chess"]) == 4 * 243 + 1
+    assert arena_match.diagnostic_bound(arena_match.DECISIONS["connect-four"]) == 4 * 64 + 1
 
 
 # ---------------------------------------------------------------------------------------------
@@ -469,7 +469,7 @@ def test_a_hanging_cleanup_is_cut_off_at_its_bound_and_the_worker_replaced(
     assert first.dead and second.dead and third.dead
     assert (first.served, second.served, third.served) == (1, 1, 0)
     # Each hang cost the match its cleanup bound and not a second more.
-    assert played.clock.now - 1000.0 <= 2 * (1 + hermes_arena.CLEANUP_SECONDS) + 1
+    assert played.clock.now - 1000.0 <= 2 * (1 + arena_match.CLEANUP_SECONDS) + 1
 
 
 @pytest.mark.parametrize("role", ["white", "first"])
@@ -496,9 +496,9 @@ def test_a_cleanup_that_raises_is_reported_and_the_move_is_never_repeated(
 @pytest.mark.parametrize(
     ("after", "expired"),
     [
-        (hermes_arena.CLEANUP_SECONDS - 0.001, False),
-        (float(hermes_arena.CLEANUP_SECONDS), True),
-        (hermes_arena.CLEANUP_SECONDS + 0.001, True),
+        (arena_match.CLEANUP_SECONDS - 0.001, False),
+        (float(arena_match.CLEANUP_SECONDS), True),
+        (arena_match.CLEANUP_SECONDS + 0.001, True),
         (60.0, True),
     ],
 )
@@ -546,11 +546,9 @@ def test_a_worker_that_is_not_ready_ends_the_run_before_the_seat_is_joined(
 
 def test_the_settle_and_ready_bounds_are_named_and_sized() -> None:
     """After an accepted move the match gets time to settle; a worker gets time to start."""
-    settle = hermes_arena.SETTLE_SECONDS
-    assert settle >= hermes_arena.CLEANUP_SECONDS + 15, "cleanup, a kill, a reap and a respawn"
-    assert hermes_arena.READY_SECONDS >= 120, (
-        "Hermes may need a long time to start on a slow device"
-    )
+    settle = arena_match.SETTLE_SECONDS
+    assert settle >= arena_match.CLEANUP_SECONDS + 15, "cleanup, a kill, a reap and a respawn"
+    assert arena_match.READY_SECONDS >= 120, "Hermes may need a long time to start on a slow device"
 
 
 @pytest.mark.parametrize("role", ["white", "first"])
@@ -601,9 +599,9 @@ def test_a_move_accepted_after_the_cutoff_by_a_slow_round_trip_still_ends_the_de
         (0.999, False),
         (1.0, False),
         (1.5, False),
-        (hermes_arena.CLEANUP_SECONDS - 0.001, False),
-        (float(hermes_arena.CLEANUP_SECONDS), True),
-        (hermes_arena.CLEANUP_SECONDS + 0.001, True),
+        (arena_match.CLEANUP_SECONDS - 0.001, False),
+        (float(arena_match.CLEANUP_SECONDS), True),
+        (arena_match.CLEANUP_SECONDS + 0.001, True),
         (60.0, True),
     ],
 )
@@ -976,7 +974,7 @@ def test_the_acceptance_instant_comes_from_the_match_process_clock_alone(
     monkeypatch: pytest.MonkeyPatch, role: str
 ) -> None:
     """No provider field, no model time and no run time can move the carry's starting instant."""
-    payload_clock_oracle(hermes_arena, monkeypatch, role)
+    payload_clock_oracle(arena_match, monkeypatch, role)
 
 
 @pytest.mark.parametrize("role", ["white", "first"])
@@ -1236,7 +1234,7 @@ def test_the_parent_ends_a_blocked_child_at_the_cutoff_exactly_once(
 ) -> None:
     """A child that says it began and then goes silent is killed at the cutoff, once."""
     monkeypatch.setattr(
-        hermes_arena, "DECISION_SECONDS", {"chess": 0.6, "connect-four": 0.6}, raising=False
+        arena_match, "DECISION_SECONDS", {"chess": 0.6, "connect-four": 0.6}, raising=False
     )
     runner, owned = supervisor()
     monkeypatch.setattr(
@@ -1291,7 +1289,7 @@ class LeakyChild(FakeChild):
 def served_after_cut_off(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Cut a blocked child off with a state read left in its pipe; return what was forwarded."""
     monkeypatch.setattr(
-        hermes_arena, "DECISION_SECONDS", {"chess": 0.4, "connect-four": 0.4}, raising=False
+        arena_match, "DECISION_SECONDS", {"chess": 0.4, "connect-four": 0.4}, raising=False
     )
     runner, owned = supervisor(module)
     calls: list[str] = []
@@ -1403,9 +1401,9 @@ def serve_live(
     and the seconds from the last line to the end of the serve.
     """
     monkeypatch.setattr(
-        hermes_arena, "DECISION_SECONDS", {"chess": cutoff, "connect-four": cutoff}, raising=False
+        arena_match, "DECISION_SECONDS", {"chess": cutoff, "connect-four": cutoff}, raising=False
     )
-    monkeypatch.setattr(hermes_arena, "SETTLE_SECONDS", settle, raising=False)
+    monkeypatch.setattr(arena_match, "SETTLE_SECONDS", settle, raising=False)
     runner, owned = supervisor(module)
     forwarded: list[str] = []
 
@@ -1795,8 +1793,8 @@ def ordering_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None
             immediate_reply_oracle,
         ),
         (
-            "worker = spawn_worker(source)  # replaced",
-            "worker = spawn_worker(source); accepted_at = time.monotonic()  # replaced",
+            "worker = spawn_worker(command)  # replaced",
+            "worker = spawn_worker(command); accepted_at = time.monotonic()  # replaced",
             immediate_reply_oracle,
         ),
         (
@@ -1822,7 +1820,7 @@ def ordering_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None
         ),
         ('if outcome != "moved":', "if True:", moved_bound_oracle),
         ('if outcome != "moved":', "if False:", turn_bound_oracle),
-        ("worker = spawn_worker(source)  # replaced", "return 3  # replaced", replaced_oracle),
+        ("worker = spawn_worker(command)  # replaced", "return 3  # replaced", replaced_oracle),
         (
             "ending = cleanup(worker,",
             'diagnostic(output, "model_call_returned", started)\n'
@@ -1866,11 +1864,11 @@ def test_match_process_guards_detect_a_weakened_source(
     oracle: Callable[..., None],
 ) -> None:
     """Each condition of the match process is load-bearing: weakened, its own oracle fails."""
-    mutant = load_mutant(tmp_path, hermes_arena, original, replacement)
+    mutant = load_mutant(tmp_path, arena_match, original, replacement)
     if oracle is reserve_oracle:
-        expect_guard(oracle, hermes_arena, mutant)
+        expect_guard(oracle, arena_match, mutant)
         return
-    expect_guard(lambda module: oracle(module, monkeypatch), hermes_arena, mutant)
+    expect_guard(lambda module: oracle(module, monkeypatch), arena_match, mutant)
 
 
 def parent_gate_oracle(
@@ -1993,7 +1991,7 @@ def log_oracle(
         ),
         ("if generation is not None and self._in_flight:", "if False:", in_flight_oracle),
         (
-            "hermes_arena.SETTLE_SECONDS, self.expire, kwargs",
+            "arena_match.SETTLE_SECONDS, self.expire, kwargs",
             "3600, self.expire, kwargs",
             settle_oracle,
         ),

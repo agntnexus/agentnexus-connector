@@ -17,6 +17,7 @@ import contextlib
 import hashlib
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -31,6 +32,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
+from arena_fake_driver import FakeArenaDriver
 from arena_fakes import (
     FLAGS,
     MOVES,
@@ -41,8 +43,16 @@ from arena_fakes import (
     supervisor,
 )
 
-from agentnexus_sdk import arena_runner, hermes_arena
+from agentnexus_sdk import (
+    arena_driver,
+    arena_driver_hermes,
+    arena_match,
+    arena_runner,
+    hermes_arena,
+)
 
+#: The runtimes every process test runs through: the Hermes stand-in and a second, fake runtime.
+RUNTIMES = ["hermes", "fake"]
 GAMES = {
     "white": "chess-1-solo",
     "black": "chess-1-solo",
@@ -59,13 +69,13 @@ LAUNCHER = """\
 import importlib.util
 import sys
 
-arena, source, bound, cleanup = sys.argv[1:5]
-spec = importlib.util.spec_from_file_location("hermes_arena", arena)
+arena, bound, cleanup, *worker = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("arena_match", arena)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 module.DECISION_SECONDS = {"chess": float(bound), "connect-four": float(bound)}
 module.CLEANUP_SECONDS = float(cleanup)
-sys.argv = [arena, source]
+sys.argv = [arena, *worker]
 try:
     raise SystemExit(module.main())
 except Exception:
@@ -266,6 +276,23 @@ def hermes_stand_in(root: Path, behavior: dict[str, Any]) -> tuple[Path, Path]:
     return source, home
 
 
+def fake_runtime(root: Path, behavior: dict[str, Any]) -> tuple[Path, Path]:
+    """Write the fake runtime's behaviour file and its disposable profile; return both paths."""
+    home = root / "home"
+    home.mkdir()
+    for name, text in {
+        ".env": "SYNTHETIC_KEY=synthetic-disposable-key\n",
+        "SOUL.md": "canary soul, never rewritten\n",
+        "memories/MEMORY.md": "canary memory\n",
+    }.items():
+        canary = home / name
+        canary.parent.mkdir(parents=True, exist_ok=True)
+        canary.write_text(text, encoding="utf-8")
+    behavior_file = root / "behavior.json"
+    behavior_file.write_text(json.dumps(behavior), encoding="utf-8")
+    return home, behavior_file
+
+
 def snapshot(root: Path) -> dict[str, tuple[str, int, str, int]]:
     """Return path, type, size, SHA-256 and mtime of everything below root, recursively."""
     result: dict[str, tuple[str, int, str, int]] = {}
@@ -302,6 +329,43 @@ def hermes_homes(record: Path) -> list[str]:
     if not record.exists():
         return []
     return [line for line in record.read_text(encoding="utf-8").splitlines() if line]
+
+
+class StandInDriver:
+    """A real driver, with its match process wrapped so that a test can shorten the bounds.
+
+    The command the real driver builds is kept as it is, and three things are substituted: the
+    wrapper that sets the bounds, optionally a mutated copy of the match program and optionally a
+    mutated copy of the Hermes worker.
+    """
+
+    def __init__(
+        self,
+        real: Any,
+        launcher: Path,
+        bound: float,
+        cleanup: float,
+        match_file: Path | None,
+        worker_file: Path | None,
+    ) -> None:
+        """Wrap this driver (the real Hermes one, a mutant of it, or the fake runtime's)."""
+        self.real = real
+        self.name, self.display_name = self.real.name, self.real.display_name
+        self.capabilities = self.real.capabilities
+        self.launcher, self.bound, self.cleanup = launcher, bound, cleanup
+        self.match_file, self.worker_file = match_file, worker_file
+
+    def launch(self, handle: Any, scratch: Path) -> Any:
+        """Return the real launch with the test's wrapper and files put in."""
+        launch = self.real.launch(handle, scratch)
+        # [interpreter, -I, match, --, interpreter, -I, worker, source, --decision]
+        command = list(launch.command)
+        assert command[3] == "--"
+        match = self.match_file or Path(command[2])
+        command[2:3] = [str(self.launcher), str(match), str(self.bound), str(self.cleanup)]
+        if self.worker_file is not None:
+            command[command.index("--") + 3] = str(self.worker_file)
+        return arena_driver.Launch(command, launch.environment)
 
 
 class Tethers:
@@ -386,6 +450,9 @@ def run_process(
     turns: int = 1,
     module: ModuleType = arena_runner,
     arena: Path | None = None,
+    worker: Path | None = None,
+    driver_module: ModuleType = arena_driver_hermes,
+    runtime: str = "hermes",
     wait: float = 30.0,
 ) -> Process:
     """Start the real adapter as a real child of a real supervisor and let it play one turn."""
@@ -395,10 +462,13 @@ def run_process(
     scratch_parent.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(scratch_parent))
     homes_record = tmp_path / "hermes-homes.stand-in-record"
-    source, home = hermes_stand_in(
-        tmp_path, {**behavior, "tether": tethers.port, "record": str(homes_record)}
-    )
-    arena_file = arena or Path(hermes_arena.__file__)
+    full = {**behavior, "tether": tethers.port, "record": str(homes_record)}
+    if runtime == "hermes":
+        source, home = hermes_stand_in(tmp_path, full)
+        env_record = source / "dotenv-reads.stand-in-record"
+    else:
+        env_record = tmp_path / "fake-env-reads.stand-in-record"
+        home, behavior_file = fake_runtime(tmp_path, {**full, "env_reads": str(env_record)})
     launcher = tmp_path / "launcher.py"
     launcher.write_text(LAUNCHER, encoding="utf-8")
     root = tmp_path / "run"
@@ -406,25 +476,20 @@ def run_process(
     before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
     profile_before = snapshot(home)
     monkeypatch.setattr(
-        hermes_arena, "DECISION_SECONDS", {"chess": bound, "connect-four": bound}, raising=False
+        arena_match, "DECISION_SECONDS", {"chess": bound, "connect-four": bound}, raising=False
     )
-    monkeypatch.setattr(hermes_arena, "CLEANUP_SECONDS", cleanup, raising=False)
+    monkeypatch.setattr(arena_match, "CLEANUP_SECONDS", cleanup, raising=False)
     runner, owned = supervisor(module)
     runner_id = str(uuid.uuid4())
     runner.journal = SimpleNamespace(runner_id=runner_id, reserve=lambda identifier: True)
     runner.paths = SimpleNamespace(root=root)
-    runner.runtime = SimpleNamespace(
-        home=home,
-        command=lambda: [
-            sys.executable,
-            "-I",
-            str(launcher),
-            str(arena_file),
-            str(source),
-            str(bound),
-            str(cleanup),
-        ],
-    )
+    if runtime == "hermes":
+        real: Any = driver_module.HermesArenaDriver()
+        runner.handle = driver_module.HermesRun(source, Path(sys.executable), home)
+    else:
+        real = FakeArenaDriver(behavior_file, home)
+        runner.handle = real.inspect(None)
+    runner.driver = StandInDriver(real, launcher, bound, cleanup, arena, worker)
     document = {**intent(owned.agent_id), "status": "starting", "claimed_by": runner_id}
     document.update(intent_id=owned.intent_id, match_id=owned.match_id)
     runner._post = lambda suffix, payload: document  # type: ignore[method-assign]
@@ -490,7 +555,7 @@ def run_process(
         profile_before,
         snapshot(home),
         hermes_homes(homes_record),
-        hermes_homes(source / "dotenv-reads.stand-in-record"),
+        hermes_homes(env_record),
     )
 
 
@@ -526,14 +591,16 @@ def assert_no_residue(run: Process) -> None:
 
 
 @pytest.mark.parametrize("role", ["white", "first"])
+@pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_blocked_model_transport_is_ended_at_the_cutoff(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     role: str,
+    runtime: str,
 ) -> None:
     """A model that never answers is killed at the cutoff: no move, one diagnostic, no residue."""
-    run = run_process(monkeypatch, capsys, tmp_path, role, {"mode": "block"})
+    run = run_process(monkeypatch, capsys, tmp_path, role, {"mode": "block"}, runtime=runtime)
     assert run.forwarded == []
     assert run.events.count("decision_budget_expired") == 1
     assert "game_move_started" not in run.events
@@ -549,15 +616,17 @@ def test_a_blocked_model_transport_is_ended_at_the_cutoff(
 
 
 @pytest.mark.parametrize("role", ["white", "first"])
+@pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_slow_model_cannot_reach_game_move_after_the_cutoff(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     role: str,
+    runtime: str,
 ) -> None:
     """A model that finally answers with a valid move after the cutoff gets nothing forwarded."""
     behavior = {"mode": "slow", "seconds": 4.0, "arguments": MOVES[role]}
-    run = run_process(monkeypatch, capsys, tmp_path, role, behavior)
+    run = run_process(monkeypatch, capsys, tmp_path, role, behavior, runtime=runtime)
     assert run.forwarded == []
     assert run.events.count("decision_budget_expired") == 1
     assert_no_residue(run)
@@ -565,15 +634,17 @@ def test_a_slow_model_cannot_reach_game_move_after_the_cutoff(
 
 
 @pytest.mark.parametrize("role", ["white", "first"])
+@pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_fast_model_still_plays_exactly_one_move(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     role: str,
+    runtime: str,
 ) -> None:
     """The ordinary decision through real processes: one move, a clean finish, no expiry."""
     behavior = {"mode": "fast", "arguments": MOVES[role]}
-    run = run_process(monkeypatch, capsys, tmp_path, role, behavior, bound=20.0)
+    run = run_process(monkeypatch, capsys, tmp_path, role, behavior, bound=20.0, runtime=runtime)
     assert [m["operation"] for m in run.forwarded] == ["game_move"]
     assert {
         k: v for k, v in run.forwarded[0].items() if k not in {"match_id", "seat", "operation"}
@@ -595,11 +666,13 @@ def moves_of(run: Process, role: str) -> list[dict[str, Any]]:
 
 
 @pytest.mark.parametrize("role", ["white", "first"])
+@pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_hanging_closing_request_cannot_hold_the_run_between_two_own_turns(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     role: str,
+    runtime: str,
 ) -> None:
     """An accepted move ends its decision: Hermes' closing request is never waited for.
 
@@ -608,7 +681,9 @@ def test_a_hanging_closing_request_cannot_hold_the_run_between_two_own_turns(
     be made, one for each turn, and the run must end as a finished game.
     """
     behavior = {"mode": "fast", "arguments": MOVES[role], "tail": "hang"}
-    run = run_process(monkeypatch, capsys, tmp_path, role, behavior, bound=10.0, turns=2)
+    run = run_process(
+        monkeypatch, capsys, tmp_path, role, behavior, bound=10.0, turns=2, runtime=runtime
+    )
     assert moves_of(run, role) == [MOVES[role], MOVES[role]], "one move for each of the two turns"
     assert run.events.count("model_call_started") == 2
     assert run.events.count("model_call_returned") == 2
@@ -620,15 +695,19 @@ def test_a_hanging_closing_request_cannot_hold_the_run_between_two_own_turns(
 
 
 @pytest.mark.parametrize("role", ["white", "first"])
+@pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_hanging_agent_close_after_an_accepted_move_costs_the_match_nothing(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     role: str,
+    runtime: str,
 ) -> None:
     """A cleanup that never ends is cut off, reported, and replaced; the match plays on."""
     behavior = {"mode": "fast", "arguments": MOVES[role], "close": "hang"}
-    run = run_process(monkeypatch, capsys, tmp_path, role, behavior, bound=10.0, turns=2)
+    run = run_process(
+        monkeypatch, capsys, tmp_path, role, behavior, bound=10.0, turns=2, runtime=runtime
+    )
     assert moves_of(run, role) == [MOVES[role], MOVES[role]]
     assert run.events.count("decision_cleanup_expired") == 2
     phases = {"model_call_started", "decision_cleanup_expired", "model_call_returned"}
@@ -646,15 +725,19 @@ def test_a_hanging_agent_close_after_an_accepted_move_costs_the_match_nothing(
 
 
 @pytest.mark.parametrize("role", ["white", "first"])
+@pytest.mark.parametrize("runtime", RUNTIMES)
 def test_an_agent_close_that_raises_is_reported_and_the_match_plays_on(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     role: str,
+    runtime: str,
 ) -> None:
     """A cleanup failure is one fixed diagnostic: no retry of the move, no text of the failure."""
     behavior = {"mode": "fast", "arguments": MOVES[role], "close": "raise"}
-    run = run_process(monkeypatch, capsys, tmp_path, role, behavior, bound=10.0, turns=2)
+    run = run_process(
+        monkeypatch, capsys, tmp_path, role, behavior, bound=10.0, turns=2, runtime=runtime
+    )
     assert moves_of(run, role) == [MOVES[role], MOVES[role]]
     assert run.events.count("decision_cleanup_failed") == 2
     assert run.runner.terminal and run.runner.playing
@@ -663,11 +746,13 @@ def test_an_agent_close_that_raises_is_reported_and_the_match_plays_on(
 
 
 @pytest.mark.parametrize("role", ["white", "first"])
+@pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_move_accepted_near_the_cutoff_is_not_lost_to_a_cleanup_that_runs_past_it(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     role: str,
+    runtime: str,
 ) -> None:
     """The cutoff is for the model; once the move is accepted a slow cleanup cannot end the run.
 
@@ -676,7 +761,15 @@ def test_a_move_accepted_near_the_cutoff_is_not_lost_to_a_cleanup_that_runs_past
     """
     behavior = {"mode": "slow", "seconds": 2.2, "arguments": MOVES[role], "close": "hang"}
     run = run_process(
-        monkeypatch, capsys, tmp_path, role, behavior, bound=2.5, cleanup=1.0, turns=1
+        monkeypatch,
+        capsys,
+        tmp_path,
+        role,
+        behavior,
+        bound=2.5,
+        cleanup=1.0,
+        turns=1,
+        runtime=runtime,
     )
     assert moves_of(run, role) == [MOVES[role]]
     assert "decision_budget_expired" not in run.events
@@ -686,15 +779,19 @@ def test_a_move_accepted_near_the_cutoff_is_not_lost_to_a_cleanup_that_runs_past
 
 
 @pytest.mark.parametrize("role", ["white", "first"])
+@pytest.mark.parametrize("runtime", RUNTIMES)
 def test_two_fast_turns_leave_the_profile_exactly_as_it_was(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     role: str,
+    runtime: str,
 ) -> None:
     """Two ordinary turns: the disposable profile has the same paths, types and hashes after."""
     behavior = {"mode": "fast", "arguments": MOVES[role]}
-    run = run_process(monkeypatch, capsys, tmp_path, role, behavior, bound=10.0, turns=2)
+    run = run_process(
+        monkeypatch, capsys, tmp_path, role, behavior, bound=10.0, turns=2, runtime=runtime
+    )
     assert moves_of(run, role) == [MOVES[role], MOVES[role]]
     assert run.events.count("model_call_returned") == 2
     assert_no_residue(run)
@@ -710,8 +807,8 @@ def preflight_oracle(module: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_pa
     record = work / "hermes-homes.stand-in-record"
     source, home = hermes_stand_in(work, {"mode": "fast", "record": str(record)})
     before = snapshot(home)
-    run = module.HermesRun(source, Path(sys.executable), home)
-    assert run.preflight()
+    handle = module.HermesRun(source, Path(sys.executable), home)
+    assert module.HermesArenaDriver().preflight(handle) == arena_match.TOOLS
     assert profile_changes(before, snapshot(home)) == []
     homes = hermes_homes(record)
     assert homes, "the stand-in never filled a Hermes home, so nothing was proven"
@@ -723,7 +820,7 @@ def test_the_preflight_leaves_the_profile_exactly_as_it_was(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Enabling a profile imports Hermes too: that must not fill the profile either."""
-    preflight_oracle(arena_runner, monkeypatch, tmp_path)
+    preflight_oracle(arena_driver_hermes, monkeypatch, tmp_path)
 
 
 def homes_refusal_oracle(
@@ -759,6 +856,27 @@ def test_the_adapter_refuses_to_run_hermes_in_the_profile_it_reads(
     homes_refusal_oracle(hermes_arena, monkeypatch, tmp_path)
 
 
+def test_the_runtime_process_never_sees_the_signing_key(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The key's path and identity stay in the parent: the worker's own environment holds neither.
+
+    The fake runtime records the environment it actually started with, so this is read off the
+    real process and not off what the supervisor meant to pass.
+    """
+    monkeypatch.setenv("AGENTNEXUS_PRIVATE_KEY_FILE", str(tmp_path / "keys" / "agent.pem"))
+    monkeypatch.setenv("AGENTNEXUS_AGENT_ID", str(uuid.uuid4()))
+    monkeypatch.setenv("AGENTNEXUS_KEY_ID", "synthetic-key-id")
+    record = tmp_path / "worker-environment.stand-in-record"
+    behavior = {"mode": "fast", "arguments": MOVES["white"], "environment": str(record)}
+    run = run_process(monkeypatch, capsys, tmp_path, "white", behavior, bound=10.0, runtime="fake")
+    assert_no_residue(run)
+    assert run.forwarded, "the fake runtime never played, so nothing was proven"
+    seen = json.loads(record.read_text(encoding="utf-8").splitlines()[0])
+    assert [name for name in seen if name.upper().startswith("AGENTNEXUS_")] == []
+    assert "agent.pem" not in json.dumps(seen) and "synthetic-key-id" not in json.dumps(seen)
+
+
 HELPER = """\
 import os
 import subprocess
@@ -784,8 +902,8 @@ def test_ending_a_worker_does_not_wait_for_a_helper_that_holds_its_pipe(
     def popen(command: list[str], **kwargs: Any) -> Any:
         return real([sys.executable, str(script), str(pid_file)], **kwargs)
 
-    monkeypatch.setattr(hermes_arena.subprocess, "Popen", popen)
-    worker = hermes_arena.Worker("source")
+    monkeypatch.setattr(arena_match.subprocess, "Popen", popen)
+    worker = arena_match.Worker(["unused"])
     try:
         deadline = time.monotonic() + 20
         while not pid_file.exists() and time.monotonic() < deadline:
@@ -877,27 +995,60 @@ def test_a_diagnostic_reaches_a_pipe_while_the_service_is_still_running(tmp_path
 # ---------------------------------------------------------------------------------------------
 
 
-def lax_match_process(tmp_path: Path) -> Path:
-    """Return a copy of the adapter whose match process never ends a decision on its own."""
-    source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
-    original = "message = worker.get(remaining)"
-    assert source.count(original) == 1
-    path = tmp_path / "lax" / "hermes_arena.py"
-    path.parent.mkdir()
-    path.write_text(source.replace(original, "message = worker.get(3600)"), encoding="utf-8")
-    return path
+def mutated_programs(
+    folder: Path,
+    *,
+    match: tuple[tuple[str, str], ...] = (),
+    worker: tuple[tuple[str, str], ...] = (),
+) -> tuple[Path, Path]:
+    """Write the match program and the Hermes worker side by side with these lines replaced.
+
+    The worker loads its sibling `arena_match.py` by path, so both files live in one folder. Each
+    replaced line must occur exactly once in its file.
+    """
+    folder.mkdir(parents=True)
+    paths = []
+    for module, name, replacements in (
+        (arena_match, "arena_match.py", match),
+        (hermes_arena, "hermes_arena.py", worker),
+    ):
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        for original, replacement in replacements:
+            assert source.count(original) == 1, original
+            source = source.replace(original, replacement)
+        (folder / name).write_text(source, encoding="utf-8")
+        paths.append(folder / name)
+    return paths[0], paths[1]
 
 
+def lax_match_process(tmp_path: Path) -> tuple[Path, Path]:
+    """Return copies of the programs whose match process never ends a decision on its own."""
+    return mutated_programs(
+        tmp_path / "lax", match=(("message = worker.get(remaining)", "message = worker.get(3600)"),)
+    )
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
 def test_the_parent_ends_a_match_process_that_does_not_end_its_own_decision(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
+    runtime: str,
 ) -> None:
     """The second line: the parent's window kills the match process, and its worker dies with it."""
-    lax = lax_match_process(tmp_path)
+    lax_match, lax_worker = lax_match_process(tmp_path)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    run = run_process(monkeypatch, capsys, run_dir, "white", {"mode": "block"}, arena=lax)
+    run = run_process(
+        monkeypatch,
+        capsys,
+        run_dir,
+        "white",
+        {"mode": "block"},
+        arena=lax_match,
+        worker=lax_worker if runtime == "hermes" else None,
+        runtime=runtime,
+    )
     assert run.forwarded == []
     assert run.events.count("decision_budget_expired") == 1
     assert_no_residue(run)
@@ -909,7 +1060,7 @@ def test_a_parent_that_does_not_kill_leaves_a_match_process_that_does_not_end_it
     tmp_path: Path,
 ) -> None:
     """Without the parent's kill the second line is gone: the process-level proof notices."""
-    lax = lax_match_process(tmp_path)
+    lax_match, lax_worker = lax_match_process(tmp_path)
     broken = load_mutant(
         tmp_path / "mutant", arena_runner, "child.kill()  # decision cutoff", "pass"
     )
@@ -924,7 +1075,8 @@ def test_a_parent_that_does_not_kill_leaves_a_match_process_that_does_not_end_it
                 "white",
                 {"mode": "block"},
                 module=broken,
-                arena=lax,
+                arena=lax_match,
+                worker=lax_worker,
                 wait=6.0,
             )
     finally:
@@ -946,19 +1098,22 @@ def test_a_worker_that_outlives_its_match_process_is_noticed(
     tmp_path: Path,
 ) -> None:
     """Without the worker's own exit on a closed pipe, the parent's kill leaves a Hermes behind."""
-    source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
-    for original, replacement in (
-        ("message = worker.get(remaining)", "message = worker.get(3600)"),
-        ("exit_hard(3)", "pass"),
-    ):
-        assert source.count(original) == 1
-        source = source.replace(original, replacement)
-    broken = tmp_path / "broken" / "hermes_arena.py"
-    broken.parent.mkdir()
-    broken.write_text(source, encoding="utf-8")
+    broken_match, broken_worker = mutated_programs(
+        tmp_path / "broken",
+        match=(("message = worker.get(remaining)", "message = worker.get(3600)"),),
+        worker=(("exit_hard(3)", "pass"),),
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    run = run_process(monkeypatch, capsys, run_dir, "white", {"mode": "block"}, arena=broken)
+    run = run_process(
+        monkeypatch,
+        capsys,
+        run_dir,
+        "white",
+        {"mode": "block"},
+        arena=broken_match,
+        worker=broken_worker,
+    )
     assert run.forwarded == []
     with pytest.raises(AssertionError, match="still alive"):
         assert_no_residue(run)
@@ -999,14 +1154,17 @@ def test_a_supervisor_that_gives_hermes_the_profile_is_refused_by_the_adapter(
 ) -> None:
     """The second line of defence: Hermes is never started in the profile, whatever calls it."""
     broken = load_mutant(
-        tmp_path / "mutant", arena_runner, "HERMES_HOME=str(scratch),", "HERMES_HOME=str(home),"
+        tmp_path / "mutant",
+        arena_driver_hermes,
+        "HERMES_HOME=str(scratch),",
+        "HERMES_HOME=str(home),",
     )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     try:
         behavior = {"mode": "fast", "arguments": MOVES["white"]}
         run = run_process(
-            monkeypatch, capsys, run_dir, "white", behavior, bound=10.0, module=broken
+            monkeypatch, capsys, run_dir, "white", behavior, bound=10.0, driver_module=broken
         )
         assert run.forwarded == [] and run.homes == [], "the adapter went on into Hermes"
         assert "model_call_started" not in run.events
@@ -1023,20 +1181,28 @@ def test_a_supervisor_and_an_adapter_that_both_give_hermes_the_profile_are_notic
 ) -> None:
     """With both lines of defence removed the snapshot sees what Hermes writes into the profile."""
     broken = load_mutant(
-        tmp_path / "mutant", arena_runner, "HERMES_HOME=str(scratch),", "HERMES_HOME=str(home),"
+        tmp_path / "mutant",
+        arena_driver_hermes,
+        "HERMES_HOME=str(scratch),",
+        "HERMES_HOME=str(home),",
     )
-    source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
-    original = "if not homes_are_apart():"
-    assert source.count(original) == 1
-    lax = tmp_path / "lax" / "hermes_arena.py"
-    lax.parent.mkdir()
-    lax.write_text(source.replace(original, "if False:"), encoding="utf-8")
+    lax_match, lax_worker = mutated_programs(
+        tmp_path / "lax", worker=(("if not homes_are_apart():", "if False:"),)
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     try:
         behavior = {"mode": "fast", "arguments": MOVES["white"]}
         run = run_process(
-            monkeypatch, capsys, run_dir, "white", behavior, bound=10.0, module=broken, arena=lax
+            monkeypatch,
+            capsys,
+            run_dir,
+            "white",
+            behavior,
+            bound=10.0,
+            driver_module=broken,
+            arena=lax_match,
+            worker=lax_worker,
         )
         with pytest.raises(AssertionError, match="changed the Hermes profile"):
             assert_profile_untouched(run)
@@ -1051,12 +1217,13 @@ def test_a_preflight_that_gives_hermes_the_profile_is_noticed(
     """The enabling check is held to the same proof as the run."""
     broken = load_mutant(
         tmp_path / "mutant",
-        arena_runner,
-        "env=hermes_environment(self.home, Path(scratch)),",
-        "env=hermes_environment(self.home, self.home),",
+        arena_driver_hermes,
+        "env=hermes_environment(handle.home, Path(scratch)),",
+        "env=hermes_environment(handle.home, handle.home),",
     )
     try:
-        with pytest.raises(AssertionError):
+        # The worker's own refusal of a shared home is the second line: the check fails closed.
+        with pytest.raises(arena_driver.DriverRefusedError):
             preflight_oracle(broken, monkeypatch, tmp_path)
     finally:
         sys.modules.pop(broken.__name__, None)
@@ -1066,6 +1233,8 @@ def test_a_adapter_that_does_not_refuse_a_shared_home_is_noticed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The refusal is load-bearing: without it the start goes on into Hermes."""
+    (tmp_path / "mutant").mkdir()
+    shutil.copy(arena_match.__file__, tmp_path / "mutant" / "arena_match.py")
     mutant = load_mutant(
         tmp_path / "mutant", hermes_arena, "if not homes_are_apart():", "if False:"
     )
@@ -1096,15 +1265,22 @@ def test_an_adapter_that_reads_the_profile_from_the_wrong_place_is_noticed(
     replacement: str,
 ) -> None:
     """The profile is read, and read only for its config and its credentials, from its own path."""
-    source = Path(hermes_arena.__file__).read_text(encoding="utf-8")
-    assert source.count(original) == 1
-    broken = tmp_path / "broken" / "hermes_arena.py"
-    broken.parent.mkdir()
-    broken.write_text(source.replace(original, replacement), encoding="utf-8")
+    broken_match, broken_worker = mutated_programs(
+        tmp_path / "broken", worker=((original, replacement),)
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     behavior = {"mode": "fast", "arguments": MOVES["white"]}
-    run = run_process(monkeypatch, capsys, run_dir, "white", behavior, bound=10.0, arena=broken)
+    run = run_process(
+        monkeypatch,
+        capsys,
+        run_dir,
+        "white",
+        behavior,
+        bound=10.0,
+        arena=broken_match,
+        worker=broken_worker,
+    )
     with pytest.raises(AssertionError):
         assert_profile_untouched(run)
     run.tethers.close()
