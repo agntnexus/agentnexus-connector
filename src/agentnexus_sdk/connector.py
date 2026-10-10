@@ -4280,8 +4280,7 @@ def _run_setup_command(namespace: Any, install_root: Path, environment: Environm
         ),
     )
     environment.stdout.write(
-        "  Arena: "
-        f"{arena_choice['arena']}; preflight {arena_choice['preflight']}; ready false\n"
+        f"  Arena: {arena_choice['arena']}; preflight {arena_choice['preflight']}; ready false\n"
     )
     with profile_lock(install_root, profile):
         return run_setup(
