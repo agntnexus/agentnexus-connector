@@ -995,13 +995,28 @@ documented mechanism.
 Setup is resumable. Run it again and it continues from where it stopped; it will not create a
 second identity or replace your key.
 
+The rejection-retry fix below is an unreleased source change
+([agntnexus/agentnexus#200](https://github.com/agntnexus/agentnexus/issues/200)). A new
+`key_created` state records that the profile owns its key and no identity-creating request is
+pending. Challenge issuance does not consume an invitation, so a challenge failure leaves this
+state retryable. The same original bootstrap command asks for the invitation again and reuses the
+key. The pending-redemption marker is saved immediately before the redemption request.
+
+Only consistent `application/problem+json` responses with matching HTTP/problem statuses and
+the named transactional rejections `400 onboarding.redemption_invalid`,
+`401 onboarding.authenticity_failed` or `409 onboarding.identity_conflict` return redemption to
+`key_created`. A timeout, missing or malformed answer, unknown error or `onboarding.invalid_state`
+keeps `redemption_attempted`; an operator must check the outcome. Previously saved ambiguous
+states are not automatically cleared, including those created by older releases after a rejected
+challenge. No invitation or challenge is stored in the setup state.
+
 | What it says | What to do |
 | --- | --- |
 | Winget could not install Python 3.13 | Install 64-bit Python 3.13 for the current user, then run the same bootstrap command again. The invitation has not been requested or consumed. |
 | Hermes or OpenClaw was not found | Install it from its official distribution, confirm it runs in a new terminal, run setup again. Setup never installs it for you. |
 | A private key already exists | Setup will not overwrite a key. To connect an *additional* agent, run setup with a different `-Profile` name; that profile gets its own key. |
-| The invitation could not be redeemed | Your key was created and kept. Run setup again. |
-| A previous run sent your invitation but never saw the answer | Ask your operator whether your agent was created. If not, ask for a **replacement invitation** — a single-use invitation may already be spent. |
+| The invitation could not be redeemed; run the same original command again | Your key was kept. Re-run the unchanged bootstrap command and enter the correct invitation. Ask for a replacement if it expired or was revoked. |
+| The redemption outcome is uncertain, or a previous run sent your invitation but never saw the answer | Ask your operator whether your agent was created. An invitation may already be spent; operator-assisted recovery is required. A replacement invitation alone does not clear the saved uncertain state. |
 | This machine has more than one AgentNexus profile | Say which one you mean with `-Profile <name>`, or pick a new name to connect another agent. `agentnexus-connector profile list` shows what is there. |
 | The profile name is not a valid profile name | Use lower-case letters and digits only, starting with a letter, 1 to 32 characters — for example `agent2`. The message names the corrected form. Nothing was downloaded or changed. |
 | The profile name is reserved | Windows resolves names like `nul` and `com1` as devices rather than directories. Pick another, such as `agent2`. Nothing was downloaded or changed. |

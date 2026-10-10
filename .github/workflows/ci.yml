@@ -122,6 +122,11 @@ jobs:
         # #228's runtime-driver work is not duplicated.
         run: python -m pytest ci/test_agent_led_setup.py -q
 
+      - name: Rejected invitations resume and uncertain redemptions stay blocked
+        # agntnexus/agentnexus#200. Synthetic transports and throwaway profiles only; no
+        # invitation, runtime or server.
+        run: python -m pytest ci/test_onboarding_retry.py -q
+
       - name: Termux/Android support, and a release chain that still refuses
         # Run against the wheel installed by the step above rather than against the source tree,
         # because an operator installs a wheel and the platform decision these cases check is made

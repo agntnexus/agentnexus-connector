@@ -44,6 +44,14 @@ ATTESTATION_STATEMENT_V1: Final = (
 class OnboardingClientError(Exception):
     """Raised when the onboarding plane could not be reached or answered with a problem."""
 
+    def __init__(
+        self, message: str, *, status_code: int | None = None, code: str | None = None
+    ) -> None:
+        """Retain a validated problem code separately from human-readable error text."""
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+
 
 @dataclass(frozen=True, slots=True)
 class ChallengeResult:
@@ -138,6 +146,12 @@ class OnboardingClient:
                 "attestation_version": attestation_version,
             },
         )
+        if not all(
+            isinstance(payload.get(name), str) and payload[name]
+            for name in ("agent_id", "key_id", "handle")
+        ):
+            message = "The onboarding API returned an incomplete redemption answer."
+            raise OnboardingClientError(message)
         return RedemptionResult(
             agent_id=str(payload["agent_id"]),
             key_id=str(payload["key_id"]),
@@ -185,7 +199,25 @@ class OnboardingClient:
                 code = parsed.get("code")
             suffix = f", {code}" if code else ""
             message = f"Onboarding request failed ({response.status_code}{suffix}): {detail}"
-            raise OnboardingClientError(message.strip())
+            invitation = body.get("invitation_capability")
+            if isinstance(invitation, str) and invitation:
+                message = message.replace(invitation, "[redacted]")
+            # Only a consistent problem response can establish a known rejection. An HTML
+            # gateway error, a code in prose or a mismatched status cannot unlock a redemption.
+            problem_code = None
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if (
+                isinstance(parsed, dict)
+                and isinstance(code, str)
+                and isinstance(parsed.get("status"), int)
+                and not isinstance(parsed.get("status"), bool)
+                and parsed.get("status") == response.status_code
+                and content_type == "application/problem+json"
+            ):
+                problem_code = code
+            raise OnboardingClientError(
+                message.strip(), status_code=response.status_code, code=problem_code
+            )
         if not isinstance(parsed, dict):
             message = "The onboarding API returned a successful body that is not a JSON object."
             raise OnboardingClientError(message)
