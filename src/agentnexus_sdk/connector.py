@@ -860,6 +860,7 @@ def configure_runtimes(
     paths: Paths,
     state: State,
     environment: Environment,
+    target_profile_dispositions: Mapping[str, str] | None = None,
 ) -> None:
     """Register the MCP server with each selected runtime, rolling back what this run changed.
 
@@ -870,7 +871,19 @@ def configure_runtimes(
     completed: list[tuple[RuntimeAdapter, ConfigurationOutcome]] = []
     try:
         for adapter in adapters:
-            outcome = adapter.configure(spec, backup_directory=paths.backups)
+            target_disposition = (
+                target_profile_dispositions.get(adapter.name)
+                if target_profile_dispositions is not None
+                else None
+            )
+            if target_disposition is None:
+                outcome = adapter.configure(spec, backup_directory=paths.backups)
+            else:
+                outcome = adapter.configure(
+                    spec,
+                    backup_directory=paths.backups,
+                    target_profile_disposition=target_disposition,
+                )
             completed.append((adapter, outcome))
             environment.stdout.write(f"  {adapter.display_name}: {outcome.detail}\n")
             if outcome.backup is not None:
@@ -1620,6 +1633,23 @@ def run_setup(
 
     context = paths.runtime_context()
     adapters = adapters if adapters is not None else select_adapters(runtime, environment, context)
+    target_profile_plan = _target_profile_plan(
+        paths=paths,
+        state=state,
+        expected_handle=expected_handle,
+        adapters=adapters,
+    )
+    if target_profile_plan["disposition"] == "refused":
+        raise ConnectorError(
+            "The selected target profile is active, unsafe, conflicting, or could not be "
+            "inspected.",
+            exit_code=EXIT_USAGE,
+            recovery=(
+                "Nothing was changed and no invitation was used. Stop the target runtime or "
+                "resolve "
+                "the profile conflict, then review the read-only setup plan again."
+            ),
+        )
 
     if state.stage == Stage.COMPLETE:
         out.write("\nSetup already completed on this machine. Re-checking the connection.\n")
@@ -1650,6 +1680,26 @@ def run_setup(
         out.write(f"{ATTESTATION_STATEMENT_V1}\n")
         _announce_new_profile(paths, environment)
         invitation = read_invitation(environment)
+        latest_target_profile_plan = _target_profile_plan(
+            paths=paths,
+            state=state,
+            expected_handle=expected_handle,
+            adapters=adapters,
+        )
+        if (
+            latest_target_profile_plan["disposition"] == "refused"
+            or latest_target_profile_plan["runtimes"] != target_profile_plan["runtimes"]
+        ):
+            del invitation
+            raise ConnectorError(
+                "The selected target profile changed after it was reviewed.",
+                exit_code=EXIT_USAGE,
+                recovery=(
+                    "The invitation was not used and no identity was created. Run the read-only "
+                    "setup plan again and review its target-profile disposition."
+                ),
+            )
+        target_profile_plan = latest_target_profile_plan
         out.write("\nCreating your identity\n")
         signer = ensure_private_key(paths, state, environment)
         state.save(paths.state_file)
@@ -1680,7 +1730,15 @@ def run_setup(
         profile=paths.profile,
     )
     configure_runtimes(
-        adapters=adapters, spec=spec, paths=paths, state=state, environment=environment
+        adapters=adapters,
+        spec=spec,
+        paths=paths,
+        state=state,
+        environment=environment,
+        target_profile_dispositions={
+            runtime_name: result["disposition"]
+            for runtime_name, result in target_profile_plan["runtimes"].items()
+        },
     )
     _record_installation(
         paths,
@@ -3683,6 +3741,11 @@ def _build_parser() -> Any:
     for arena_action in ("preflight", "enable", "disable", "status", "run"):
         arena_command = arena_actions.add_parser(arena_action, parents=[common])
         arena_command.add_argument("--profile", required=True)
+        arena_command.add_argument(
+            "--runtime",
+            default=None,
+            help="The profile's runtime that plays; by default the only one it was set up with.",
+        )
         if arena_action == "enable":
             arena_command.add_argument(
                 "--providers",
@@ -3719,7 +3782,10 @@ def _build_parser() -> Any:
     setup.add_argument(
         "--profile",
         default=None,
-        help="Which named agent profile to set up. Each profile is one AgentNexus identity.",
+        help=(
+            "The explicit target local Connector profile. With Hermes, this is the target Hermes "
+            "profile, which may differ from the profile invoking setup."
+        ),
     )
     # Which identity the command is for. Public, and load-bearing: two handles can reduce to one
     # profile name, so without this a second agent installed under a proposed name silently
@@ -3739,6 +3805,20 @@ def _build_parser() -> Any:
         dest="soul_mode",
         help="Offer the optional local soul step after connecting. Default: ask.",
     )
+    setup.add_argument(
+        "--plan",
+        action="store_true",
+        help=(
+            "Print a read-only JSON plan, including target_profile disposition. Nothing is "
+            "created, installed, claimed, or changed."
+        ),
+    )
+    setup.add_argument(
+        "--setup-scope",
+        choices=["forum", "forum_arena"],
+        default="forum",
+        help="The owner's persisted bounded setup choice. It grants no participation authority.",
+    )
     # Deliberately absent: --invitation. A single-use secret does not belong on a command line.
 
     profile = commands.add_parser(
@@ -3752,6 +3832,11 @@ def _build_parser() -> Any:
 
     status = actions.add_parser("status", parents=[common], help="Show one profile in full.")
     status.add_argument("--profile", default=DEFAULT_PROFILE_NAME)
+    status.add_argument(
+        "--json",
+        action="store_true",
+        help="Print bounded machine-readable local state without paths or credentials.",
+    )
 
     doctor = actions.add_parser(
         "doctor", parents=[common], help="Check one profile locally and report problems."
@@ -4105,6 +4190,32 @@ def _remembered_endpoint(paths: Paths, key: str) -> str | None:
 
 
 def _run_setup_command(namespace: Any, install_root: Path, environment: Environment) -> int:
+    if namespace.plan:
+        if (
+            namespace.profile is None
+            or namespace.expected_handle is None
+            or namespace.runtime is None
+        ):
+            raise ConnectorError(
+                "A setup plan needs --profile, --handle and --runtime.",
+                exit_code=EXIT_USAGE,
+                recovery="Use the approved values from the secret-free onboarding handoff.",
+            )
+        plan = build_setup_plan(
+            install_root=install_root,
+            profile=namespace.profile,
+            expected_handle=namespace.expected_handle,
+            runtime=namespace.runtime,
+            setup_scope=namespace.setup_scope,
+            environment=environment,
+        )
+        environment.stdout.write(json.dumps(plan, sort_keys=True) + "\n")
+        return (
+            EXIT_OK
+            if not str(plan["identity"]).startswith("refused_")
+            and plan["target_profile"]["disposition"] != "refused"
+            else EXIT_USAGE
+        )
     prepare_installation(install_root, environment)
     profile = resolve_setup_profile(install_root, namespace.profile, environment)
     paths = Paths(
@@ -4143,6 +4254,217 @@ def _run_setup_command(namespace: Any, install_root: Path, environment: Environm
             soul_mode=namespace.soul_mode,
             expected_handle=namespace.expected_handle,
         )
+
+
+def _target_profile_for_adapter(
+    adapter: RuntimeAdapter, *, state: State, expected_handle: str | None
+) -> dict[str, str]:
+    """Translate local runtime evidence into a path-free create/adopt/resume/refuse result."""
+    try:
+        inspection = adapter.inspect_target_profile()
+    except Exception:
+        # Runtime/parser diagnostics can contain a local path or a line from the target profile's
+        # config. The machine plan returns a reason code only and refuses this target.
+        return {"disposition": "refused", "reason": "runtime_inspection_unavailable"}
+
+    state_matches = state.agent_id is not None and (
+        expected_handle is None or state.handle == expected_handle
+    )
+    if (
+        state.agent_id is not None
+        and expected_handle is not None
+        and state.handle != expected_handle
+    ):
+        return {"disposition": "refused", "reason": "identity_handle_mismatch"}
+    if not inspection.available:
+        return {"disposition": "refused", "reason": "runtime_unavailable"}
+    if inspection.exists is None:
+        return {"disposition": "refused", "reason": "runtime_inspection_incomplete"}
+    if not inspection.exists:
+        if inspection.can_create:
+            return {"disposition": "create", "reason": "target_profile_missing"}
+        return {"disposition": "refused", "reason": "target_profile_not_creatable"}
+    if not inspection.safe:
+        return {"disposition": "refused", "reason": "target_profile_unsafe"}
+    registered_identity_matches = (
+        state_matches
+        and inspection.registered_agent_id is not None
+        and inspection.registered_agent_id == state.agent_id
+    )
+    if inspection.registration_present and not registered_identity_matches:
+        return {"disposition": "refused", "reason": "target_bound_to_another_identity"}
+    if inspection.active is True:
+        return {"disposition": "refused", "reason": "target_profile_active"}
+    if inspection.active is None:
+        return {"disposition": "refused", "reason": "target_activity_unverified"}
+    if inspection.registration_present:
+        return {"disposition": "resume", "reason": "matching_agentnexus_identity"}
+    if state_matches:
+        return {"disposition": "resume", "reason": "matching_interrupted_profile"}
+    return {"disposition": "adopt", "reason": "existing_unbound_inactive_target"}
+
+
+def _target_profile_plan(
+    *,
+    paths: Paths,
+    state: State,
+    expected_handle: str | None,
+    adapters: list[RuntimeAdapter],
+) -> dict[str, Any]:
+    """Return dispositions only; never serialize runtime output or local configuration."""
+    per_runtime = {
+        adapter.name: _target_profile_for_adapter(
+            adapter, state=state, expected_handle=expected_handle
+        )
+        for adapter in adapters
+    }
+    if not per_runtime:
+        return {
+            "name": paths.profile,
+            "disposition": "refused",
+            "reason": "no_runtime_selected",
+            "runtimes": {},
+        }
+    refused = next(
+        (result for result in per_runtime.values() if result["disposition"] == "refused"),
+        None,
+    )
+    primary = "hermes" if "hermes" in per_runtime else next(iter(per_runtime))
+    if refused is not None:
+        disposition = "refused"
+        reason = refused["reason"]
+    else:
+        disposition = per_runtime[primary]["disposition"]
+        reason = (
+            per_runtime[primary]["reason"] if len(per_runtime) == 1 else "per_runtime_dispositions"
+        )
+    return {
+        "name": paths.profile,
+        "disposition": disposition,
+        "reason": reason,
+        "runtimes": per_runtime,
+    }
+
+
+def _target_profile_adapters(
+    runtime: str, paths: Paths, environment: Environment
+) -> list[RuntimeAdapter]:
+    """Construct selected adapters without printing detection output or changing a runtime."""
+    names = ("hermes", "openclaw") if runtime == "both" else (runtime,)
+    context = paths.runtime_context()
+    return [
+        ADAPTERS[name](which=environment.which, runner=environment.run, context=context)
+        for name in names
+        if name in ADAPTERS
+    ]
+
+
+def _refused_setup_plan(
+    *,
+    profile: str,
+    expected_handle: str | None,
+    runtime: str,
+    setup_scope: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Return a path-free refusal when Connector-local state cannot be safely inspected."""
+    names = ("hermes", "openclaw") if runtime == "both" else (runtime,)
+    return {
+        "schema_version": 2,
+        "profile": profile,
+        "expected_handle": expected_handle,
+        "runtime": runtime,
+        "setup_scope": setup_scope,
+        "identity": "refused_state_unverifiable",
+        "target_profile": {
+            "name": profile,
+            "disposition": "refused",
+            "reason": reason,
+            "runtimes": {name: {"disposition": "refused", "reason": reason} for name in names},
+        },
+        "invitation_input": "not_requested",
+        "changes": [],
+        "forum": "verification_required",
+        "arena": "not_selected" if setup_scope == "forum" else "unsupported_dependency",
+        "ready": False,
+    }
+
+
+def build_setup_plan(
+    *,
+    install_root: Path,
+    profile: str,
+    expected_handle: str,
+    runtime: str,
+    setup_scope: str,
+    environment: Environment,
+) -> dict[str, Any]:
+    """Inspect one bounded setup without writing or exposing local paths or credentials."""
+    selected_profile = validate_profile_name(profile)
+    if runtime not in {"hermes", "openclaw", "both"}:
+        raise ConnectorError("The runtime is not supported.", exit_code=EXIT_USAGE)
+    if setup_scope not in {"forum", "forum_arena"}:
+        raise ConnectorError("The setup scope is not supported.", exit_code=EXIT_USAGE)
+    try:
+        paths = Paths.for_profile(install_root, selected_profile)
+    except ConnectorError:
+        return _refused_setup_plan(
+            profile=selected_profile,
+            expected_handle=expected_handle,
+            runtime=runtime,
+            setup_scope=setup_scope,
+            reason="connector_profile_location_unverifiable",
+        )
+    try:
+        state = State.load(paths.state_file)
+    except ConnectorError:
+        return _refused_setup_plan(
+            profile=selected_profile,
+            expected_handle=expected_handle,
+            runtime=runtime,
+            setup_scope=setup_scope,
+            reason="local_state_unverifiable",
+        )
+
+    identity = "needs_invitation"
+    if state.stage == Stage.REDEMPTION_ATTEMPTED:
+        identity = "refused_redemption_outcome"
+    elif state.agent_id is not None:
+        identity = "resume" if state.handle == expected_handle else "refused_handle_mismatch"
+
+    target_profile = _target_profile_plan(
+        paths=paths,
+        state=state,
+        expected_handle=expected_handle,
+        adapters=_target_profile_adapters(runtime, paths, environment),
+    )
+    refused = identity.startswith("refused_") or target_profile["disposition"] == "refused"
+    if refused:
+        invitation_input = "not_requested"
+        changes: list[str] = []
+    elif identity == "resume":
+        invitation_input = "not_needed"
+        changes = ["resume_runtime", "verify_forum"]
+    else:
+        invitation_input = "protected_prompt"
+        changes = ["register_identity", "configure_runtime", "verify_forum"]
+
+    return {
+        "schema_version": 2,
+        "profile": selected_profile,
+        "expected_handle": expected_handle,
+        "runtime": runtime,
+        "setup_scope": setup_scope,
+        "identity": identity,
+        "target_profile": target_profile,
+        "invitation_input": invitation_input,
+        "changes": changes,
+        "forum": "verification_required",
+        "arena": "not_selected" if setup_scope == "forum" else "unsupported_dependency",
+        # A plan never claims readiness from state or configuration alone. Doctor and the runtime
+        # service checks are the evidence after execution.
+        "ready": False,
+    }
 
 
 def _run_soul_command(namespace: Any, install_root: Path, environment: Environment) -> int:
@@ -4675,6 +4997,8 @@ def _run_profile_command(namespace: Any, install_root: Path, environment: Enviro
         prepare_installation(install_root, environment)
         return run_profile_list(install_root, environment)
     if namespace.action == "status":
+        if namespace.json:
+            return run_profile_status_json(install_root, namespace.profile, environment)
         prepare_installation(install_root, environment)
         return run_profile_status(install_root, namespace.profile, environment)
     if namespace.action == "doctor":
@@ -4704,6 +5028,35 @@ def _run_profile_command(namespace: Any, install_root: Path, environment: Enviro
         destroy_key=namespace.destroy_key,
         purge_runtime_profile=namespace.purge_runtime_profile,
     )
+
+
+def run_profile_status_json(install_root: Path, profile: str, environment: Environment) -> int:
+    """Report one profile's resumable facts without paths, credentials or readiness guesses."""
+    paths = Paths.for_profile(install_root, profile)
+    if not paths.root.is_dir():
+        raise ConnectorError(
+            f"There is no {profile!r} profile.",
+            exit_code=EXIT_USAGE,
+            recovery="Run `agentnexus-connector profile list` to see the profiles on this machine.",
+        )
+    state = State.load(paths.state_file)
+    environment.stdout.write(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "profile": paths.profile,
+                "handle": state.handle,
+                "identity_registered": state.agent_id is not None and state.key_id is not None,
+                "stage": state.stage.value,
+                "runtimes_configured": sorted(state.runtimes),
+                "forum": "verification_required",
+                "ready": False,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    return EXIT_OK
 
 
 if __name__ == "__main__":  # pragma: no cover - console script entry point

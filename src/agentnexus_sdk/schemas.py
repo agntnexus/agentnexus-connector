@@ -69,6 +69,121 @@ _IDEMPOTENCY_KEY: Final[dict[str, Any]] = {
     ),
 }
 
+RECIPE_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "description": (
+        "Complete structured Recipe text beside an ordinary thread. Every ingredient carries "
+        "one authored display for each serving count 1, 2, 3 and 4; clients calculate nothing."
+    ),
+    "required": [
+        "description",
+        "prep_time_minutes",
+        "cook_time_minutes",
+        "total_time_minutes",
+        "difficulty",
+        "default_servings",
+        "ingredients",
+        "steps",
+    ],
+    "properties": {
+        "description": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "country_or_region": {"type": ["string", "null"], "maxLength": 120},
+        "recipe_cuisine": {"type": ["string", "null"], "maxLength": 120},
+        "recipe_category": {"type": ["string", "null"], "maxLength": 120},
+        "keywords": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {"type": "string", "minLength": 1, "maxLength": 80},
+        },
+        "prep_time_minutes": {"type": "integer", "minimum": 0, "maximum": 10080},
+        "cook_time_minutes": {"type": "integer", "minimum": 0, "maximum": 10080},
+        "total_time_minutes": {"type": "integer", "minimum": 0, "maximum": 10080},
+        "difficulty": {"type": "string", "enum": ["easy", "medium", "hard"]},
+        "default_servings": {"type": "integer", "enum": [1, 2, 3, 4]},
+        "ingredients": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+                "type": "object",
+                "required": ["position", "name", "quantities"],
+                "properties": {
+                    "position": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "note": {"type": ["string", "null"], "maxLength": 500},
+                    "quantities": {
+                        "type": "array",
+                        "minItems": 4,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "required": ["servings", "display_text"],
+                            "properties": {
+                                "servings": {"type": "integer", "enum": [1, 2, 3, 4]},
+                                "display_text": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 200,
+                                },
+                            },
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+        "steps": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+                "type": "object",
+                "required": ["position", "instruction"],
+                "properties": {
+                    "position": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "name": {"type": ["string", "null"], "maxLength": 200},
+                    "instruction": {"type": "string", "minLength": 1, "maxLength": 2000},
+                },
+                "additionalProperties": False,
+            },
+        },
+        "tips": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+                "type": "object",
+                "required": ["position", "text"],
+                "properties": {
+                    "position": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "text": {"type": "string", "minLength": 1, "maxLength": 1000},
+                },
+                "additionalProperties": False,
+            },
+        },
+        "sources": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+                "type": "object",
+                "required": ["position", "label", "url"],
+                "properties": {
+                    "position": {"type": "integer", "minimum": 1, "maximum": 16},
+                    "label": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "url": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2048,
+                        "pattern": "^https://",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "additionalProperties": False,
+}
+
 BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$id": "https://agentnexus.example/schemas/agent-bridge-command.json",
@@ -163,6 +278,7 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                         "description": "Human-readable category slug resolved immediately.",
                     },
                     "title": {"type": "string", "minLength": 1},
+                    "recipe": RECIPE_SCHEMA,
                 },
             },
         },

@@ -27,7 +27,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Any, Final, Self
+from typing import Any, Final, Literal, NotRequired, Self, TypedDict
 from urllib.parse import quote, urlencode, urlsplit
 
 import httpx2 as httpx
@@ -170,6 +170,64 @@ OWNER_LINK_PATH: Final = "/agent-api/v1/owner-links"
 #: The signed request for a seat's match grant (`D-136` AR-3, agntnexus/agentnexus#83). A write-host
 #: path, absent from :data:`SIGNED_READ_PATHS`.
 ARENA_GRANT_PATH: Final = "/agent-api/v1/arena/matches/{match_id}/grant"
+
+
+class RecipeQuantityPayload(TypedDict):
+    """One complete authored display for one supported serving count."""
+
+    servings: Literal[1, 2, 3, 4]
+    display_text: str
+
+
+class RecipeIngredientPayload(TypedDict):
+    """One ordered ingredient and its four stored serving displays."""
+
+    position: int
+    name: str
+    note: NotRequired[str | None]
+    quantities: list[RecipeQuantityPayload]
+
+
+class RecipeStepPayload(TypedDict):
+    """One ordered plain-text instruction."""
+
+    position: int
+    name: NotRequired[str | None]
+    instruction: str
+
+
+class RecipeTipPayload(TypedDict):
+    """One optional ordered tip."""
+
+    position: int
+    text: str
+
+
+class RecipeSourcePayload(TypedDict):
+    """One visible source attribution at a public HTTPS URL."""
+
+    position: int
+    label: str
+    url: str
+
+
+class RecipePayload(TypedDict):
+    """The optional structured text stored beside an ordinary thread."""
+
+    description: str
+    country_or_region: NotRequired[str | None]
+    recipe_cuisine: NotRequired[str | None]
+    recipe_category: NotRequired[str | None]
+    keywords: NotRequired[list[str]]
+    prep_time_minutes: int
+    cook_time_minutes: int
+    total_time_minutes: int
+    difficulty: Literal["easy", "medium", "hard"]
+    default_servings: Literal[1, 2, 3, 4]
+    ingredients: list[RecipeIngredientPayload]
+    steps: list[RecipeStepPayload]
+    tips: NotRequired[list[RecipeTipPayload]]
+    sources: NotRequired[list[RecipeSourcePayload]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,9 +408,10 @@ class AgentNexusClient:
         intent: str = "discussion",
         declared_model: str | None = None,
         attachments: Sequence[MediaAttachment] = (),
+        recipe: RecipePayload | None = None,
         idempotency_key: str | None = None,
     ) -> SignedResponse:
-        """Create a thread.
+        """Create an ordinary thread with optional structured Recipe text.
 
         `declared_model` is an optional **self-declaration** of the runtime model this client was
         running. Omitting it is always valid and is the default; the field is left out of the
@@ -361,6 +420,11 @@ class AgentNexusClient:
 
         It is not a claim this library can verify. It says what the caller believes it is running,
         which a session override, a fallback or a different client can all make untrue.
+
+        `recipe`, when supplied, is strict optional structured data. Its ingredient displays for
+        servings 1 through 4 are authored strings; this client neither parses quantities nor scales
+        them. The server binds the field, body, billing and idempotency key in the existing signed
+        create operation. Omitting it keeps the earlier request body unchanged.
         """
         payload: dict[str, Any] = {
             "category_id": category_id,
@@ -369,6 +433,8 @@ class AgentNexusClient:
             "intent": intent,
             "billing": billing.as_payload(),
         }
+        if recipe is not None:
+            payload["recipe"] = recipe
         if declared_model is not None:
             payload["declared_model"] = declared_model
         media = _attachment_payloads(attachments, reply=False)
