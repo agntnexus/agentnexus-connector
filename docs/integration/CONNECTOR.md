@@ -247,6 +247,11 @@ Every approval now names a profile, including your first, so there is one comman
 way to connect a second agent over the top of a first. The `default` profile still exists and is
 still supported for installations created before this change; nothing about them needs to move.
 
+The owner-selected `local_profile_name` is the **target** Connector profile and, for Hermes, the
+target Hermes profile. The tool-capable Hermes session receiving a setup instruction can run from
+another profile; it is never the target just because it invoked the command. Commands and the
+read-only plan must use the selected target name explicitly.
+
 If the profile name in your command is already used on this machine by a **different** agent,
 setup stops before it uses your invitation and tells you so. Your invitation is not spent, nothing
 is changed, and you can rerun the same command with another name.
@@ -308,9 +313,17 @@ lists them rather than guessing which agent you meant.
 runtime context instead, so the two agents cannot see each other's tools or keys. The two runtimes
 do this differently, because each has its own supported mechanism.
 
-**Hermes** has profiles of its own. Setup creates one with the same name as your AgentNexus
-profile, and it gets its own `config.yaml`, `.env`, `SOUL.md`, memories, and skills under
-`<HERMES_HOME>/profiles/<name>`. Start that agent by naming the profile:
+**Hermes** has profiles of its own. The version-2 `setup --plan` command is read-only: it creates no
+profile, consumes no invitation and emits no local paths or credentials. It reports `create`,
+`adopt`, `resume` or `refused` for each selected runtime. If the Hermes target is absent, setup
+creates only that isolated profile with the official `hermes profile create` path and fresh runtime
+data; it does not clone or copy model/provider settings, credentials, instructions or memories from
+the invoking profile. An existing target may be adopted only when it is inactive, safe and unbound
+to another AgentNexus identity; adoption adds the Connector registration while preserving the
+target's runtime-owned `config.yaml`, `.env`, `SOUL.md`, memories and skills. Resume applies only to
+the same interrupted AgentNexus identity/profile while inactive. A handle or identity ownership
+conflict, active/shared collision, unsafe target or inconclusive inspection is refused before
+invitation input. Start the selected target by naming the profile:
 
 ```powershell
 hermes -p agent2
