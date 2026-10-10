@@ -144,6 +144,8 @@ class Stage(StrEnum):
     """How far a previous run got. Ordered; each stage implies every earlier one succeeded."""
 
     STARTED = "started"
+    #: This profile owns its key, but no identity-creating request is pending.
+    KEY_CREATED = "key_created"
     #: Redemption was sent and its outcome is unknown. The invitation may already be consumed.
     REDEMPTION_ATTEMPTED = "redemption_attempted"
     REDEEMED = "redeemed"
@@ -526,6 +528,7 @@ def ensure_private_key(paths: Paths, state: State, environment: Environment) -> 
     if warning is not None:
         environment.stderr.write(f"  NOTE: {warning}\n")
     state.private_key_path = str(written)
+    state.stage = Stage.KEY_CREATED
     return pair.signer
 
 
@@ -554,13 +557,10 @@ def redeem(
 ) -> Identity:
     """Prove possession of the key and exchange the invitation for an identity.
 
-    The state moves to `REDEMPTION_ATTEMPTED` **before** the network call and is only advanced on a
-    definite answer. That ordering is the whole point: if the process dies mid-call, the next run
-    knows the invitation may have been consumed and says so instead of burning a replacement.
+    Challenge issuance cannot consume the invitation or create an identity. The pending marker is
+    saved immediately before redemption, and retained unless success or a known transactional
+    rejection establishes the outcome. A lost redemption response must never become a blind retry.
     """
-    state.stage = Stage.REDEMPTION_ATTEMPTED
-    state.save(paths.state_file)
-
     try:
         with OnboardingClient(base_url=endpoints.onboarding_base_url) as client:
             challenge = client.issue_challenge(
@@ -575,6 +575,8 @@ def redeem(
                 challenge=challenge.challenge,
                 expires_at_iso=challenge.expires_at,
             )
+            state.stage = Stage.REDEMPTION_ATTEMPTED
+            state.save(paths.state_file)
             result = client.redeem(
                 invitation_capability=invitation,
                 challenge=challenge.challenge,
@@ -582,6 +584,16 @@ def redeem(
                 signature_base64=base64.b64encode(signer.sign(material)).decode("ascii"),
             )
     except OnboardingClientError as error:
+        # These named API failures roll back the identity-creating transaction. In particular,
+        # invalid_state is not here: it can mean the invitation was already redeemed. Unknown
+        # responses and transport failures retain the durable pending marker.
+        if state.stage == Stage.REDEMPTION_ATTEMPTED and (error.status_code, error.code) in {
+            (400, "onboarding.redemption_invalid"),
+            (401, "onboarding.authenticity_failed"),
+            (409, "onboarding.identity_conflict"),
+        }:
+            state.stage = Stage.KEY_CREATED
+            state.save(paths.state_file)
         # The SDK already strips request-specific detail from transport errors, so this cannot
         # carry the invitation. It is re-raised with recovery wording rather than a stack trace.
         message = f"The invitation could not be redeemed: {error}"
@@ -589,9 +601,12 @@ def redeem(
             message,
             exit_code=EXIT_REDEMPTION,
             recovery=(
-                "Your key was created and kept. Run `agentnexus-connector setup` again; if it "
-                "reports that the invitation may already be used, ask your operator to issue a "
-                "replacement."
+                "Your key was kept. Run the same original setup command again and enter the "
+                "correct invitation. If it has expired or was revoked, ask your operator for "
+                "a replacement."
+                if state.stage == Stage.KEY_CREATED
+                else "The redemption outcome is uncertain. Your key was kept. Ask your operator "
+                "whether your agent was created before attempting recovery."
             ),
         ) from error
 
@@ -1172,6 +1187,7 @@ def _ask_runtime(
 def _stage_order(stage: Stage) -> int:
     order = [
         Stage.STARTED,
+        Stage.KEY_CREATED,
         Stage.REDEMPTION_ATTEMPTED,
         Stage.REDEEMED,
         Stage.RUNTIMES_CONFIGURED,

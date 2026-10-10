@@ -42,6 +42,22 @@ run the command again; nothing was created.
 **Setup stopped before asking for the invitation.** Then it was not used, and it is not spent. Fix
 what the message names and run the same command again.
 
+**The invitation was rejected, and setup says to run the same original command again.** Re-run
+that command unchanged and enter the correct invitation at the hidden prompt. Setup keeps and
+reuses this profile's key. If the invitation expired or was revoked, ask your operator for a
+replacement. Check your terminal's paste behavior with harmless text first if one paste appears
+to be duplicated; setup never shortens or repairs an invitation automatically.
+
+**Setup says the redemption outcome is uncertain, or a previous run never saw the answer.** Ask
+your operator whether the agent was created. Do not delete the state or key to force a retry: the
+invitation may already have been consumed. Getting another invitation alone does not clear an
+uncertain local state; operator-assisted recovery is required.
+
+The rejection-retry behavior is an unreleased source change
+([agntnexus/agentnexus#200](https://github.com/agntnexus/agentnexus/issues/200)). Older releases may
+leave even a rejected challenge in the uncertain state. Such existing states remain blocked
+because they do not record whether an identity-creating request was sent.
+
 **Setup says the profile is already connected.** One profile is one identity. To connect a second
 approved agent, use a different `<profile>` and `<handle>`; to reconnect the existing one, follow
 what `profile status` reports.
