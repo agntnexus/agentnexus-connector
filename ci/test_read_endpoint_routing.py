@@ -33,8 +33,9 @@ from typing import Any
 
 import pytest
 
-from agentnexus_sdk import bridge, connector, updater
+from agentnexus_sdk import bridge, connector, transport, updater
 from agentnexus_sdk.client import SIGNED_READ_PATHS
+from agentnexus_sdk.profiles import ProfileRecord
 from agentnexus_sdk.signing import generate_key_pair, write_private_key_file
 
 AGENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -356,3 +357,80 @@ class TestTheRuntimeEntry:
             by_hand = re.search(r"Endpoints\(\s*onboarding_base_url=str\(record\.endpoints", source)
             assert by_hand is None, module.__name__
             assert "Endpoints.from_record(record.endpoints)" in source, module.__name__
+
+
+class TestTheExplicitReadPortLifecycle:
+    """Issue #240: a non-default read port survives every profile representation."""
+
+    READ = "https://read.agntnexus.com:8443"
+    WRITE = "https://agent-api.agntnexus.com"
+    LEGACY_READ = "https://read.agntnexus.com"
+
+    @staticmethod
+    def _record() -> ProfileRecord:
+        return ProfileRecord(
+            name="port-probe",
+            endpoints={
+                "agent_api_url": "https://legacy.example.net",
+                "agent_read_url": TestTheExplicitReadPortLifecycle.LEGACY_READ,
+            },
+        )
+
+    def test_install_persist_readback_update_and_rollback_keep_the_exact_port(
+        self, tmp_path: Path
+    ) -> None:
+        """Every stored or runtime-facing representation retains the non-default port."""
+        record = self._record()
+        change = transport.plan_public_migration(
+            record,
+            profile=record.name,
+            agent_api_url=self.WRITE,
+            agent_read_url=self.READ,
+        )
+        assert change.after.agent_read_url == self.READ
+        assert self.READ in transport.describe(change)
+
+        transport.apply_change(record, change)
+        path = tmp_path / "profile.json"
+        record.save(path)
+        loaded = ProfileRecord.load(path)
+        assert loaded is not None
+        assert loaded.endpoints["agent_read_url"] == self.READ
+        assert transport.read_transport(loaded).agent_read_url == self.READ
+        assert connector.Endpoints.from_record(loaded.endpoints).agent_read_url == self.READ
+        assert _spec(self.READ, tmp_path)["AGENTNEXUS_AGENT_READ_URL"] == self.READ
+
+        rollback = transport.plan_rollback(loaded, profile=loaded.name)
+        assert rollback.before.agent_read_url == self.READ
+        assert rollback.after.agent_read_url == self.LEGACY_READ
+
+    def test_the_legacy_default_https_read_origin_remains_valid(self) -> None:
+        """A transition guard must not invalidate existing port-443 profiles."""
+        assert (
+            transport.validate_public_agent_api_url(self.LEGACY_READ, reserved={})
+            == self.LEGACY_READ
+        )
+
+    def test_the_read_origin_cannot_be_redeclared_as_the_write_origin(self) -> None:
+        """The second origin never widens or aliases write authority."""
+        with pytest.raises(transport.TransportError, match="read address is the write address"):
+            transport.plan_public_migration(
+                self._record(),
+                profile="port-probe",
+                agent_api_url=self.WRITE,
+                agent_read_url=self.WRITE,
+            )
+
+    @pytest.mark.parametrize(
+        "candidate",
+        [
+            "https://user:secret@read.agntnexus.com:8443",
+            "https://read.agntnexus.com:8443/agent-api/v1/conformance",
+        ],
+    )
+    def test_a_secret_or_path_is_refused_without_echoing_it(self, candidate: str) -> None:
+        """Invalid public origins fail closed without leaking their untrusted input."""
+        with pytest.raises(transport.TransportError) as refused:
+            transport.validate_public_agent_api_url(candidate, reserved={})
+        assert candidate not in str(refused.value)
+        assert "secret" not in str(refused.value).lower()
