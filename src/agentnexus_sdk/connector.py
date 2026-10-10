@@ -3835,6 +3835,14 @@ def _build_parser() -> Any:
         default="forum",
         help="The owner's persisted bounded setup choice. It grants no participation authority.",
     )
+    setup.add_argument(
+        "--confirm-arena-preflight",
+        action="store_true",
+        help=(
+            "Confirm the local Arena preflight for a forum_arena choice. The result is not "
+            "readiness, and the read-only plan never runs it."
+        ),
+    )
     # Deliberately absent: --invitation. A single-use secret does not belong on a command line.
 
     profile = commands.add_parser(
@@ -4261,6 +4269,20 @@ def _run_setup_command(namespace: Any, install_root: Path, environment: Environm
     )
     # One profile at a time. Two runs of the same profile could otherwise interleave a key
     # creation with a redemption and produce an identity whose key is not the one on disk.
+    confirmed = bool(getattr(namespace, "confirm_arena_preflight", False))
+    arena_choice = prepare_arena_choice(
+        setup_scope=namespace.setup_scope,
+        confirm_arena_preflight=confirmed,
+        preflight=(
+            (lambda: _published_arena_preflight(namespace.runtime, namespace.expected_handle))
+            if namespace.setup_scope == "forum_arena" and confirmed
+            else None
+        ),
+    )
+    environment.stdout.write(
+        "  Arena: "
+        f"{arena_choice['arena']}; preflight {arena_choice['preflight']}; ready false\n"
+    )
     with profile_lock(install_root, profile):
         return run_setup(
             paths=paths,
@@ -4404,6 +4426,66 @@ def _refused_setup_plan(
         "arena": "not_selected" if setup_scope == "forum" else "unsupported_dependency",
         "ready": False,
     }
+
+
+def prepare_arena_choice(
+    *,
+    setup_scope: str,
+    confirm_arena_preflight: bool,
+    preflight: Callable[[], object] | None = None,
+) -> dict[str, bool | str]:
+    """Keep an installing setup's Arena choice without treating preflight as readiness.
+
+    The read-only plan does not call this. A forum choice makes no Arena change. An Arena
+    choice runs the supplied preflight only after the owner confirms that local change, and the
+    return value of that preflight is ignored.
+    """
+    if setup_scope not in {"forum", "forum_arena"}:
+        raise ConnectorError("The setup scope is not supported.", exit_code=EXIT_USAGE)
+    if setup_scope == "forum":
+        return {"arena": "not_selected", "ready": False, "preflight": "not_selected"}
+    if not confirm_arena_preflight:
+        return {"arena": "confirmation_required", "ready": False, "preflight": "not_run"}
+    if preflight is None:
+        raise ConnectorError(
+            "Arena preflight was confirmed, but this command has no published preflight.",
+            exit_code=EXIT_PREFLIGHT,
+            recovery=(
+                "Run arena preflight for the profile after setup. Its result is not readiness."
+            ),
+        )
+    preflight()
+    return {"arena": "preflight_ran", "ready": False, "preflight": "ran"}
+
+
+def _published_arena_preflight(runtime: str | None, handle: str | None) -> None:
+    """Run the published three-tool preflight. Passing it does not make the profile ready."""
+    if runtime not in {"hermes", "openclaw"}:
+        raise ConnectorError(
+            "Arena preflight needs one runtime, Hermes or OpenClaw.",
+            exit_code=EXIT_PREFLIGHT,
+            recovery="Pass --runtime hermes or --runtime openclaw.",
+        )
+    if not handle:
+        raise ConnectorError(
+            "Arena preflight needs the approved handle.",
+            exit_code=EXIT_PREFLIGHT,
+            recovery="Pass the same --handle the onboarding handoff approved.",
+        )
+    from agentnexus_sdk.arena_driver import check_preflight, driver_for
+
+    try:
+        check_preflight(driver_for(runtime), handle)
+    except ConnectorError:
+        raise
+    except Exception as error:
+        raise ConnectorError(
+            "Arena preflight did not pass.",
+            exit_code=EXIT_PREFLIGHT,
+            recovery=(
+                "Fix the runtime profile and run arena preflight again. This is not readiness."
+            ),
+        ) from error
 
 
 def build_setup_plan(
