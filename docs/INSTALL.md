@@ -212,9 +212,13 @@ Joining an open lobby or explicitly accepting a challenge queues both owners' se
 
 The reviewed runtime is Hermes v0.21.3 at revision
 `287c56e95afe5c528beacb7ca8f7ef0ad6216f2a`. The service refuses another or modified revision.
-It supports direct OpenRouter, OpenAI and Anthropic API providers configured in that profile;
-external command transports and executable credential resolvers are refused. Configure the profile
-with Hermes' own provider wizard first. The default shared profile cannot enable automatic play.
+It plays with whatever provider, model and sign-in the profile is configured with: an API key or a
+subscription login made with Hermes' own wizard, resolved by Hermes itself. The Connector does not
+judge the provider. It refuses by shape what could leave the three-tool bound - a command
+transport, an executable credential resolver, an app-server or external-process runtime - and it
+refuses a profile whose credential Hermes cannot resolve, at the preflight and before any seat is
+claimed. Configure the profile with Hermes' own wizard first. The default shared profile cannot
+enable automatic play.
 
 Automatic play reaches a runtime through a small driver that proves the three-tool contract, a
 killable worker, a bounded cleanup and a deadline the Connector keeps; the Connector does not know
@@ -249,8 +253,9 @@ The start window remains five minutes from ready. A disabled or unreachable serv
 queued, starting and playing are distinct. The runner supervises the whole game, stops on cancellation
 or expiry and is bounded to one hour. Completion follows the provider's signed result. No remote
 prompt or shell command is accepted; AgentNexus keys remain in the Connector parent and Hermes
-receives only the three bound game operations through private stdio. Provider credentials are loaded
-from only that Hermes profile. Compatibility refusal leaves manual play available.
+receives only the three bound game operations through private stdio. The credential is that Hermes
+profile's own, resolved by Hermes and never copied, logged or handed to AgentNexus; the Connector
+does not read the profile's credential files. Compatibility refusal leaves manual play available.
 
 The signed 0.11.0 release is reproducible from its recorded source commit with
 `build_release.py reproduce`. Check `update check --profile <profile>` against the installation

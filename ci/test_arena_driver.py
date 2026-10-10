@@ -10,10 +10,8 @@ of the runtime-neutral code (it names no model, no provider and no runtime).
 
 from __future__ import annotations
 
-import ast
 import io
 import json
-import re
 import sys
 import uuid
 from pathlib import Path
@@ -21,6 +19,11 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
+from arena_boundary import (
+    MODEL_AND_PROVIDER_NAMES,
+    RUNTIME_NAMES,
+    imported_text,
+)
 from arena_fake_driver import FakeArenaDriver
 from arena_fakes import expect_guard, intent, load_mutant, supervisor
 
@@ -353,18 +356,6 @@ def test_a_handle_without_a_context_declares_no_model() -> None:
 
 #: Model families, providers and routes. They may appear in a driver's fixtures and in prose about
 #: a driver, never in code that decides what the Arena accepts.
-#: Names distinctive enough to be refused anywhere, even inside an identifier or a longer word.
-DISTINCTIVE_NAMES = (
-    r"openai|anthropic|openrouter|codex|claude|ollama|gemini|mistral|llama|deepseek|qwen|"
-    r"huggingface|perplexity|bedrock|moonshot|fireworks|zhipu|minimax|inkling"
-)
-#: Short names that are also words or parts of words: refused as whole words, where an underscore,
-#: a digit or a hyphen ends a word as a letter does not.
-SHORT_NAMES = r"gpt[-_ ]?\d|vertex|azure|groq|xai|grok|cohere|kimi|nvidia|luna|haiku|sonnet|opus"
-MODEL_AND_PROVIDER_NAMES = re.compile(
-    rf"{DISTINCTIVE_NAMES}|(?<![a-z])(?:{SHORT_NAMES})(?![a-z])", re.IGNORECASE
-)
-RUNTIME_NAMES = re.compile(r"hermes|openclaw", re.IGNORECASE)
 NEUTRAL = ("arena_runner.py", "arena_match.py", "arena_driver.py")
 
 
@@ -391,22 +382,9 @@ def test_the_registry_is_the_one_neutral_file_that_names_a_runtime() -> None:
     assert len(named) == 1 and named[0].lstrip().startswith("_BUILTIN")
 
 
-def imported_modules(path: Path) -> set[str]:
-    """Return every module name a source file imports statically."""
-    found: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if isinstance(node, ast.Import):
-            found.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            base = node.module or ""
-            found.update(f"{base}.{alias.name}".strip(".") for alias in node.names)
-            found.add(base)
-    return found
-
-
 def test_the_supervisor_imports_no_runtime_and_no_driver() -> None:
     """The parent that holds the signing key imports no agent, no adapter and no driver."""
-    imported = imported_modules(SOURCE / "arena_runner.py")
+    imported = imported_text((SOURCE / "arena_runner.py").read_text(encoding="utf-8"))
     forbidden = {
         "agentnexus_sdk.runtimes",
         "agentnexus_sdk.hermes_arena",
@@ -433,13 +411,16 @@ def test_the_match_process_is_standard_library_only() -> None:
         "typing",
         "__future__",
     }
-    modules = {name.split(".")[0] for name in imported_modules(SOURCE / "arena_match.py")}
+    modules = {
+        name.split(".")[0]
+        for name in imported_text((SOURCE / "arena_match.py").read_text(encoding="utf-8"))
+    }
     assert modules - {""} <= stdlib, sorted(modules - stdlib)
 
 
 def test_the_driver_registry_imports_no_runtime() -> None:
     """The neutral contract imports the protocol it checks against and nothing of a runtime."""
-    imported = imported_modules(SOURCE / "arena_driver.py")
+    imported = imported_text((SOURCE / "arena_driver.py").read_text(encoding="utf-8"))
     assert not {n for n in imported if n.startswith("agentnexus_sdk.runtimes")}
     assert not {n for n in imported if "hermes" in n or "openclaw" in n}
 
@@ -631,19 +612,6 @@ def test_a_runner_that_hands_the_parents_environment_to_the_runtime_is_noticed(
         )
     finally:
         sys.modules.pop(mutant.__name__, None)
-
-
-def imported_text(text: str) -> set[str]:
-    """Return the modules a source text imports statically."""
-    found: set[str] = set()
-    for node in ast.walk(ast.parse(text)):
-        if isinstance(node, ast.Import):
-            found.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            base = node.module or ""
-            found.update(f"{base}.{alias.name}".strip(".") for alias in node.names)
-            found.add(base)
-    return found
 
 
 @pytest.mark.parametrize(

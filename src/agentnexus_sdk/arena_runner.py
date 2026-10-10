@@ -55,6 +55,24 @@ DIAGNOSTICS = arena_match.DIAGNOSTICS | frozenset(
 )
 
 
+#: What the runner may say about itself in `arena/status.json`, and nothing else: no path, account,
+#: credential, address or runtime output. The generation is the driver's own opaque token.
+STATUS_KEYS = frozenset(
+    {
+        "schema_version",
+        "runtime",
+        "preflight",
+        "refusal",
+        "generation",
+        "changed",
+        "pending",
+        "playing",
+        "declared_model",
+        "updated_at",
+    }
+)
+
+
 class RunnerRefusedError(ValueError):
     """A failed authority or compatibility check; no fallback expands execution."""
 
@@ -351,6 +369,34 @@ def remove_scratch(path: Path) -> None:
         time.sleep(0.2)
 
 
+def status_file(paths: Any) -> Path:
+    """Return where the runner writes what it may say about itself."""
+    path: Path = paths.root / "arena" / "status.json"
+    return path
+
+
+def read_status(path: Path) -> dict[str, Any]:
+    """Read the runner's status, keeping only the fields it may show: known, typed and bounded."""
+    try:
+        if _is_reparse_point(path) or not path.is_file() or path.stat().st_size > 4096:
+            return {}
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(document, dict):
+        return {}
+    return {
+        key: value
+        for key, value in document.items()
+        if key in STATUS_KEYS
+        and (
+            value is None
+            or isinstance(value, bool)
+            or (isinstance(value, str) and len(value) < 129)
+        )
+    }
+
+
 def profile_storage(paths: Any) -> None:
     """Refuse nested links before any profile state, key or journal is opened."""
     for path in (
@@ -361,6 +407,7 @@ def profile_storage(paths: Any) -> None:
         paths.root / "arena",
         paths.root / "arena" / "journal.sqlite3",
         paths.root / "arena" / "service.json",
+        status_file(paths),
     ):
         if _is_reparse_point(path):
             raise RunnerRefused("Arena storage must remain inside this profile without links.")
@@ -410,6 +457,121 @@ class ArenaRunner:
         self.finished = threading.Event()
         self.terminal = False
         self.playing = False
+        self.begin_proof()
+
+    # -----------------------------------------------------------------------------------------
+    # The runtime generation: what was proven, for which configuration of the runtime
+    # -----------------------------------------------------------------------------------------
+
+    def begin_proof(self) -> None:
+        """Start from the proof the caller just made with this driver and handle.
+
+        The command line enables, runs and restarts through the same inspection and preflight, so a
+        runner begins with the generation that was in effect while that proof was made.
+        """
+        self.generation = self._read_generation()
+        self.proven = self._key(None)
+        self.refused: str | None = None
+        self.verdict: str = "passed"
+        self.refusal: str | None = None
+        self.pending = False
+        self.declared_model = self._declared_model()
+        self._write_status()
+
+    def _read_generation(self) -> str | None:
+        """Ask the driver for its opaque generation; one that cannot tell offers none."""
+        try:
+            value = self.driver.generation(self.handle)
+        except Exception:
+            return None
+        return value if isinstance(value, str) and 0 < len(value) < 129 else None
+
+    def _key(self, intent: StartIntent | None) -> str | None:
+        """Name what a proof is for: the generation in effect, or one intent when none is known.
+
+        A driver that cannot tell whether its runtime changed is asked again before every claim, and
+        a refusal holds for that intent only. Nothing here reads a model or a provider.
+        """
+        generation = self._read_generation()
+        if generation is not None:
+            return f"generation:{generation}"
+        return f"intent:{intent.intent_id}" if intent is not None else None
+
+    def _declared_model(self) -> str | None:
+        """Return the driver's model text only if the one RMD-1 check the forum uses accepts it."""
+        try:
+            value = self.driver.declared_model(self.handle)
+        except Exception:
+            return None
+        return value if isinstance(value, str) and bridge.is_declared_model_valid(value) else None
+
+    def _prove(self, intent: StartIntent | None) -> bool:
+        """Return whether the runtime in effect has passed its preflight and may be claimed with.
+
+        Inspection and the preflight happen before any claim and never while a match runs. A refusal
+        is remembered for the generation it was made for and is not repeated until that generation
+        changes: nothing retries by itself and nothing falls back to an older proof.
+        """
+        key = self._key(intent)
+        if key is None or key == self.refused:
+            return False
+        if key == self.proven:
+            return True
+        try:
+            handle = self.driver.inspect(self.paths)
+            arena_driver.check_preflight(self.driver, handle)
+        except Exception as error:
+            self.refused = key
+            self.verdict = "refused"
+            self.refusal = (
+                error.code
+                if isinstance(error, arena_driver.DriverRefusedError)
+                else "preflight_refused"
+            )
+            self._write_status()
+            return False
+        if self._key(intent) != key:
+            # It changed while it was being proven: the next poll proves what is there now.
+            return False
+        self.handle, self.proven, self.refused = handle, key, None
+        self.generation = self._read_generation()
+        self.verdict, self.refusal, self.pending = "passed", None, False
+        self.declared_model = self._declared_model()
+        self._write_status()
+        return True
+
+    def maintain(self) -> None:
+        """Keep the proof current while nothing runs; only watch while a match does.
+
+        An active match is pinned to the generation it started with. A change meanwhile is recorded
+        as pending and takes effect after the match's cleanup, at the next idle poll.
+        """
+        if self.active is None:
+            self._prove(None)
+            return
+        current = self._read_generation()
+        pending = current is not None and current != self.generation
+        if pending != self.pending:
+            self.pending = pending
+            self._write_status()
+
+    def _write_status(self) -> None:
+        """Write what the runner may say about itself; a failure to write costs nothing else."""
+        current = self._read_generation()
+        document = {
+            "schema_version": 1,
+            "runtime": self.driver.name,
+            "preflight": self.verdict,
+            "refusal": self.refusal,
+            "generation": self.generation,
+            "changed": current is not None and current != self.generation,
+            "pending": self.pending,
+            "playing": self.active is not None,
+            "declared_model": self.declared_model,
+            "updated_at": dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        with contextlib.suppress(OSError):
+            write_json_atomically(status_file(self.paths), document)
 
     def _post(self, suffix: str, payload: dict[str, Any]) -> Any:
         """Send a standard signed write with a fresh nonce and idempotency envelope."""
@@ -715,10 +877,9 @@ class ArenaRunner:
                         self._report("refused")
                     finally:
                         self.active = None
-            for intent in intents:
-                if intent.status == "queued":
-                    self._launch(intent)
-                    break
+            queued = next((item for item in intents if item.status == "queued"), None)
+            if queued is not None and self._prove(queued):
+                self._launch(queued)
 
     def run(self) -> None:
         """Hold the profile lock until children stop; updates and removal refuse while busy."""
@@ -727,6 +888,7 @@ class ArenaRunner:
                 while True:
                     try:
                         self.tick()
+                        self.maintain()
                     except (OSError, ValueError, AgentNexusError) as error:
                         if self.active is not None:
                             event = (
@@ -775,7 +937,15 @@ def command(namespace: Any, install_root: Path) -> int:
     config = paths.root / "arena" / "service.json"
     action = namespace.arena_action
     if action == "status":
-        print(json.dumps({"profile": paths.profile, "enabled": config.is_file()}))
+        print(
+            json.dumps(
+                {
+                    "profile": paths.profile,
+                    "enabled": config.is_file(),
+                    "runner": read_status(status_file(paths)),
+                }
+            )
+        )
         return 0
     if action == "disable":
         config.unlink(missing_ok=True)

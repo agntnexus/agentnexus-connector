@@ -157,8 +157,20 @@ jobs:
         # three-operation contract, a killable worker, a bounded cleanup and a deadline the
         # supervisor keeps, and the runtime-neutral code names no model, provider or runtime. A
         # second, fake runtime runs through the same state machine, and the discussion forum's model
-        # declaration stays what it was. No network and no credential.
-        run: python -m pytest ci/test_arena_driver.py ci/test_forum_declared_model.py -q
+        # declaration stays what it was. The runtime in effect is proven before a seat is claimed
+        # and a match stays on the generation it began with; a refused generation claims nothing and
+        # is not retried by itself. No network and no credential.
+        run: python -m pytest ci/test_arena_driver.py ci/test_forum_declared_model.py ci/test_arena_generation.py -q
+
+      - name: Hermes plays on its profile's own provider and credential, a subscription included
+        # agntnexus/agentnexus#228. A stand-in Hermes with a resolver, a home override, a secret
+        # scope and an authentication error shaped like the reviewed ones, and a fake subscription
+        # backend on loopback, show that a profile with no API key plays: the credential is resolved
+        # by Hermes in the narrowest window, reaches only the transport, is never copied or logged,
+        # one request makes one move, a hanging backend is ended at the cutoff, and a match keeps the
+        # model it started with. Each guard is then broken on purpose and must be noticed. No
+        # network beyond loopback, no real credential, account or model, and no paid call.
+        run: python -m pytest ci/test_arena_hermes_subscription.py ci/test_arena_hermes_generation.py -q
 
       - name: The release builder refuses what it must
         # `scripts/build_release.py` is the one file here that can hold a private signing key, so

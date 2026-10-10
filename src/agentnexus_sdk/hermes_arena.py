@@ -5,8 +5,11 @@ provider session keys remain in the supervising parent. Only locally constructed
 closed stdio tool protocol enter this process. The runtime-neutral match process, the protocol, the
 prompts and the contract live in the sibling `arena_match.py`, which this file loads by path.
 
-Hermes runs in a throwaway home of the supervisor's (`HERMES_HOME`); the profile whose config and
-credentials it plays with is named apart (`AGENTNEXUS_ARENA_PROFILE`) and only read.
+Hermes runs in a throwaway home of the supervisor's (`HERMES_HOME`); the profile whose model and
+credential it plays with is named apart (`AGENTNEXUS_ARENA_PROFILE`). Which provider, model and
+authentication that profile has is Hermes' business: this worker asks Hermes' own functions to
+resolve them and holds the result to the Arena contract (exactly three tools, no external process).
+It names no provider, no model and no credential file (agntnexus/agentnexus#228).
 """
 
 from __future__ import annotations
@@ -40,10 +43,18 @@ def _arena_match() -> Any:
 
 arena = _arena_match()
 
-#: The profile whose `config.yaml` and `.env` this adapter reads and nothing else. Hermes' own home
-#: (`HERMES_HOME`) is a throwaway directory of the supervisor's, because Hermes fills its home with
-#: state of its own the moment it starts (agntnexus/agentnexus#223).
+#: The profile whose model section this worker reads and whose provider and credential Hermes
+#: resolves. Hermes' own home (`HERMES_HOME`) is a throwaway directory of the supervisor's, because
+#: Hermes fills its home with state of its own the moment it starts (agntnexus/agentnexus#223).
 PROFILE_ENV = "AGENTNEXUS_ARENA_PROFILE"
+
+#: What a match pinned about the model, in the throwaway home. The supervisor removes it with the
+#: home when the match is over, and a worker that replaces another one inside the same match reads
+#: it instead of the profile, so that match is played with the model it started with.
+PIN_FILE = "arena-pinned-model.json"
+
+#: The only keys of the profile's model section that reach Hermes. Nothing else of the profile does.
+MODEL_KEYS = ("default", "provider", "base_url", "context_length")
 
 
 def assert_tools(definitions: Any) -> None:
@@ -53,25 +64,44 @@ def assert_tools(definitions: Any) -> None:
         raise ValueError("Hermes exposed tools outside the bounded Arena contract.")
 
 
+def profile_model() -> dict[str, Any]:
+    """Return the model section of the profile, cut down to the four keys Hermes may be given."""
+    yaml = importlib.import_module("yaml")
+    path = Path(os.environ[PROFILE_ENV]) / "config.yaml"
+    local = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    model = local.get("model", {}) if isinstance(local, dict) else None
+    if not isinstance(model, dict):
+        raise ValueError("Select a model in this Hermes profile.")
+    return {key: model[key] for key in MODEL_KEYS if key in model}
+
+
+def pinned_model() -> dict[str, Any]:
+    """Return the model this match plays with: the profile's when the match began, then that one.
+
+    The first worker of a match reads the profile and pins what it found in the throwaway home. A
+    worker that replaces it - after a decision that did not end in time - finds the pin and plays
+    the same model, whatever the owner changed in the meantime. The change applies from the next
+    match, whose throwaway home is a new one. Only the four model keys are pinned, never a secret.
+    """
+    pin = Path(os.environ["HERMES_HOME"]) / PIN_FILE
+    if pin.is_file():
+        pinned = json.loads(pin.read_text(encoding="utf-8"))
+        if isinstance(pinned, dict) and set(pinned) <= set(MODEL_KEYS):
+            return pinned
+        raise ValueError("The pinned model is not valid.")
+    model = profile_model()
+    pin.write_text(json.dumps(model), encoding="utf-8")
+    return model
+
+
 def configure(handler: Any) -> tuple[Any, dict[str, Any]]:
     """Install closed config, three fixed tools and dispatch guards before constructing an agent."""
     config: Any = importlib.import_module("hermes_cli.config")
     safe = copy.deepcopy(config.DEFAULT_CONFIG)
-    # Model choice is local; executable credential commands and custom transports are refused.
-    home = Path(os.environ[PROFILE_ENV])
-    yaml = importlib.import_module("yaml")
-    local = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")) or {}
-    model = local.get("model", {})
-    if not isinstance(model, dict):
-        raise ValueError("Select a model and a direct API provider in this Hermes profile.")
-    provider = model.get("provider", "openrouter")
-    if provider not in {"openrouter", "openai", "anthropic"}:
-        raise ValueError("This provider has not passed bounded Arena transport review.")
-    safe["model"] = {
-        key: model[key]
-        for key in ("default", "provider", "base_url", "context_length")
-        if key in model
-    }
+    # The model is the profile's own, whatever provider it names; Hermes resolves it. What Hermes
+    # may be given of the profile is this one section: executable credential commands, custom
+    # transports and named providers of the profile never reach it.
+    safe["model"] = pinned_model()
     safe["tool_search"] = {"enabled": "off"}
     safe["mcp_servers"] = {}
     config.load_config = lambda *args, **kwargs: copy.deepcopy(safe)
@@ -163,44 +193,102 @@ class DecisionComplete(BaseException):
     """
 
 
-def load_credentials(model: dict[str, Any]) -> dict[str, Any]:
-    """Load only this profile's direct API keys and resolve the one reviewed model transport."""
-    dotenv = importlib.import_module("dotenv")
-    values = dotenv.dotenv_values(Path(os.environ[PROFILE_ENV]) / ".env", interpolate=False)
-    for key in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
-        if values.get(key):
-            os.environ[key] = values[key]
-    provider = model.get("provider", "openrouter")
-    credentials: dict[str, Any] = importlib.import_module(
-        "hermes_cli.runtime_provider"
-    ).resolve_runtime_provider(
-        requested=provider,
-        target_model=model.get("default"),
-        explicit_base_url=model.get("base_url"),
-    )
+def refuse_external_transport(credentials: dict[str, Any]) -> None:
+    """Refuse by shape what would leave the three-tool bound; no provider is named or judged.
+
+    A resolved command, an ACP command, a runtime that hands the whole turn to a subprocess and an
+    external-process URL all run a program of their own with tools of their own. Hermes may offer
+    them to a profile; the Arena accepts a plain model endpoint and nothing that executes.
+    """
+    base_url = str(credentials.get("base_url") or "")
+    scheme = base_url.partition("://")[0].lower() if "://" in base_url else "https"
     if (
-        credentials.get("provider") not in {"openrouter", "openai", "anthropic"}
-        or credentials.get("command")
+        credentials.get("command")
         or credentials.get("acp_command")
+        or "app_server" in str(credentials.get("api_mode") or "")
+        or scheme not in {"http", "https"}
     ):
         raise ValueError("Unreviewed external model transport.")
+
+
+def resolve_credentials(model: dict[str, Any]) -> dict[str, Any]:
+    """Ask Hermes' own runtime to resolve the profile's provider, endpoint and authentication.
+
+    No provider, key name or token shape is known here. Two steps, the narrower first:
+
+    1. Hermes resolves in the throwaway home, with the profile's secrets file made visible through
+       Hermes' own secret scope (read by Hermes, never by this worker). A provider whose key lives
+       there resolves, and nothing was written to the profile.
+    2. Only when Hermes answers with its own authentication error - its store is not in the
+       throwaway home - the same call is made once more inside the shortest window in which the
+       profile is Hermes' home: the context override and the process variable that Hermes' own
+       cron ticker and gateway set to serve a profile. Hermes then reads, and when it is due
+       refreshes, its credential store under its own lock, exactly as if the owner had started it.
+       The window is closed before anything else runs, so logs, caches and the state database of
+       this process still land in the throwaway home.
+
+    The credential never leaves this process except in the request Hermes itself makes to the
+    resolved endpoint. Nothing is copied, linked or logged. The resolver's credential pool belongs
+    to the profile's store: a refresh made through it later, in the throwaway home, would spend a
+    single-use token where the profile can never read the rotated one. It is never handed on.
+    """
+    profile = Path(os.environ[PROFILE_ENV])
+    constants: Any = importlib.import_module("hermes_constants")
+    resolver: Any = importlib.import_module("hermes_cli.runtime_provider")
+    secrets: Any = importlib.import_module("agent.secret_scope")
+    refused: Any = importlib.import_module("hermes_cli.auth").AuthError
+
+    def ask() -> dict[str, Any]:
+        runtime: dict[str, Any] = resolver.resolve_runtime_provider(
+            requested=model.get("provider"),
+            target_model=model.get("default"),
+            explicit_base_url=model.get("base_url"),
+        )
+        return runtime
+
+    credentials: dict[str, Any] | None = None
+    scope = secrets.set_secret_scope(secrets.build_profile_secret_scope(profile))
+    try:
+        credentials = ask()
+    except refused:
+        credentials = None
+    finally:
+        secrets.reset_secret_scope(scope)
+    if credentials is None:
+        saved = os.environ["HERMES_HOME"]
+        override = constants.set_hermes_home_override(str(profile))
+        scope = secrets.set_secret_scope(secrets.build_profile_secret_scope(profile))
+        os.environ["HERMES_HOME"] = str(profile)
+        try:
+            credentials = ask()
+        finally:
+            os.environ["HERMES_HOME"] = saved
+            secrets.reset_secret_scope(scope)
+            constants.reset_hermes_home_override(override)
+    refuse_external_transport(credentials)
+    credentials.pop("credential_pool", None)
     return credentials
 
 
 def run_decision(
     agent_type: Any,
     model: dict[str, Any],
-    credentials: dict[str, Any],
     decision: dict[str, Any],
     send: Callable[[dict[str, Any]], None],
 ) -> None:
-    """Make one decision with a fresh agent, then clean it up; every ending is one fixed message."""
+    """Make one decision with a fresh agent, then clean it up; every ending is one fixed message.
+
+    Hermes resolves the credential again just before the decision: it refreshes a grant only when
+    one is about to expire, so no decision straddles an expiry and a rotated grant is the one used.
+    """
     agent: Any = None
     try:
         try:
+            credentials = resolve_credentials(model)
             agent = agent_type(
                 model=model.get("default", ""),
                 provider=credentials.get("provider"),
+                requested_provider=credentials.get("requested_provider"),
                 base_url=credentials.get("base_url"),
                 api_key=credentials.get("api_key"),
                 api_mode=credentials.get("api_mode"),
@@ -283,13 +371,14 @@ def worker_main(
     threading.Thread(target=pump, daemon=True).start()
     with contextlib.redirect_stdout(sys.stderr):
         agent_type, model = configure(tool)
-        credentials = load_credentials(model)
+        # Ready means the profile's credential resolved: a worker that could not play never joins.
+        resolve_credentials(model)
         send({"ready": True})
         while True:
             command = arena.line_document(incoming.get())
             if command == {"stop": True}:
                 return 0
-            run_decision(agent_type, model, credentials, arena.checked_decision(command), send)
+            run_decision(agent_type, model, arena.checked_decision(command), send)
 
 
 def homes_are_apart() -> bool:
@@ -316,7 +405,10 @@ def main() -> int:
     if sys.argv[2] == "--decision":
         return worker_main()
     with contextlib.redirect_stdout(sys.stderr):
-        configure(lambda operation, arguments: None)
+        _, model = configure(lambda operation, arguments: None)
+        # The credential path is part of the proof: a profile whose provider Hermes cannot
+        # authenticate is refused before an intent is claimed, not after.
+        resolve_credentials(model)
     sys.stdout.write(json.dumps({"bounded": True, "tools": sorted(arena.TOOLS)}) + "\n")
     sys.stdout.flush()
     return 0
