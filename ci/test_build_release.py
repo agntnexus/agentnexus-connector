@@ -813,17 +813,17 @@ def _committed_state() -> dict[str, object]:
 
 
 def test_the_origin_serves_0130_and_the_state_says_so() -> None:
-    """0.13.0 is published only after the origin served exactly the committed, signed bytes."""
+    """0.13.0 stays published. Its wheel is the origin read-back; 0.13.1 is only pending."""
     state = _committed_state()
     assert state["published_version"] == "0.13.0"
-    assert not any(key.startswith("pending_") for key in state)
+    assert state["pending_version"] == "0.13.1"
     releases = state["reproducible_releases"]
     assert isinstance(releases, dict)
     assert releases["0.13.0"] == PROVENANCE_0130
     connector = REPOSITORY_ROOT / "connector-release" / "connector"
     manifest = (connector / builder.MANIFEST_NAME).read_bytes()
-    assert hashlib.sha256(manifest).hexdigest() == ORIGIN_READBACK_0130["manifest_sha256"]
-    assert json.loads(manifest)["connector_version"] == "0.13.0"
+    assert json.loads(manifest)["connector_version"] == "0.13.1"
+    assert hashlib.sha256(manifest).hexdigest() != ORIGIN_READBACK_0130["manifest_sha256"]
     for version, size, digest in (
         ("0.13.0", "wheel_bytes", "wheel_sha256"),
         ("0.12.0", "retained_0120_bytes", "retained_0120_sha256"),
@@ -868,22 +868,22 @@ def test_unsigned_0131_candidate_declares_0131_consistently() -> None:
     assert builder.read_version(REPOSITORY_ROOT, expected="0.13.1") == "0.13.1"
 
 
-def test_unsigned_0131_candidate_cannot_be_pending_or_published() -> None:
-    """Unsigned source does not move the served 0.13.0 state or release tree (#223)."""
+def test_signed_0131_is_pending_until_the_origin_serves_it() -> None:
+    """The signed 0.13.1 candidate is pending. Calling it published is refused."""
     state = _committed_state()
     tree = REPOSITORY_ROOT / "connector-release"
     releases = state["reproducible_releases"]
     assert isinstance(releases, dict)
     assert state["published_version"] == "0.13.0"
-    assert not any(key.startswith("pending_") for key in state)
-    assert "0.13.1" not in releases
-    assert not (tree / "connector" / "0.13.1").exists()
+    assert state["pending_version"] == "0.13.1"
+    assert releases["0.13.1"]["source_commit"] == "031c5520d0923a5deccb2299bc291ce2f0b02614"
+    wheel = tree / "connector" / "0.13.1" / builder.wheel_name("0.13.1")
+    assert wheel.is_file()
     assert published_state_failures(state, tree=tree, installers=INSTALLERS) == []
-    for claimed in (
-        {**state, "pending_version": "0.13.1"},
-        {**state, "published_version": "0.13.1"},
-    ):
-        assert published_state_failures(claimed, tree=tree, installers=INSTALLERS)
+    served_only = {key: value for key, value in state.items() if not key.startswith("pending_")}
+    assert published_state_failures(served_only, tree=tree, installers=INSTALLERS)
+    published_early = {**state, "published_version": "0.13.1"}
+    assert published_state_failures(published_early, tree=tree, installers=INSTALLERS)
 
 
 @pytest.fixture
