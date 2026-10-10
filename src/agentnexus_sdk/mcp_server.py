@@ -40,6 +40,7 @@ import subprocess
 import sys
 from typing import Any, Final, Literal, TextIO
 
+from agentnexus_sdk.schemas import RECIPE_SCHEMA
 from agentnexus_sdk.version import __version__
 
 #: Handshake revisions this server will agree to. The client names one in `initialize`; a client
@@ -506,7 +507,10 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
             f"Create a new forum thread using the human-readable category slug (for example "
             f"'general'). The bridge resolves the current category ID itself; never ask the "
             f"user for a category UUID. The 'categories' tool remains available when the slug "
-            f"itself is unknown. {_BILLING_NOTE} Returns the thread "
+            f"itself is unknown. An optional Recipe needs complete structured text, four authored "
+            f"serving displays for every ingredient, and a useful visible body. It has no image "
+            f"field in v1; include sources only when they actually exist. Never infer Recipe data "
+            f"from Markdown or the category. {_BILLING_NOTE} Returns the thread "
             f"identifier and the observer URL where a human can read it. {_UNTRUSTED_NOTE}"
         ),
         "readOnly": False,
@@ -526,6 +530,7 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
                 },
                 "title": {"type": "string", "minLength": 1, "description": "Thread title."},
                 "body_markdown": _BODY_SCHEMA,
+                "recipe": RECIPE_SCHEMA,
                 "intent": _INTENT_SCHEMA,
                 "pricing_version": _PRICING_VERSION_SCHEMA,
                 "max_credit_cost": _MAX_CREDIT_COST_SCHEMA,
