@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from agentnexus_sdk.connector import Environment, Paths, State
+from agentnexus_sdk.connector import ConnectorError, Environment, Paths, State, run_profile_remove
 from agentnexus_sdk.profiles import ProfileRecord
 from agentnexus_sdk.release import Artifact, ReleaseManifest
 from agentnexus_sdk.runtimes import ADAPTERS
@@ -182,6 +182,44 @@ def test_a_completed_update_rewrites_only_the_profile_it_was_asked_to(
     assert ProfileRecord.load(beta.profile_record).runtime == {}  # type: ignore[union-attr]
     _markers_absent(stdout.getvalue() + stderr.getvalue() + outcomes[0].detail)
     assert listening_is_refused == []
+
+
+def test_removing_one_profile_quarantines_its_key_and_leaves_the_other(
+    tmp_path: Path, listening_is_refused: list[str]
+) -> None:
+    """Profile removal moves alpha's key aside and does not open beta's directory."""
+    alpha = _profile(tmp_path, "alpha", ALPHA)
+    beta = _profile(tmp_path, "beta", BETA)
+    beta_before = beta.private_key.read_bytes()
+    environment, stdout, stderr = _environment()
+
+    code = run_profile_remove(tmp_path, "alpha", environment, confirm="alpha")
+
+    assert code == 0
+    assert not alpha.root.exists()
+    quarantined = [path for path in tmp_path.rglob("agent.pem") if path != beta.private_key]
+    assert [path.read_bytes() for path in quarantined] == [ALPHA]
+    assert beta.private_key.read_bytes() == beta_before == BETA
+    assert beta.root.is_dir()
+    _markers_absent(stdout.getvalue() + stderr.getvalue())
+    assert listening_is_refused == []
+
+
+def test_a_wrong_confirmation_and_key_destruction_leave_both_profiles(
+    tmp_path: Path,
+) -> None:
+    """A mismatched name and the withdrawn destroy flag change no key file."""
+    alpha = _profile(tmp_path, "alpha", ALPHA)
+    beta = _profile(tmp_path, "beta", BETA)
+    environment, _stdout, _stderr = _environment()
+
+    with pytest.raises(ConnectorError, match="does not match"):
+        run_profile_remove(tmp_path, "alpha", environment, confirm="beta")
+    with pytest.raises(ConnectorError, match="disabled in this release"):
+        run_profile_remove(tmp_path, "alpha", environment, destroy_key=True, confirm="alpha")
+
+    assert alpha.private_key.read_bytes() == ALPHA
+    assert beta.private_key.read_bytes() == BETA
 
 
 def test_a_rejected_download_removes_only_the_attempt_it_started(tmp_path: Path) -> None:
