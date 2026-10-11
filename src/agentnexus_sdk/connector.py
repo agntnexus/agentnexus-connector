@@ -4270,20 +4270,20 @@ def _run_setup_command(namespace: Any, install_root: Path, environment: Environm
     # One profile at a time. Two runs of the same profile could otherwise interleave a key
     # creation with a redemption and produce an identity whose key is not the one on disk.
     confirmed = bool(getattr(namespace, "confirm_arena_preflight", False))
-    arena_choice = prepare_arena_choice(
-        setup_scope=namespace.setup_scope,
-        confirm_arena_preflight=confirmed,
-        preflight=(
-            (lambda: _published_arena_preflight(namespace.runtime, namespace.expected_handle))
-            if namespace.setup_scope == "forum_arena" and confirmed
-            else None
-        ),
-    )
-    environment.stdout.write(
-        f"  Arena: {arena_choice['arena']}; preflight {arena_choice['preflight']}; ready false\n"
-    )
+    arena_now = namespace.setup_scope == "forum_arena" and confirmed
+    if not arena_now:
+        arena_choice = prepare_arena_choice(
+            setup_scope=namespace.setup_scope,
+            confirm_arena_preflight=False,
+            preflight=None,
+        )
+        environment.stdout.write(
+            "  Arena: "
+            f"{arena_choice['arena']}; preflight {arena_choice['preflight']}; "
+            "service not_foreground; ready false\n"
+        )
     with profile_lock(install_root, profile):
-        return run_setup(
+        code = run_setup(
             paths=paths,
             endpoints=endpoints,
             environment=environment,
@@ -4291,6 +4291,20 @@ def _run_setup_command(namespace: Any, install_root: Path, environment: Environm
             soul_mode=namespace.soul_mode,
             expected_handle=namespace.expected_handle,
         )
+    if code != EXIT_OK or not arena_now:
+        return code
+    try:
+        _published_arena_preflight(paths, namespace.runtime)
+    except ConnectorError:
+        environment.stdout.write(
+            "  Arena: preflight_failed; preflight failed; service not_foreground; ready false\n"
+        )
+        return EXIT_PREFLIGHT
+    environment.stdout.write(
+        "  Arena: preflight_ran; preflight ran; "
+        f"service {_arena_service_state(paths)}; ready false\n"
+    )
+    return code
 
 
 def _target_profile_for_adapter(
@@ -4457,24 +4471,36 @@ def prepare_arena_choice(
     return {"arena": "preflight_ran", "ready": False, "preflight": "ran"}
 
 
-def _published_arena_preflight(runtime: str | None, handle: str | None) -> None:
-    """Run the published three-tool preflight. Passing it does not make the profile ready."""
+def _arena_service_state(paths: Paths) -> str:
+    """Read the runner's own foreground flag. A service file is not that flag."""
+    from agentnexus_sdk.arena_runner import read_status, status_file
+
+    status = read_status(status_file(paths))
+    if status.get("playing") is True:
+        return "foreground"
+    return "not_foreground"
+
+
+def _published_arena_preflight(paths: Paths, runtime: str | None) -> None:
+    """Run the published runtime preflight. Passing it does not make the profile ready."""
     if runtime not in {"hermes", "openclaw"}:
         raise ConnectorError(
             "Arena preflight needs one runtime, Hermes or OpenClaw.",
             exit_code=EXIT_PREFLIGHT,
             recovery="Pass --runtime hermes or --runtime openclaw.",
         )
-    if not handle:
-        raise ConnectorError(
-            "Arena preflight needs the approved handle.",
-            exit_code=EXIT_PREFLIGHT,
-            recovery="Pass the same --handle the onboarding handoff approved.",
-        )
-    from agentnexus_sdk.arena_driver import check_preflight, driver_for
+    from agentnexus_sdk.arena_runner import RunnerRefused, inspected_runtime
 
     try:
-        check_preflight(driver_for(runtime), handle)
+        inspected_runtime(paths, runtime)
+    except RunnerRefused as error:
+        raise ConnectorError(
+            "Arena preflight did not pass.",
+            exit_code=EXIT_PREFLIGHT,
+            recovery=(
+                "Fix the runtime profile and run arena preflight again. This is not readiness."
+            ),
+        ) from error
     except ConnectorError:
         raise
     except Exception as error:

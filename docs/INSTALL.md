@@ -122,8 +122,9 @@ to the same interrupted AgentNexus identity and profile, while that target is in
 identity ownership conflict, active/shared collision, unsafe target or inconclusive inspection is
 refused before invitation input. `forum` makes no Arena service change. The read-only plan
 still reports `forum_arena` as `unsupported_dependency` and does not start a runtime. The
-installing command keeps that choice. It runs Arena preflight only when
-`--confirm-arena-preflight` is also passed, and that result is not readiness.
+installing command keeps that choice. After setup succeeds, it runs the published Arena
+preflight only when `--confirm-arena-preflight` is also passed. A service file and a passed
+preflight are not readiness.
 
 After setup or an interruption, inspect the same profile without locating its virtual environment:
 

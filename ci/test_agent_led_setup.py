@@ -742,10 +742,10 @@ def test_installing_setup_passes_an_unconfirmed_arena_choice_without_preflight(
     assert "ready false" in environment.stdout.getvalue()
 
 
-def test_a_confirmed_installing_setup_runs_preflight_before_setup(
+def test_a_confirmed_installing_setup_runs_preflight_after_setup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Confirmation reaches the published preflight, and a failure spends no invitation."""
+    """The runtime exists only after setup, so a failed preflight cannot run first."""
     ran: list[str] = []
     monkeypatch.setattr(connector_module, "run_setup", lambda **kwargs: ran.append("setup") or 0)
     monkeypatch.setattr(connector_module, "prepare_installation", lambda *args, **kwargs: None)
@@ -753,8 +753,9 @@ def test_a_confirmed_installing_setup_runs_preflight_before_setup(
         connector_module, "profile_lock", lambda *args, **kwargs: contextlib.nullcontext()
     )
 
-    def refuse(runtime: str | None, handle: str | None) -> None:
-        raise ConnectorError("Arena preflight did not pass.", exit_code=2)
+    def refuse(paths: object, runtime: str | None) -> None:
+        assert runtime == "hermes"
+        raise ConnectorError("Arena preflight did not pass.", exit_code=3)
 
     monkeypatch.setattr(connector_module, "_published_arena_preflight", refuse)
     environment = _environment()
@@ -775,7 +776,40 @@ def test_a_confirmed_installing_setup_runs_preflight_before_setup(
         soul_mode="skip",
     )
 
-    with pytest.raises(ConnectorError, match="did not pass"):
-        _run_setup_command(namespace, tmp_path, environment)
+    code = _run_setup_command(namespace, tmp_path, environment)
 
-    assert ran == []
+    assert ran == ["setup"]
+    assert code == 3
+    assert "ready false" in environment.stdout.getvalue()
+
+
+def test_published_preflight_uses_the_runtime_inspection_not_the_handle_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The published preflight inspects the profile. A handle string is not a runtime handle."""
+    seen: list[str | None] = []
+
+    def inspect(paths: object, runtime: str | None) -> tuple[object, object]:
+        seen.append(runtime)
+        return object(), object()
+
+    monkeypatch.setattr("agentnexus_sdk.arena_runner.inspected_runtime", inspect)
+    paths = Paths.for_profile(tmp_path, "scout01")
+
+    connector_module._published_arena_preflight(paths, "hermes")
+
+    assert seen == ["hermes"]
+
+
+def test_an_enabled_service_file_is_not_a_foreground_runner(tmp_path: Path) -> None:
+    """The service file means enabled, which is not the runner's foreground state."""
+    paths = Paths.for_profile(tmp_path, "scout01")
+    arena = paths.root / "arena"
+    arena.mkdir(parents=True)
+    (arena / "service.json").write_text("{}", encoding="utf-8")
+
+    assert connector_module._arena_service_state(paths) == "not_foreground"
+
+    (arena / "status.json").write_text('{"playing": true}', encoding="utf-8")
+
+    assert connector_module._arena_service_state(paths) == "foreground"
