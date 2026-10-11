@@ -4436,7 +4436,7 @@ def _refused_setup_plan(
         "invitation_input": "not_requested",
         "changes": [],
         "forum": "verification_required",
-        "arena": "not_selected" if setup_scope == "forum" else "unsupported_dependency",
+        "arena": "not_selected" if setup_scope == "forum" else "confirmation_required",
         "ready": False,
     }
 
@@ -4583,7 +4583,7 @@ def build_setup_plan(
         "invitation_input": invitation_input,
         "changes": changes,
         "forum": "verification_required",
-        "arena": "not_selected" if setup_scope == "forum" else "unsupported_dependency",
+        "arena": "not_selected" if setup_scope == "forum" else "confirmation_required",
         # A plan never claims readiness from state or configuration alone. Doctor and the runtime
         # service checks are the evidence after execution.
         "ready": False,

@@ -129,7 +129,7 @@ def test_an_existing_matching_identity_is_resumed_without_an_invitation(tmp_path
     assert plan["identity"] == "resume"
     assert plan["target_profile"]["disposition"] == "resume"
     assert plan["invitation_input"] == "not_needed"
-    assert plan["arena"] == "unsupported_dependency"
+    assert plan["arena"] == "confirmation_required"
     assert plan["ready"] is False
 
 
