@@ -127,6 +127,12 @@ jobs:
         # invitation, runtime or server.
         run: python -m pytest ci/test_onboarding_retry.py -q
 
+      - name: One profile's install or update leaves the other profile's key alone
+        # agntnexus/agentnexus#195. Calls the installer and the profile updater on throwaway
+        # profiles. A rejected download and an unrecognised directory are removed only when this
+        # connector created the attempt. No device, no network, no credential and no listener.
+        run: python -m pytest ci/test_installer_profile_isolation.py -q
+
       - name: Termux/Android support, and a release chain that still refuses
         # Run against the wheel installed by the step above rather than against the source tree,
         # because an operator installs a wheel and the platform decision these cases check is made
