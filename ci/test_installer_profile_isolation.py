@@ -50,6 +50,15 @@ def _environment() -> tuple[Environment, StringIO, StringIO]:
     return environment, stdout, stderr
 
 
+def _installed_mcp(install_root: Path, version: str) -> Path:
+    """Place an executable MCP stand-in where the updater looks for one."""
+    executable = install_root / "connector" / version / "venv" / "bin" / "agentnexus-agent-mcp"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"#!/bin/sh\n")
+    executable.chmod(0o755)
+    return executable
+
+
 def _markers_absent(text: str) -> None:
     assert ALPHA.decode("ascii") not in text
     assert BETA.decode("ascii") not in text
@@ -104,9 +113,7 @@ def test_a_usable_version_with_no_runtime_skips_without_touching_either_key(
     """Pointing alpha at an installed version still leaves both key files as they were."""
     alpha = _profile(tmp_path, "alpha", ALPHA)
     beta = _profile(tmp_path, "beta", BETA)
-    executable = tmp_path / "connector" / "0.13.1" / "venv" / "bin" / "agentnexus-agent-mcp"
-    executable.parent.mkdir(parents=True)
-    executable.write_bytes(b"")
+    _installed_mcp(tmp_path, "0.13.1")
     environment, stdout, stderr = _environment()
 
     outcomes = update_profiles(
@@ -136,9 +143,7 @@ def test_a_completed_update_rewrites_only_the_profile_it_was_asked_to(
         private_key_path=str(alpha.private_key),
         runtimes=["hermes"],
     ).save(alpha.state_file)
-    executable = tmp_path / "connector" / "0.13.1" / "venv" / "bin" / "agentnexus-agent-mcp"
-    executable.parent.mkdir(parents=True)
-    executable.write_bytes(b"")
+    executable = _installed_mcp(tmp_path, "0.13.1")
     seen: list[str] = []
 
     class _StandIn:
