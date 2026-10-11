@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -204,6 +205,73 @@ def test_the_hermes_sentences_are_the_ones_operators_already_know() -> None:
         "unreviewed": "This Hermes source has not passed the bounded Arena compatibility review.",
         "preflight_refused": "Hermes refused the exact three-tool Arena preflight.",
     }
+
+
+def _hermes_paths(tmp_path: Path) -> SimpleNamespace:
+    context = runtimes.RuntimeContext.isolated_under("alpha", tmp_path / "runtime")
+    return SimpleNamespace(isolation="isolated", runtime_context=lambda: context)
+
+
+def _stand_in_hermes(
+    monkeypatch: pytest.MonkeyPatch, source: Path, *, version: str
+) -> list[list[str]]:
+    """Replace the local Hermes lookup. The test must not run git or import Hermes."""
+    calls: list[list[str]] = []
+
+    def run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        stdout = arena_driver_hermes.HERMES_REVISION + "\n" if "rev-parse" in args else ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(
+        arena_driver_hermes.HermesAdapter, "_require_isolated_profile", lambda self: None
+    )
+    monkeypatch.setattr(
+        arena_driver_hermes.HermesAdapter, "_installation", lambda self: (source, version)
+    )
+    monkeypatch.setattr(arena_driver_hermes.subprocess, "run", run)
+    return calls
+
+
+def test_a_hermes_source_outside_the_reviewed_revision_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #195: the preflight accepts one reviewed revision and refuses every other."""
+    source = tmp_path / "hermes"
+    source.mkdir()
+    driver = arena_driver_hermes.HermesArenaDriver()
+    calls = _stand_in_hermes(monkeypatch, source, version="0.0.0")
+
+    with pytest.raises(arena_driver.DriverRefused) as raised:
+        driver.inspect(_hermes_paths(tmp_path))
+    assert raised.value.code == "unreviewed"
+    assert any("rev-parse" in command for command in calls)
+
+    calls = _stand_in_hermes(monkeypatch, source, version=arena_driver_hermes.HERMES_VERSION)
+
+    def dirty(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        if "rev-parse" in args:
+            return subprocess.CompletedProcess(args, 0, stdout="other-revision\n", stderr="")
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(arena_driver_hermes.subprocess, "run", dirty)
+    with pytest.raises(arena_driver.DriverRefused) as raised:
+        driver.inspect(_hermes_paths(tmp_path))
+    assert raised.value.code == "unreviewed"
+    assert all("alpha-profile-marker" not in " ".join(command) for command in calls)
+
+    _stand_in_hermes(monkeypatch, source, version=arena_driver_hermes.HERMES_VERSION)
+    monkeypatch.setattr(
+        arena_driver_hermes.HermesAdapter,
+        "_scanner_interpreter",
+        lambda self, _source: source / "python",
+    )
+    monkeypatch.setattr(
+        arena_driver_hermes.HermesAdapter, "_config", lambda self: source / "config.yaml"
+    )
+    accepted = driver.inspect(_hermes_paths(tmp_path))
+    assert accepted.source == source
 
 
 # ---------------------------------------------------------------------------------------------
