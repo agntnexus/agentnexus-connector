@@ -15,6 +15,7 @@ import pytest
 from agentnexus_sdk.connector import Environment, Paths, State
 from agentnexus_sdk.profiles import ProfileRecord
 from agentnexus_sdk.release import Artifact, ReleaseManifest
+from agentnexus_sdk.runtimes import ADAPTERS
 from agentnexus_sdk.updater import UpdateError, install_release, update_profiles
 
 ALPHA = b"alpha-profile-marker-bytes-195"
@@ -118,6 +119,67 @@ def test_a_usable_version_with_no_runtime_skips_without_touching_either_key(
     assert outcomes[0].status == "skipped"
     assert alpha.private_key.read_bytes() == ALPHA
     assert beta.private_key.read_bytes() == BETA
+    _markers_absent(stdout.getvalue() + stderr.getvalue() + outcomes[0].detail)
+    assert listening_is_refused == []
+
+
+def test_a_completed_update_rewrites_only_the_profile_it_was_asked_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listening_is_refused: list[str]
+) -> None:
+    """A stand-in runtime accepts alpha's new registration and is never handed beta's key."""
+    alpha = _profile(tmp_path, "alpha", ALPHA)
+    beta = _profile(tmp_path, "beta", BETA)
+    State(
+        agent_id="agent-alpha",
+        key_id="key-alpha",
+        handle="alpha",
+        private_key_path=str(alpha.private_key),
+        runtimes=["hermes"],
+    ).save(alpha.state_file)
+    executable = tmp_path / "connector" / "0.13.1" / "venv" / "bin" / "agentnexus-agent-mcp"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"")
+    seen: list[str] = []
+
+    class _StandIn:
+        display_name = "stand-in"
+
+        def detect(self) -> object:
+            return type("Detected", (), {"installed": True})()
+
+        def existing_entry(self) -> None:
+            return None
+
+        def configure(self, spec: object, *, backup_directory: Path) -> object:
+            seen.append(str(getattr(spec, "command", "")))
+            text = repr(spec)
+            assert ALPHA.decode("ascii") not in text
+            assert BETA.decode("ascii") not in text
+            assert str(beta.private_key) not in text
+            return type("Outcome", (), {"changed": True, "backup": None})()
+
+    monkeypatch.setitem(
+        ADAPTERS,
+        "hermes",
+        lambda **_kwargs: _StandIn(),
+    )
+    environment, stdout, stderr = _environment()
+
+    outcomes = update_profiles(
+        install_root=tmp_path,
+        version="0.13.1",
+        profiles=["alpha"],
+        environment=environment,
+    )
+
+    assert outcomes[0].status == "updated"
+    assert seen == [str(executable)]
+    assert alpha.private_key.read_bytes() == ALPHA
+    assert beta.private_key.read_bytes() == BETA
+    record = ProfileRecord.load(alpha.profile_record)
+    assert record is not None
+    assert record.runtime["version"] == "0.13.1"
+    assert ProfileRecord.load(beta.profile_record).runtime == {}  # type: ignore[union-attr]
     _markers_absent(stdout.getvalue() + stderr.getvalue() + outcomes[0].detail)
     assert listening_is_refused == []
 
