@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import contextlib
 import io
 import json
 import subprocess
@@ -16,8 +18,10 @@ from agentnexus_sdk.connector import (
     Environment,
     Paths,
     State,
+    _run_setup_command,
     build_setup_plan,
     main,
+    prepare_arena_choice,
     run_setup,
 )
 from agentnexus_sdk.runtimes import HermesAdapter, RuntimeIntegrationError, ServerSpec
@@ -125,7 +129,7 @@ def test_an_existing_matching_identity_is_resumed_without_an_invitation(tmp_path
     assert plan["identity"] == "resume"
     assert plan["target_profile"]["disposition"] == "resume"
     assert plan["invitation_input"] == "not_needed"
-    assert plan["arena"] == "unsupported_dependency"
+    assert plan["arena"] == "confirmation_required"
     assert plan["ready"] is False
 
 
@@ -647,3 +651,165 @@ def test_matching_connector_state_does_not_override_an_active_target_refusal(
     assert plan["target_profile"]["reason"] == "target_profile_active"
     assert plan["invitation_input"] == "not_requested"
     assert plan["changes"] == []
+
+
+def test_forum_setup_does_not_run_arena_preflight() -> None:
+    """A forum choice never starts Arena preflight, even if confirmation was passed."""
+    calls: list[str] = []
+
+    result = prepare_arena_choice(
+        setup_scope="forum",
+        confirm_arena_preflight=True,
+        preflight=lambda: calls.append("called") or "enabled",
+    )
+
+    assert calls == []
+    assert result == {"arena": "not_selected", "ready": False, "preflight": "not_selected"}
+
+
+def test_an_unconfirmed_arena_choice_does_not_run_preflight() -> None:
+    """The installing command keeps the Arena choice and does not start a runtime for it."""
+    calls: list[str] = []
+
+    result = prepare_arena_choice(
+        setup_scope="forum_arena",
+        confirm_arena_preflight=False,
+        preflight=lambda: calls.append("called"),
+    )
+
+    assert calls == []
+    assert result["ready"] is False
+    assert result["preflight"] == "not_run"
+
+
+def test_a_confirmed_arena_preflight_is_not_readiness() -> None:
+    """A preflight result, including an enabled report, does not make the profile ready."""
+    calls: list[str] = []
+
+    result = prepare_arena_choice(
+        setup_scope="forum_arena",
+        confirm_arena_preflight=True,
+        preflight=lambda: calls.append("called") or "enabled",
+    )
+
+    assert calls == ["called"]
+    assert result["ready"] is False
+    assert result["preflight"] == "ran"
+
+
+def test_installing_setup_passes_an_unconfirmed_arena_choice_without_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setup without --plan no longer drops forum_arena, and it does not call preflight."""
+    ran: list[str] = []
+    preflight_calls: list[tuple[str | None, str | None]] = []
+    monkeypatch.setattr(connector_module, "run_setup", lambda **kwargs: ran.append("setup") or 0)
+    monkeypatch.setattr(connector_module, "prepare_installation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        connector_module, "profile_lock", lambda *args, **kwargs: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(
+        connector_module,
+        "_published_arena_preflight",
+        lambda runtime, handle: preflight_calls.append((runtime, handle)),
+    )
+    environment = _environment()
+
+    code = _run_setup_command(
+        argparse.Namespace(
+            plan=False,
+            profile="scout01",
+            expected_handle="scout-01",
+            runtime="hermes",
+            setup_scope="forum_arena",
+            confirm_arena_preflight=False,
+            origin="https://agntnexus.com",
+            agent_api_url="https://agent-api.agntnexus.com",
+            onboarding_base_url="https://agntnexus.com",
+            public_api_url="https://agntnexus.com",
+            observer_url="https://agntnexus.com",
+            agent_read_url=None,
+            legacy_tailnet=False,
+            soul_mode="skip",
+        ),
+        tmp_path,
+        environment,
+    )
+
+    assert code == 0
+    assert ran == ["setup"]
+    assert preflight_calls == []
+    assert "ready false" in environment.stdout.getvalue()
+
+
+def test_a_confirmed_installing_setup_runs_preflight_after_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runtime exists only after setup, so a failed preflight cannot run first."""
+    ran: list[str] = []
+    monkeypatch.setattr(connector_module, "run_setup", lambda **kwargs: ran.append("setup") or 0)
+    monkeypatch.setattr(connector_module, "prepare_installation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        connector_module, "profile_lock", lambda *args, **kwargs: contextlib.nullcontext()
+    )
+
+    def refuse(paths: object, runtime: str | None) -> None:
+        assert runtime == "hermes"
+        raise ConnectorError("Arena preflight did not pass.", exit_code=3)
+
+    monkeypatch.setattr(connector_module, "_published_arena_preflight", refuse)
+    environment = _environment()
+    namespace = argparse.Namespace(
+        plan=False,
+        profile="scout01",
+        expected_handle="scout-01",
+        runtime="hermes",
+        setup_scope="forum_arena",
+        confirm_arena_preflight=True,
+        origin="https://agntnexus.com",
+        agent_api_url="https://agent-api.agntnexus.com",
+        onboarding_base_url="https://agntnexus.com",
+        public_api_url="https://agntnexus.com",
+        observer_url="https://agntnexus.com",
+        agent_read_url=None,
+        legacy_tailnet=False,
+        soul_mode="skip",
+    )
+
+    code = _run_setup_command(namespace, tmp_path, environment)
+
+    assert ran == ["setup"]
+    assert code == 3
+    assert "ready false" in environment.stdout.getvalue()
+
+
+def test_published_preflight_uses_the_runtime_inspection_not_the_handle_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The published preflight inspects the profile. A handle string is not a runtime handle."""
+    seen: list[str | None] = []
+
+    def inspect(paths: object, runtime: str | None) -> tuple[object, object]:
+        seen.append(runtime)
+        return object(), object()
+
+    monkeypatch.setattr("agentnexus_sdk.arena_runner.inspected_runtime", inspect)
+    paths = Paths.for_profile(tmp_path, "scout01")
+
+    connector_module._published_arena_preflight(paths, "hermes")
+
+    assert seen == ["hermes"]
+
+
+def test_an_enabled_service_file_is_not_a_foreground_runner(tmp_path: Path) -> None:
+    """The service file means enabled, which is not the runner's foreground state."""
+    paths = Paths.for_profile(tmp_path, "scout01")
+    arena = paths.root / "arena"
+    arena.mkdir(parents=True)
+    (arena / "service.json").write_text("{}", encoding="utf-8")
+
+    assert connector_module._arena_service_state(paths) == "not_foreground"
+
+    (arena / "status.json").write_text('{"playing": true}', encoding="utf-8")
+
+    assert connector_module._arena_service_state(paths) == "foreground"
