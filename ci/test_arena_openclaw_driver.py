@@ -492,11 +492,18 @@ def test_openclaw_agent_directories_must_stay_in_the_owned_profile(tmp_path: Pat
     )
     link_target = profile / "alternate-agent"
     link_target.mkdir()
-    linked_path = state / "agents" / "linked" / "agent"
+    # The link goes in the runtime's private agent store, as it would in a real profile.
+    agents = state / "agents"
+    agents.mkdir()
+    make_private(agents)
+    linked_path = agents / "linked" / "agent"
     try:
         linked_path.parent.symlink_to(link_target, target_is_directory=True)
     except OSError as error:
-        pytest.skip(f"directory symlinks are unavailable on this host: {type(error).__name__}")
+        # Only WinError 1314 (no symlink privilege) on Windows may skip; any other error is real.
+        if sys.platform != "win32" or getattr(error, "winerror", None) != 1314:
+            raise
+        pytest.skip("creating a directory symlink needs a privilege this Windows account lacks")
     assert not openclaw_arena.agent_directories_valid(
         [{"id": "linked", "agentDir": str(linked_path)}], "main", profile, state
     )

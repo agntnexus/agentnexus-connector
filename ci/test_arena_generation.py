@@ -18,6 +18,8 @@ A scripted driver stands for the runtime. No process, no model, no credential an
 from __future__ import annotations
 
 import json
+import shlex
+import sys
 import threading
 import uuid
 from pathlib import Path
@@ -27,7 +29,7 @@ from typing import Any
 import pytest
 from arena_fakes import expect_guard, intent, load_mutant
 
-from agentnexus_sdk import arena_driver, arena_match, arena_runner
+from agentnexus_sdk import arena_driver, arena_match, arena_runner, connector
 
 CANARY = "synthetic-credential-canary-0001"
 
@@ -369,6 +371,113 @@ def test_a_restarted_service_begins_with_the_proof_the_command_made(
     restarted.runner.tick()
     assert restarted.calls == ["claim"], restarted.calls
     restarted.close()
+
+
+@pytest.mark.parametrize("entry", ["foreground", "service-execstart"])
+@pytest.mark.parametrize("refuse", [False, True], ids=["supported", "unsupported"])
+@pytest.mark.parametrize("skip_proof", [False, True], ids=["intact", "mutation"])
+def test_cli_entries_prove_a_changed_generation_before_claim(
+    case: Case,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry: str,
+    refuse: bool,
+    skip_proof: bool,
+) -> None:
+    """Exercise both CLI argv paths and the real run loop, not Linux's systemd supervisor."""
+    monkeypatch.setattr(arena_match, "prove_tree", lambda: True)
+    paths = connector.Paths.for_profile(tmp_path / "install", "agent2")
+    connector.State(
+        agent_id=case.agent,
+        key_id="synthetic-key-id",
+        private_key_path=str(paths.private_key),
+        runtimes=["scripted"],
+    ).save(paths.state_file)
+    arena_runner.ProfileRecord(
+        name=paths.profile, endpoints={"agent_api_url": "https://agent-api.example.invalid"}
+    ).save(paths.profile_record)
+    arena_runner.write_json_atomically(
+        paths.root / "arena" / "service.json",
+        {"schema_version": 1, "providers": "{}", "runtime": "scripted"},
+    )
+    arguments = [
+        "arena",
+        "run",
+        "--profile",
+        paths.profile,
+        "--install-root",
+        paths.install_root.as_posix(),
+    ]
+    if entry == "service-execstart":
+        # Render the reviewed unit only; never call systemctl or pretend Windows is Linux at run.
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+            patch.setattr(sys, "platform", "linux")
+            patch.setattr(sys, "executable", "/usr/bin/python3")
+            patch.setattr(arena_runner.subprocess, "run", lambda *a, **k: None)
+            arena_runner._service(
+                SimpleNamespace(
+                    profile=paths.profile,
+                    install_root=SimpleNamespace(resolve=paths.install_root.as_posix),
+                ),
+                enable=True,
+            )
+        unit = tmp_path / ".config" / "systemd" / "user" / "agentnexus-arena-agent2.service"
+        line = next(
+            s for s in unit.read_text(encoding="utf-8").splitlines() if s.startswith("ExecStart=")
+        )
+        argv = shlex.split(line.removeprefix("ExecStart="))
+        assert argv[1:3] == ["-m", "agentnexus_sdk.connector"]
+        arguments = argv[3:]
+
+    case.close()
+    case.root = paths.root
+    case.driver.serial = 0
+    monkeypatch.setitem(arena_driver._REGISTERED, "scripted", lambda: case.driver)
+    monkeypatch.setattr(
+        arena_runner.bridge, "_build_client", lambda config: SimpleNamespace(close=lambda: None)
+    )
+
+    def post(runner: Any, suffix: str, payload: Any) -> Any:
+        case.runner = runner
+        if suffix == "/poll":
+            return case.post(suffix, payload)
+        assert suffix == f"/{case.documents[0]['intent_id']}/claim"
+        assert case.calls == ["inspect", "preflight"] and not refuse, "claim before proof"
+        assert runner.generation == "g2" and runner.handle.serial == 2, "stale claim"
+        case.calls.append("claim")
+        # Stop the real launch at the fake transport: no signing, child, inference or fallback.
+        raise arena_runner.RunnerRefused("synthetic stop after claim")
+
+    polls = 0
+
+    def between_polls(seconds: float) -> None:
+        nonlocal polls
+        assert seconds == 10
+        polls += 1
+        if polls == 1:
+            assert case.calls == ["inspect", "preflight"], "startup proof missing or repeated"
+            case.calls.clear()
+            case.driver.generation_value = "g2"
+            case.driver.refuse = refuse
+            case.queue()
+            return
+        assert case.calls == ["inspect", "preflight"] + ([] if refuse else ["claim"])
+        assert case.status()["preflight"] == ("refused" if refuse else "passed")
+        assert case.runner.generation == ("g1" if refuse else "g2")
+        raise KeyboardInterrupt  # bound the actual foreground loop after the changed idle poll
+
+    monkeypatch.setattr(arena_runner.ArenaRunner, "_post", post)
+    monkeypatch.setattr(arena_runner.time, "sleep", between_polls)
+    with monkeypatch.context() as patch:
+        if skip_proof:
+            patch.setattr(arena_runner.ArenaRunner, "_prove", lambda self, queued: True)
+        with pytest.raises(
+            AssertionError if skip_proof else KeyboardInterrupt,
+            match="claim before proof" if skip_proof else None,
+        ):
+            connector.main(arguments)
+    assert polls == (1 if skip_proof else 2)
 
 
 def status_is_safe(case: Case) -> None:
