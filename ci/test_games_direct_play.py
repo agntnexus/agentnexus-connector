@@ -19,6 +19,9 @@ What the cases hold, against the deterministic stand-ins in `games_fixtures.py`:
 * **answers are bounded and checked**: an oversized or malformed answer is a provider fault, never
   play; an outage is a clear refusal, and the next call resumes;
 * **no secret leaves**: neither key reaches the provider, the result or a log line.
+* **Chess (AC-3, `D-170`)**: one grant per seat for the whole game, every move at the ticket's
+  provider origin only, a foreign or copied session refused, and an unresolved join or move
+  resent byte for byte -- never granted again and never applied twice.
 
 No case contacts a network, and no case claims the end-to-end integration with #82's API.
 """
@@ -34,7 +37,7 @@ import stat
 import sys
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -1480,3 +1483,337 @@ class TestTheBridgeAndTheTool:
         assert schema["required"] == ["match_id", "seat"]
         assert schema["properties"]["claim"]["enum"] == ["threefold_repetition", "fifty_moves"]
         assert "Chess" in tool["description"] and "Connect Four" in tool["description"]
+
+
+# ---------------------------------------------------------------------------------------------
+# Chess evidence for AC-3 (agntnexus/agentnexus#202, D-170): one grant per game, moves on the
+# direct transport only, sessions that stay with their profile, and a retry that resends bytes.
+# ---------------------------------------------------------------------------------------------
+
+
+def _posts(provider: Provider, endpoint: str) -> list[Any]:
+    """Return the requests the provider received for `endpoint`, in the order they were sent."""
+    return [request for request in provider.requests if request.path.endswith(f"/{endpoint}")]
+
+
+class TestChessGoesStraightToTheProvider:
+    """One grant for a whole Chess game; every later message goes to the ticket's provider."""
+
+    def test_three_moves_add_no_request_to_agentnexus(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """The API's request list is the same after the moves, and only the provider hears them."""
+        api.mode = "chess"
+        player = players(first)
+        player.join(MATCH, CHESS_SEAT)
+        granted = [(r.method, r.host, r.path) for r in api.requests]
+        assert granted == [("POST", API_HOST, f"/agent-api/v1/arena/matches/{MATCH}/grant")]
+        for uci in ("e2e3", "g1f3", "d2d3"):
+            player.move(MATCH, CHESS_SEAT, uci=uci)
+        assert [(r.method, r.host, r.path) for r in api.requests] == granted
+        assert {r.host for r in provider.requests} == {PROVIDER_HOST}
+        assert [r.path.rsplit("/", 1)[1] for r in provider.requests] == [
+            "redemption",
+            "actions",
+            "actions",
+            "actions",
+        ]
+        assert _moves(provider) == [{"uci": "e2e3"}, {"uci": "g1f3"}, {"uci": "d2d3"}]
+        assert provider.applied_moves == 3
+
+    def test_a_move_uses_the_tickets_origin_though_another_is_listed_first(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """A route taken from the first origin listed would miss the provider; this one does not."""
+        api.mode = "chess"
+        elsewhere = "https://elsewhere.test.invalid"
+        player = players(first, {"other-provider": elsewhere, PROVIDER_ID: ORIGIN})
+        player.join(MATCH, CHESS_SEAT)
+        player.move(MATCH, CHESS_SEAT, uci="e2e3")
+        assert {r.host for r in provider.requests} == {PROVIDER_HOST}
+        assert provider.applied_moves == 1
+
+    def test_a_state_read_is_one_resumption_at_the_provider_and_no_api_request(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """A Chess state read is one signed resumption at the provider and no AgentNexus request."""
+        api.mode = "chess"
+        player = players(first)
+        player.join(MATCH, CHESS_SEAT)
+        player.move(MATCH, CHESS_SEAT, uci="e2e3")
+        asked, sent = len(api.requests), len(provider.requests)
+        read = player.state(MATCH, CHESS_SEAT)
+        assert len(api.requests) == asked, "a state read asked AgentNexus"
+        reads = provider.requests[sent:]
+        assert [(r.method, r.host, r.path.rsplit("/", 1)[1]) for r in reads] == [
+            ("POST", PROVIDER_HOST, "resumption")
+        ]
+        assert read["observation"]["moves"][:1] == ["e2e3"]
+        assert read["state_version"] == provider.games[MATCH].state_version
+        assert provider.bindings[(MATCH, CHESS_SEAT)].sequence == 3, "the read advanced once"
+
+
+class TestAChessSessionBelongsToItsProfile:
+    """A Chess session is played only by the profile, agent and key that created it."""
+
+    def test_another_profile_has_no_chess_session_to_play(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile, second: Profile
+    ) -> None:
+        """Another profile's move and resumption are refused, and no request reaches anyone."""
+        api.mode = "chess"
+        players(first).join(MATCH, CHESS_SEAT)
+        sent, asked = len(provider.requests), len(api.requests)
+        expect_refusal(
+            lambda: players(second).move(MATCH, CHESS_SEAT, uci="e2e3"), "games.no_session"
+        )
+        expect_refusal(lambda: players(second).state(MATCH, CHESS_SEAT), "games.no_session")
+        assert (len(provider.requests), len(api.requests)) == (sent, asked)
+        assert not second.sessions.exists() or not any(second.sessions.iterdir())
+
+    @pytest.mark.parametrize("changed", ["agent_id", "key_id"])
+    def test_another_agent_or_key_on_this_directory_is_foreign(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile, changed: str
+    ) -> None:
+        """Another agent or key on this directory is refused; the owner's session still plays."""
+        api.mode = "chess"
+        owner = players(first)
+        owner.join(MATCH, CHESS_SEAT)
+        stranger = players(replace(first, **{changed: str(uuid.uuid4())}))
+        sent, asked = len(provider.requests), len(api.requests)
+        expect_refusal(
+            lambda: stranger.move(MATCH, CHESS_SEAT, uci="e2e3"), "games.session_foreign"
+        )
+        expect_refusal(lambda: stranger.state(MATCH, CHESS_SEAT), "games.session_foreign")
+        expect_refusal(lambda: stranger.join(MATCH, CHESS_SEAT), "games.session_foreign")
+        assert (len(provider.requests), len(api.requests)) == (sent, asked)
+        assert owner.move(MATCH, CHESS_SEAT, uci="e2e3")["observation"]["moves"][0] == "e2e3"
+
+    def test_a_copied_chess_session_is_foreign_to_the_profile_it_was_copied_to(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile, second: Profile
+    ) -> None:
+        """A copied Chess session is refused for join, move and resumption, and its files stay."""
+        api.mode = "chess"
+        players(first).join(MATCH, CHESS_SEAT)
+        shutil.copytree(first.sessions, second.sessions, dirs_exist_ok=True)
+        copied = sorted((path.name, path.read_bytes()) for path in second.sessions.iterdir())
+        sent, asked = len(provider.requests), len(api.requests)
+        copier = players(second)
+        expect_refusal(lambda: copier.join(MATCH, CHESS_SEAT), "games.session_foreign")
+        expect_refusal(lambda: copier.move(MATCH, CHESS_SEAT, uci="e2e3"), "games.session_foreign")
+        expect_refusal(lambda: copier.state(MATCH, CHESS_SEAT), "games.session_foreign")
+        assert (len(provider.requests), len(api.requests)) == (sent, asked)
+        after = sorted((path.name, path.read_bytes()) for path in second.sessions.iterdir())
+        assert after == copied
+
+    def test_a_swapped_origin_refuses_every_chess_operation_and_sends_nothing(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """Once the profile names another origin for the session's provider, nothing is sent."""
+        api.mode = "chess"
+        elsewhere = "https://elsewhere.test.invalid"
+        players(first, {PROVIDER_ID: ORIGIN, "other-provider": elsewhere}).join(MATCH, CHESS_SEAT)
+        sent, asked = len(provider.requests), len(api.requests)
+        swapped = players(first, {PROVIDER_ID: elsewhere, "other-provider": ORIGIN})
+        refusal = expect_refusal(
+            lambda: swapped.move(MATCH, CHESS_SEAT, uci="e2e3"), "games.session_provider"
+        )
+        expect_refusal(lambda: swapped.state(MATCH, CHESS_SEAT), "games.session_provider")
+        expect_refusal(lambda: swapped.join(MATCH, CHESS_SEAT), "games.session_provider")
+        assert "Restore the provider's origin" in str(refusal)
+        assert (len(provider.requests), len(api.requests)) == (sent, asked)
+        assert provider.applied_moves == 0
+
+    @pytest.mark.parametrize("context", ["copied", "foreign", "agent", "key", "origin"])
+    def test_a_pending_redemption_refuses_other_contexts_and_the_owner_resumes(
+        self,
+        players: Any,
+        api: ArenaApi,
+        provider: Provider,
+        first: Profile,
+        second: Profile,
+        context: str,
+    ) -> None:
+        """While a redemption is unresolved, another context is refused; the owner then resumes."""
+        api.mode = "chess"
+        provider.fault = "lose_answer"
+        expect_refusal(lambda: players(first).join(MATCH, CHESS_SEAT), "games.provider_unavailable")
+        granted = api.issued[(MATCH, CHESS_SEAT)]
+        state_file = first.sessions / f"{MATCH}.{CHESS_SEAT}.json"
+        pending_before = state_file.read_bytes()
+        sent, asked = len(provider.requests), len(api.requests)
+        if context == "copied":
+            shutil.copytree(first.sessions, second.sessions, dirs_exist_ok=True)
+            other, code = players(second), "games.session_foreign"
+        elif context == "origin":
+            swapped = {PROVIDER_ID: "https://elsewhere.test.invalid", "other-provider": ORIGIN}
+            other, code = players(first, swapped), "games.session_provider"
+        else:
+            changed = {
+                "foreign": {"agent_id": second.agent_id, "key_id": second.key_id},
+                "agent": {"agent_id": str(uuid.uuid4())},
+                "key": {"key_id": str(uuid.uuid4())},
+            }[context]
+            other, code = players(replace(first, **changed)), "games.session_foreign"
+        expect_refusal(lambda: other.join(MATCH, CHESS_SEAT), code)
+        expect_refusal(lambda: other.move(MATCH, CHESS_SEAT, uci="e2e3"), code)
+        expect_refusal(lambda: other.state(MATCH, CHESS_SEAT), code)
+        assert (len(provider.requests), len(api.requests)) == (sent, asked)
+        assert state_file.read_bytes() == pending_before, "a refused context changed the session"
+        if context == "copied":
+            assert (second.sessions / state_file.name).read_bytes() == pending_before
+        joined = players(first).join(MATCH, CHESS_SEAT)
+        assert joined["seat_generation"] == granted["seat_generation"] == 1
+        assert len(api.requests) == asked, "the owner's resumption asked AgentNexus again"
+        redemptions = _posts(provider, "redemption")
+        assert len(redemptions) == 2
+        assert redemptions[0].body == redemptions[1].body
+        signature = "agentnexus-play-signature"
+        assert redemptions[0].headers[signature] == redemptions[1].headers[signature]
+        assert provider.bindings[(MATCH, CHESS_SEAT)].ticket_id == granted["ticket_id"]
+
+
+class TestAChessGrantIsMintedOnce:
+    """A Chess seat's grant is asked for once, however often its join is repeated."""
+
+    def test_a_lost_redemption_resumes_from_a_new_player_with_the_same_grant(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """The resumed join resends the stored redemption and keeps the grant and the binding."""
+        api.mode = "chess"
+        provider.fault = "lose_answer"
+        expect_refusal(lambda: players(first).join(MATCH, CHESS_SEAT), "games.provider_unavailable")
+        granted = api.issued[(MATCH, CHESS_SEAT)]
+        state_file = first.sessions / f"{MATCH}.{CHESS_SEAT}.json"
+        key_file = first.sessions / f"{MATCH}.{CHESS_SEAT}.key"
+        key_before, asked = key_file.read_bytes(), len(api.requests)
+
+        joined = players(first).join(MATCH, CHESS_SEAT)
+
+        assert (joined["game_version"], joined["observation"]["you_are"]) == ("chess-1", "white")
+        assert joined["seat_generation"] == granted["seat_generation"] == 1
+        assert len(api.requests) == asked, "the resumed join asked AgentNexus again"
+        assert api.generations[(MATCH, CHESS_SEAT)] == 1
+        lost, resent = _posts(provider, "redemption")
+        assert (lost.body, lost.headers["agentnexus-play-signature"]) == (
+            resent.body,
+            resent.headers["agentnexus-play-signature"],
+        )
+        binding = provider.bindings[(MATCH, CHESS_SEAT)]
+        assert (binding.ticket_id, binding.generation) == (granted["ticket_id"], 1)
+        assert key_file.read_bytes() == key_before, "the session key was replaced"
+        stored = json.loads(state_file.read_text(encoding="utf-8"))
+        assert stored["pending"] is None and stored["seat_generation"] == 1
+        assert provider.applied_moves == 0
+
+    def test_repeated_joins_after_lost_answers_mint_no_second_grant(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """Two lost answers in a row still redeem one ticket, and a join once held is refused."""
+        api.mode = "chess"
+        for _ in range(2):
+            provider.fault = "lose_answer"
+            expect_refusal(
+                lambda: players(first).join(MATCH, CHESS_SEAT), "games.provider_unavailable"
+            )
+        joined = players(first).join(MATCH, CHESS_SEAT)
+        expect_refusal(lambda: players(first).join(MATCH, CHESS_SEAT), "games.session_exists")
+        assert joined["seat_generation"] == 1
+        assert len(api.requests) == 1
+        assert api.generations[(MATCH, CHESS_SEAT)] == 1
+        redemptions = _posts(provider, "redemption")
+        assert len(redemptions) == 3
+        assert len({(r.body, r.headers["agentnexus-play-signature"]) for r in redemptions}) == 1
+        granted = api.issued[(MATCH, CHESS_SEAT)]
+        assert provider.bindings[(MATCH, CHESS_SEAT)].ticket_id == granted["ticket_id"]
+
+
+class TestAChessMoveRetryResendsTheSameBytes:
+    """An unresolved Chess move is resent byte for byte, and the provider applies it once."""
+
+    @pytest.mark.parametrize("new_player", [False, True])
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {"uci": "e2e3"},
+            {"uci": "g1f3", "claim": "fifty_moves"},
+            {"claim": "threefold_repetition"},
+        ],
+    )
+    def test_a_lost_move_is_resent_with_the_same_body_and_play_signature(
+        self,
+        players: Any,
+        api: ArenaApi,
+        provider: Provider,
+        first: Profile,
+        arguments: dict[str, str],
+        new_player: bool,
+    ) -> None:
+        """The retry carries the lost message's body and signature, from this or a new player."""
+        api.mode = "chess"
+        player = players(first)
+        player.join(MATCH, CHESS_SEAT)
+        asked = len(api.requests)
+        provider.fault = "lose_answer"
+        expect_refusal(
+            lambda: player.move(MATCH, CHESS_SEAT, **arguments), "games.provider_unavailable"
+        )
+        retry = players(first) if new_player else player
+        played = retry.move(MATCH, CHESS_SEAT, **arguments)
+        lost, resent = _posts(provider, "actions")
+        assert json.loads(lost.body)["move"] == arguments
+        assert json.loads(lost.body)["sequence"] == 2
+        assert lost.body == resent.body
+        assert (
+            lost.headers["agentnexus-play-signature"] == resent.headers["agentnexus-play-signature"]
+        )
+        assert _moves(provider) == [arguments, arguments]
+        assert provider.bindings[(MATCH, CHESS_SEAT)].sequence == 2, "a move was applied twice"
+        assert played["state_version"] == provider.games[MATCH].state_version
+        assert len(api.requests) == asked, "the retry asked AgentNexus"
+
+    def test_a_different_move_while_one_is_unresolved_sends_nothing(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """Another Chess move, as UCI or as a claim, waits: it sends nothing and asks nothing."""
+        api.mode = "chess"
+        player = players(first)
+        player.join(MATCH, CHESS_SEAT)
+        provider.fault = "lose_answer"
+        expect_refusal(
+            lambda: player.move(MATCH, CHESS_SEAT, uci="e2e3"), "games.provider_unavailable"
+        )
+        sent, asked = len(provider.requests), len(api.requests)
+        expect_refusal(lambda: player.move(MATCH, CHESS_SEAT, uci="d2d3"), "games.pending_other")
+        expect_refusal(
+            lambda: player.move(MATCH, CHESS_SEAT, claim="fifty_moves"), "games.pending_other"
+        )
+        assert (len(provider.requests), len(api.requests)) == (sent, asked)
+        assert player.move(MATCH, CHESS_SEAT, uci="e2e3")["observation"]["moves"][0] == "e2e3"
+        assert provider.applied_moves == 1
+
+    def test_a_state_read_after_a_lost_move_resends_it_once_and_permits_the_next_move(
+        self, players: Any, api: ArenaApi, provider: Provider, first: Profile
+    ) -> None:
+        """A state read resends the lost move byte for byte, applies it once, and play goes on."""
+        api.mode = "chess"
+        player = players(first)
+        player.join(MATCH, CHESS_SEAT)
+        provider.fault = "lose_answer"
+        expect_refusal(
+            lambda: player.move(MATCH, CHESS_SEAT, uci="e2e3"), "games.provider_unavailable"
+        )
+        asked = len(api.requests)
+        read = player.state(MATCH, CHESS_SEAT)
+        lost, resent = _posts(provider, "actions")
+        assert lost.body == resent.body
+        signature = "agentnexus-play-signature"
+        assert lost.headers[signature] == resent.headers[signature]
+        assert _moves(provider) == [{"uci": "e2e3"}, {"uci": "e2e3"}]
+        assert provider.applied_moves == 1, "the lost move was applied more than once"
+        assert provider.bindings[(MATCH, CHESS_SEAT)].sequence == 2
+        assert read["observation"]["moves"][:1] == ["e2e3"]
+        assert len(api.requests) == asked, "the state read asked AgentNexus"
+        following = player.move(MATCH, CHESS_SEAT, uci="g1f3")
+        assert following["observation"]["moves"][2] == "g1f3"
+        assert provider.applied_moves == 2
+        assert provider.bindings[(MATCH, CHESS_SEAT)].sequence == 3
