@@ -242,3 +242,66 @@ class TestAnAlreadyRegisteredProfileTakesACorrectedReadOrigin:
         record = connector.ProfileRecord.load(setup.paths.profile_record)
         assert record is not None
         return record.endpoints.get("agent_read_url")
+
+
+class TestThePreflightChecksTheReadHostToo:
+    """Criterion 4, preflight: a dead read host is found before the invitation is spent.
+
+    Only the write host was probed before, so a dead read host surfaced as a late
+    "could not be reached" from the signed test.
+    """
+
+    @staticmethod
+    def _check(read: str | None, *, answering: set[tuple[str, int]]) -> list[tuple[str, int]]:
+        probed: list[tuple[str, int]] = []
+
+        def probe(host: str, port: int, _timeout: float = 5.0) -> bool:
+            probed.append((host, port))
+            return (host, port) in answering
+
+        environment = connector.Environment(
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            prompt=lambda _text: pytest.fail("a connectivity check must never prompt"),
+            which=lambda _name: None,
+            tcp_probe=probe,
+        )
+        connector.check_connectivity(_endpoints(read=read), environment)
+        return probed
+
+    def test_both_hosts_are_probed_on_their_own_ports(self) -> None:
+        """The read origin's explicit port is the one opened, not 443."""
+        probed = self._check(
+            READ_ORIGIN,
+            answering={("agent.example.org", 443), ("read.example.org", 8443)},
+        )
+        assert probed == [("agent.example.org", 443), ("read.example.org", 8443)]
+
+    def test_a_dead_read_host_is_named_with_its_origin_and_port(self) -> None:
+        """The failure says it is the read address, and nothing about the write host."""
+        with pytest.raises(connector.ConnectorError) as raised:
+            self._check(READ_ORIGIN, answering={("agent.example.org", 443)})
+        text = _text(raised.value)
+        assert raised.value.exit_code == connector.EXIT_CONNECTIVITY
+        assert READ_ORIGIN in text
+        assert "read.example.org" in text
+        assert "8443" in text
+        assert "tailscale" not in text.lower()
+        for advice in VERIFICATION_ADVICE:
+            assert advice not in text.lower()
+
+    def test_a_deployment_without_a_read_origin_is_probed_exactly_as_before(self) -> None:
+        """A Tailnet profile has one address for both directions."""
+        assert self._check(None, answering={("agent.example.org", 443)}) == [
+            ("agent.example.org", 443)
+        ]
+
+    def test_the_write_host_failing_is_still_reported_first(self) -> None:
+        """The check order and the message for the write host are unchanged."""
+        with pytest.raises(connector.ConnectorError, match=r"agent\.example\.org did not answer"):
+            self._check(READ_ORIGIN, answering=set())
+
+    def test_the_connector_never_probes_ssh_on_the_read_host(self) -> None:
+        """The refusal that protects the write host protects the read host as well."""
+        with pytest.raises(connector.ConnectorError, match="Refusing to use TCP/22"):
+            self._check("https://read.example.org:22", answering={("agent.example.org", 443)})

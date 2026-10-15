@@ -1219,6 +1219,7 @@ def check_connectivity(endpoints: Endpoints, environment: Environment) -> None:
 
     if environment.probe(host, port):
         environment.stdout.write(f"  Reached {host} on TCP/{port}\n")
+        _check_read_host(endpoints, environment)
         return
 
     if is_tailnet_host(host):
@@ -1242,6 +1243,42 @@ def check_connectivity(endpoints: Endpoints, environment: Environment) -> None:
         )
     message = f"{host} did not answer on TCP/{port}."
     raise ConnectorError(message, exit_code=EXIT_CONNECTIVITY, recovery=hint)
+
+
+def _check_read_host(endpoints: Endpoints, environment: Environment) -> None:
+    """Probe the signed-read host on its own port, when the deployment serves reads separately.
+
+    The write host being reachable says nothing about the read host: they are different names,
+    and the read edge listens on a port a restrictive network may not allow out. Without this the
+    first sign of a dead read host was the signed test, after the invitation was spent. A TCP
+    connection cannot show that the certificate verifies, so this reports reachability only.
+    """
+    origin = endpoints.agent_read_url
+    if not origin:
+        return
+    parsed = urlsplit(origin)
+    host = parsed.hostname or ""
+    if not host:
+        message = f"The read address {origin!r} has no host."
+        raise ConnectorError(message, exit_code=EXIT_CONNECTIVITY)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if port in FORBIDDEN_TCP_PORTS:
+        message = f"Refusing to use TCP/{port}; the connector never needs it."
+        raise ConnectorError(message, exit_code=EXIT_CONNECTIVITY)
+    if environment.probe(host, port):
+        environment.stdout.write(f"  Reached the read host {host} on TCP/{port}\n")
+        return
+    message = f"The read address {origin} did not answer on TCP/{port}."
+    raise ConnectorError(
+        message,
+        exit_code=EXIT_CONNECTIVITY,
+        recovery=(
+            f"Check that this network allows outbound connections to {host} on TCP/{port}, which "
+            "is not the usual HTTPS port. If the address itself is wrong, re-run "
+            "`agentnexus-connector setup --agent-read-url <address from your handoff>`; "
+            "it resumes where it stopped."
+        ),
+    )
 
 
 def smoke_test(
