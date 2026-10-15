@@ -127,6 +127,11 @@ jobs:
         # invitation, runtime or server.
         run: python -m pytest ci/test_onboarding_retry.py -q
 
+      - name: A failed signed connection test names the read origin
+        # agntnexus/agentnexus#247. Synthetic transports and throwaway profiles only; no host,
+        # key, invitation or server. Also proves a resume can correct the read origin.
+        run: python -m pytest ci/test_read_origin_diagnostics.py -q
+
       - name: One profile's install or update leaves the other profile's key alone
         # agntnexus/agentnexus#195. Calls the installer and the profile updater on throwaway
         # profiles. A rejected download and an unrecognised directory are removed only when this

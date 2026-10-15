@@ -55,6 +55,8 @@ from agentnexus_sdk import autocheck, migration, soul, soul_scan, transport, upd
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions
 from agentnexus_sdk.errors import (
     AgentNexusError,
+    TimeoutOutcomeUnknownError,
+    TransportError,
 )
 from agentnexus_sdk.onboarding import (
     ATTESTATION_STATEMENT_V1,
@@ -1217,6 +1219,7 @@ def check_connectivity(endpoints: Endpoints, environment: Environment) -> None:
 
     if environment.probe(host, port):
         environment.stdout.write(f"  Reached {host} on TCP/{port}\n")
+        _check_read_host(endpoints, environment)
         return
 
     if is_tailnet_host(host):
@@ -1242,6 +1245,42 @@ def check_connectivity(endpoints: Endpoints, environment: Environment) -> None:
     raise ConnectorError(message, exit_code=EXIT_CONNECTIVITY, recovery=hint)
 
 
+def _check_read_host(endpoints: Endpoints, environment: Environment) -> None:
+    """Probe the signed-read host on its own port, when the deployment serves reads separately.
+
+    The write host being reachable says nothing about the read host: they are different names,
+    and the read edge listens on a port a restrictive network may not allow out. Without this the
+    first sign of a dead read host was the signed test, after the invitation was spent. A TCP
+    connection cannot show that the certificate verifies, so this reports reachability only.
+    """
+    origin = endpoints.agent_read_url
+    if not origin:
+        return
+    parsed = urlsplit(origin)
+    host = parsed.hostname or ""
+    if not host:
+        message = f"The read address {origin!r} has no host."
+        raise ConnectorError(message, exit_code=EXIT_CONNECTIVITY)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if port in FORBIDDEN_TCP_PORTS:
+        message = f"Refusing to use TCP/{port}; the connector never needs it."
+        raise ConnectorError(message, exit_code=EXIT_CONNECTIVITY)
+    if environment.probe(host, port):
+        environment.stdout.write(f"  Reached the read host {host} on TCP/{port}\n")
+        return
+    message = f"The read address {origin} did not answer on TCP/{port}."
+    raise ConnectorError(
+        message,
+        exit_code=EXIT_CONNECTIVITY,
+        recovery=(
+            f"Check that this network allows outbound connections to {host} on TCP/{port}, which "
+            "is not the usual HTTPS port. If the address itself is wrong, re-run "
+            "`agentnexus-connector setup --agent-read-url <address from your handoff>`; "
+            "it resumes where it stopped."
+        ),
+    )
+
+
 def smoke_test(
     *, identity: Identity, signer: Ed25519Signer, endpoints: Endpoints, environment: Environment
 ) -> None:
@@ -1265,14 +1304,27 @@ def smoke_test(
             )
     except AgentNexusError as error:
         message = f"The signed connection test failed: {error}"
-        raise ConnectorError(
-            message,
-            exit_code=EXIT_CONNECTIVITY,
-            recovery=(
-                "Your identity and Hermes configuration are in place. Re-run "
-                "`agentnexus-connector setup` once connectivity is restored; it resumes from here."
-            ),
-        ) from error
+        recovery = (
+            "Your identity and Hermes configuration are in place. Re-run "
+            "`agentnexus-connector setup` once connectivity is restored; it resumes from here."
+        )
+        if isinstance(error, TransportError | TimeoutOutcomeUnknownError):
+            origin = endpoints.agent_read_url or endpoints.agent_api_url
+            message += f" The origin that was tried is {origin}."
+            if isinstance(error, TransportError):
+                # The SDK redacts the underlying cause, so a certificate error cannot be told
+                # apart from any other connection failure here. Say what is likely and how to
+                # correct the address; never how to skip verification.
+                message += (
+                    " A TLS certificate verification failure is a likely cause, for example"
+                    " when that address reaches a different service than the AgentNexus read edge."
+                )
+            recovery += (
+                " If that is not the read address in your handoff, correct it with "
+                "`agentnexus-connector setup --agent-read-url <address from your handoff>`; "
+                "the invitation is not asked for again."
+            )
+        raise ConnectorError(message, exit_code=EXIT_CONNECTIVITY, recovery=recovery) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -2812,6 +2864,8 @@ def run_profile_status(install_root: Path, profile: str, environment: Environmen
         )
     if record is not None and record.endpoints.get("agent_api_url"):
         out.write(f"  agent API:   {record.endpoints['agent_api_url']}\n")
+    if record is not None and record.endpoints.get("agent_read_url"):
+        out.write(f"  read API:    {record.endpoints['agent_read_url']}\n")
     if record is not None:
         # Only for a profile that has actually been migrated, so an installation that never was
         # prints exactly what it printed before this existed. A declaration this build cannot read
@@ -3712,6 +3766,11 @@ def run_endpoint_show(install_root: Path, profile: str, environment: Environment
     out.write(f"Profile {profile}\n")
     out.write(f"  transport:   {current.mode}\n")
     out.write(f"  agent API:   {current.agent_api_url or '-'}\n")
+    read_url = record.endpoints.get("agent_read_url")
+    if read_url:
+        # Printed exactly as stored, port included: the portless origin is a different listener,
+        # and this is the one place a profile's read address can be seen without opening its file.
+        out.write(f"  read API:    {read_url}\n")
     if not current.declared:
         out.write("               (never migrated; this is the address setup was given)\n")
     if current.changed_at:
