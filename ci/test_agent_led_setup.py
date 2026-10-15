@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import io
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -825,3 +827,55 @@ def test_a_refused_target_names_its_reason_and_the_matching_next_step(
     mismatch_recovery = seen["identity_handle_mismatch"].recovery or ""
     assert "--handle" in mismatch_recovery
     assert "profile status" in mismatch_recovery
+
+
+def _refusal_codes_the_planner_can_emit() -> set[str]:
+    """Read the codes from the planner's own source, so a new one cannot slip in unmapped."""
+    source = inspect.getsource(connector_module._target_profile_for_adapter)
+    codes = set(re.findall(r'"disposition": "refused", "reason": "(\w+)"', source))
+    plan_source = inspect.getsource(connector_module._target_profile_plan)
+    codes |= set(re.findall(r'"disposition": "refused",\s+"reason": "(\w+)"', plan_source))
+    return codes
+
+
+def test_the_planner_still_emits_the_codes_this_test_enumerates() -> None:
+    """Guards the guard: an empty or shrunken set would make the next test vacuous."""
+    codes = _refusal_codes_the_planner_can_emit()
+    assert {
+        "identity_handle_mismatch",
+        "target_profile_active",
+        "target_bound_to_another_identity",
+        "runtime_unavailable",
+        "no_runtime_selected",
+    } <= codes
+    assert len(codes) >= 10
+
+
+def test_every_refusal_code_has_a_next_step_of_its_own() -> None:
+    """A code that falls through to the default tells the user nothing the code did not."""
+    recoveries: dict[str, str] = {}
+    for code in sorted(_refusal_codes_the_planner_can_emit()):
+        error = connector_module._target_profile_refusal(code)
+        assert code in str(error), code
+        assert "Nothing was changed" in (error.recovery or ""), code
+        recoveries[code] = error.recovery or ""
+    default = connector_module._target_profile_refusal("a_code_nobody_mapped").recovery
+    assert default not in recoveries.values(), "a planner code reaches only the default step"
+    assert len(set(recoveries.values())) == len(recoveries), "two causes share one next step"
+
+
+def test_a_value_that_is_not_a_code_is_never_echoed() -> None:
+    """The message is built from planner codes only; anything else is replaced, not printed."""
+    for reason in (None, "", 7, "/home/someone/.hermes/config.yaml", "Has Spaces"):
+        error = connector_module._target_profile_refusal(reason)
+        text = str(error) + " " + (error.recovery or "")
+        assert "target_profile_refused" in str(error), reason
+        assert "/home" not in text, reason
+        assert "Spaces" not in text, reason
+
+
+def test_the_default_step_makes_no_claim_about_the_cause() -> None:
+    """An unmapped code is not a "conflict"; saying so repeats the mistake #248 reports."""
+    error = connector_module._target_profile_refusal("a_code_nobody_mapped")
+    assert "a_code_nobody_mapped" in str(error)
+    assert "conflict" not in (error.recovery or "").lower()

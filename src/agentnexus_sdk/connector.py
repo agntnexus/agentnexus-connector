@@ -1640,19 +1640,44 @@ _REFUSAL_NEXT_STEPS: dict[str, str] = {
         "That runtime profile already holds a different AgentNexus identity. Use a profile name "
         "of its own for this agent."
     ),
+    "runtime_unavailable": (
+        "The selected runtime was not found on this machine. Install it, or choose the runtime "
+        "you actually use with --runtime, then run the read-only setup plan again."
+    ),
+    "runtime_inspection_unavailable": (
+        "The runtime profile could not be inspected. Check that the runtime starts and its "
+        "profile is readable by this user, then run the read-only setup plan again."
+    ),
+    "runtime_inspection_incomplete": (
+        "The runtime answered, but not enough to tell whether its profile exists. Update or "
+        "repair the runtime, then run the read-only setup plan again."
+    ),
+    "target_profile_not_creatable": (
+        "The runtime profile does not exist and cannot be created from here. Create it with the "
+        "runtime's own tooling, or choose a profile name that already exists."
+    ),
+    "no_runtime_selected": ("No runtime was selected. Pass --runtime hermes, openclaw or both."),
     "target_profile_unsafe": (
         "The runtime profile is not safe to change. Resolve what the read-only setup plan "
         "reports for it, then run the plan again."
     ),
 }
 _REFUSAL_NEXT_STEP_DEFAULT = (
-    "Resolve the profile conflict named above, then review the read-only setup plan again."
+    "Run the read-only setup plan again and resolve what it reports for this profile."
 )
+#: A reason is printed only if it looks like one of the planner's own codes. The codes are
+#: constants today; this keeps that true if a future code path hands over something else, such as
+#: a message that carries a path.
+_REASON_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
 def _target_profile_refusal(reason: object) -> ConnectorError:
     """Explain a refused target profile with the reason the planner computed."""
-    code = reason if isinstance(reason, str) and reason else "target_profile_refused"
+    code = (
+        reason
+        if isinstance(reason, str) and _REASON_CODE.fullmatch(reason)
+        else "target_profile_refused"
+    )
     return ConnectorError(
         f"The selected target profile was refused ({code}).",
         exit_code=EXIT_USAGE,
