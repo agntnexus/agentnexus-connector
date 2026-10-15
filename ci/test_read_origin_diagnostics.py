@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from typing import Any
 
 import httpx2 as httpx
 import pytest
-from test_onboarding_retry import GOOD_INVITATION, Setup
+from test_onboarding_retry import GOOD_INVITATION, Setup, StandInRuntime
 
 from agentnexus_sdk import connector
 from agentnexus_sdk.signing import generate_key_pair
@@ -236,6 +237,36 @@ class TestAnAlreadyRegisteredProfileTakesACorrectedReadOrigin:
         assert setup.paths.private_key.read_bytes() == key
         assert self._remembered_read_origin(setup) == READ_ORIGIN
         assert GOOD_INVITATION not in setup.stdout.getvalue() + setup.stderr.getvalue()
+
+    def test_the_runtime_entry_is_registered_with_the_corrected_origin_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Characterisation: the bridge reads the runtime entry, not profile.json, so it matters.
+
+        An agent whose profile record says `:8443` but whose runtime entry still says the
+        portless origin would keep failing, so the resume must hand the runtime the new value.
+        """
+        setup = Setup(tmp_path / "installation", monkeypatch)
+        setup.invitation = GOOD_INVITATION
+        registered: list[dict[str, str]] = []
+
+        class RecordingRuntime(StandInRuntime):
+            def configure(self, spec: Any, **kwargs: Any) -> Any:
+                registered.append(dict(spec.environment))
+                return super().configure(spec, **kwargs)
+
+        monkeypatch.setattr(
+            connector, "select_adapters", lambda *_args, **_kwargs: [RecordingRuntime()]
+        )
+
+        assert self._run(setup, PORTLESS_READ_ORIGIN) == 0
+        assert self._run(setup, READ_ORIGIN) == 0
+
+        assert [entry["AGENTNEXUS_AGENT_READ_URL"] for entry in registered] == [
+            PORTLESS_READ_ORIGIN,
+            READ_ORIGIN,
+        ]
+        assert len(setup.prompts) == 1
 
     @staticmethod
     def _remembered_read_origin(setup: Setup) -> str | None:
