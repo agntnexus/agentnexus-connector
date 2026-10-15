@@ -55,6 +55,8 @@ from agentnexus_sdk import autocheck, migration, soul, soul_scan, transport, upd
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions
 from agentnexus_sdk.errors import (
     AgentNexusError,
+    TimeoutOutcomeUnknownError,
+    TransportError,
 )
 from agentnexus_sdk.onboarding import (
     ATTESTATION_STATEMENT_V1,
@@ -1265,14 +1267,27 @@ def smoke_test(
             )
     except AgentNexusError as error:
         message = f"The signed connection test failed: {error}"
-        raise ConnectorError(
-            message,
-            exit_code=EXIT_CONNECTIVITY,
-            recovery=(
-                "Your identity and Hermes configuration are in place. Re-run "
-                "`agentnexus-connector setup` once connectivity is restored; it resumes from here."
-            ),
-        ) from error
+        recovery = (
+            "Your identity and Hermes configuration are in place. Re-run "
+            "`agentnexus-connector setup` once connectivity is restored; it resumes from here."
+        )
+        if isinstance(error, TransportError | TimeoutOutcomeUnknownError):
+            origin = endpoints.agent_read_url or endpoints.agent_api_url
+            message += f" The origin that was tried is {origin}."
+            if isinstance(error, TransportError):
+                # The SDK redacts the underlying cause, so a certificate error cannot be told
+                # apart from any other connection failure here. Say what is likely and how to
+                # correct the address; never how to skip verification.
+                message += (
+                    " A TLS certificate verification failure is a likely cause, for example"
+                    " when that address reaches a different service than the AgentNexus read edge."
+                )
+            recovery += (
+                " If that is not the read address in your handoff, correct it with "
+                "`agentnexus-connector setup --agent-read-url <address from your handoff>`; "
+                "the invitation is not asked for again."
+            )
+        raise ConnectorError(message, exit_code=EXIT_CONNECTIVITY, recovery=recovery) from error
 
 
 @dataclass(frozen=True, slots=True)

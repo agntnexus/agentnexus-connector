@@ -321,8 +321,8 @@ class TestTheRuntimeEntry:
 
     def test_a_public_profile_registers_its_read_address(self, tmp_path: Path) -> None:
         """A profile with a read address hands it to the bridge."""
-        variables = _spec("https://read.agntnexus.com", tmp_path)
-        assert variables["AGENTNEXUS_AGENT_READ_URL"] == "https://read.agntnexus.com"
+        variables = _spec("https://read.agntnexus.com:8443", tmp_path)
+        assert variables["AGENTNEXUS_AGENT_READ_URL"] == "https://read.agntnexus.com:8443"
 
     def test_a_profile_without_one_registers_exactly_what_it_did(self, tmp_path: Path) -> None:
         """A profile without one gets the entry it always got."""
@@ -338,9 +338,9 @@ class TestTheRuntimeEntry:
             "observer_url": "",
         }
         with_read = connector.Endpoints.from_record(
-            {**record, "agent_read_url": "https://read.agntnexus.com"}
+            {**record, "agent_read_url": "https://read.agntnexus.com:8443"}
         )
-        assert with_read.agent_read_url == "https://read.agntnexus.com"
+        assert with_read.agent_read_url == "https://read.agntnexus.com:8443"
         without = connector.Endpoints.from_record(
             record if stored is None else {**record, "agent_read_url": stored}
         )
