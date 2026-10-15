@@ -336,3 +336,71 @@ class TestThePreflightChecksTheReadHostToo:
         """The refusal that protects the write host protects the read host as well."""
         with pytest.raises(connector.ConnectorError, match="Refusing to use TCP/22"):
             self._check("https://read.example.org:22", answering={("agent.example.org", 443)})
+
+
+class TestAProfileShowsWhereItReadsFrom:
+    """The read address is the one value a stuck applicant could not see (follow-up to #247).
+
+    Neither `profile status` nor `profile endpoint show` printed it, so telling a portless
+    profile from a corrected one meant opening `profile.json` by hand.
+    """
+
+    @staticmethod
+    def _profile(root: Path, *, read: str | None) -> None:
+        paths = connector.Paths.for_profile(root, "sampleagent")
+        paths.root.mkdir(parents=True)
+        endpoints = {"agent_api_url": WRITE_ORIGIN}
+        if read is not None:
+            endpoints["agent_read_url"] = read
+        connector.ProfileRecord(name="sampleagent", endpoints=endpoints).save(paths.profile_record)
+
+    @staticmethod
+    def _run(root: Path, *words: str) -> str:
+        stdout = io.StringIO()
+        code = connector.main(
+            ["profile", *words, "--install-root", str(root), "--profile", "sampleagent"],
+            environment=connector.Environment(
+                stdout=stdout,
+                stderr=io.StringIO(),
+                prompt=lambda _text: pytest.fail("a read-only command must never prompt"),
+                which=lambda _name: None,
+                tcp_probe=lambda *_args: pytest.fail("a read-only command must not open a socket"),
+            ),
+        )
+        assert code == 0
+        return stdout.getvalue()
+
+    @pytest.mark.parametrize("command", [("status",), ("endpoint", "show")])
+    def test_the_read_address_is_printed_with_its_port(
+        self, tmp_path: Path, command: tuple[str, ...]
+    ) -> None:
+        """An exact port is the whole point: `:8443` and the portless origin are different."""
+        self._profile(tmp_path, read=READ_ORIGIN)
+        assert "read API:" in self._run(tmp_path, *command)
+        assert f"read API:    {READ_ORIGIN}" in self._run(tmp_path, *command)
+
+    @pytest.mark.parametrize("command", [("status",), ("endpoint", "show")])
+    def test_a_portless_read_address_is_shown_as_it_is_stored(
+        self, tmp_path: Path, command: tuple[str, ...]
+    ) -> None:
+        """The command reports; it neither fixes nor judges, so the stale value is visible."""
+        self._profile(tmp_path, read=PORTLESS_READ_ORIGIN)
+        output = self._run(tmp_path, *command)
+        assert f"read API:    {PORTLESS_READ_ORIGIN}\n" in output
+
+    @pytest.mark.parametrize("command", [("status",), ("endpoint", "show")])
+    def test_a_profile_without_a_read_address_prints_exactly_what_it_did(
+        self, tmp_path: Path, command: tuple[str, ...]
+    ) -> None:
+        """A Tailnet profile has one address; it gains no line and no placeholder."""
+        self._profile(tmp_path, read=None)
+        assert "read API" not in self._run(tmp_path, *command)
+
+    @pytest.mark.parametrize("command", [("status",), ("endpoint", "show")])
+    def test_the_command_writes_nothing(self, tmp_path: Path, command: tuple[str, ...]) -> None:
+        """Looking at a profile does not change its record."""
+        self._profile(tmp_path, read=READ_ORIGIN)
+        record = connector.Paths.for_profile(tmp_path, "sampleagent").profile_record
+        before = record.read_bytes()
+        self._run(tmp_path, *command)
+        assert record.read_bytes() == before

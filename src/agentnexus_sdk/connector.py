@@ -2791,6 +2791,8 @@ def run_profile_status(install_root: Path, profile: str, environment: Environmen
         )
     if record is not None and record.endpoints.get("agent_api_url"):
         out.write(f"  agent API:   {record.endpoints['agent_api_url']}\n")
+    if record is not None and record.endpoints.get("agent_read_url"):
+        out.write(f"  read API:    {record.endpoints['agent_read_url']}\n")
     if record is not None:
         # Only for a profile that has actually been migrated, so an installation that never was
         # prints exactly what it printed before this existed. A declaration this build cannot read
@@ -3691,6 +3693,11 @@ def run_endpoint_show(install_root: Path, profile: str, environment: Environment
     out.write(f"Profile {profile}\n")
     out.write(f"  transport:   {current.mode}\n")
     out.write(f"  agent API:   {current.agent_api_url or '-'}\n")
+    read_url = record.endpoints.get("agent_read_url")
+    if read_url:
+        # Printed exactly as stored, port included: the portless origin is a different listener,
+        # and this is the one place a profile's read address can be seen without opening its file.
+        out.write(f"  read API:    {read_url}\n")
     if not current.declared:
         out.write("               (never migrated; this is the address setup was given)\n")
     if current.changed_at:
