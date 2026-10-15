@@ -1607,6 +1607,62 @@ def _refuse_a_profile_that_holds_another_identity(
     )
 
 
+def normalise_expected_handle(handle: str | None) -> str | None:
+    """Drop one leading `@`, which is how a handle is written, and change nothing else.
+
+    The identity is stored and reported without it, so `@name` and `name` are the same handle.
+    Exactly one character is forgiven: no case folding, no trimming, no second `@`. Everything
+    else is compared as before, so a different handle is still a different identity. A value that
+    reduces to nothing matches no registered handle and is refused where a mismatch is refused.
+    """
+    if handle is not None and handle.startswith("@"):
+        return handle[1:]
+    return handle
+
+
+#: What to do next, per reason code the planner can refuse a target profile with. The codes are
+#: path-free by construction (see `_target_profile_for_adapter`), so they are safe to print.
+_REFUSAL_NEXT_STEPS: dict[str, str] = {
+    "identity_handle_mismatch": (
+        "The --handle value is not the handle this profile is registered as. Run "
+        "`agentnexus-connector profile status --profile <profile>` to see which handle it holds, "
+        "then run setup again with that --handle."
+    ),
+    "target_profile_active": (
+        "The runtime profile is in use by a running process. Stop whatever is using that profile "
+        "and nothing else, then run the read-only setup plan again."
+    ),
+    "target_activity_unverified": (
+        "Whether the runtime profile is in use could not be established. Check that the runtime "
+        "is installed and answers, then run the read-only setup plan again."
+    ),
+    "target_bound_to_another_identity": (
+        "That runtime profile already holds a different AgentNexus identity. Use a profile name "
+        "of its own for this agent."
+    ),
+    "target_profile_unsafe": (
+        "The runtime profile is not safe to change. Resolve what the read-only setup plan "
+        "reports for it, then run the plan again."
+    ),
+}
+_REFUSAL_NEXT_STEP_DEFAULT = (
+    "Resolve the profile conflict named above, then review the read-only setup plan again."
+)
+
+
+def _target_profile_refusal(reason: object) -> ConnectorError:
+    """Explain a refused target profile with the reason the planner computed."""
+    code = reason if isinstance(reason, str) and reason else "target_profile_refused"
+    return ConnectorError(
+        f"The selected target profile was refused ({code}).",
+        exit_code=EXIT_USAGE,
+        recovery=(
+            "Nothing was changed and no invitation was used. "
+            f"{_REFUSAL_NEXT_STEPS.get(code, _REFUSAL_NEXT_STEP_DEFAULT)}"
+        ),
+    )
+
+
 def run_setup(
     *,
     paths: Paths,
@@ -1626,6 +1682,7 @@ def run_setup(
     out.write("AgentNexus Connector\n")
     out.write(f"  Profile: {paths.profile} ({paths.isolation} runtime context)\n")
 
+    expected_handle = normalise_expected_handle(expected_handle)
     state = State.load(paths.state_file)
 
     if state.stage == Stage.REDEMPTION_ATTEMPTED:
@@ -1656,16 +1713,7 @@ def run_setup(
         adapters=adapters,
     )
     if target_profile_plan["disposition"] == "refused":
-        raise ConnectorError(
-            "The selected target profile is active, unsafe, conflicting, or could not be "
-            "inspected.",
-            exit_code=EXIT_USAGE,
-            recovery=(
-                "Nothing was changed and no invitation was used. Stop the target runtime or "
-                "resolve "
-                "the profile conflict, then review the read-only setup plan again."
-            ),
-        )
+        raise _target_profile_refusal(target_profile_plan.get("reason"))
 
     if state.stage == Stage.COMPLETE:
         out.write("\nSetup already completed on this machine. Re-checking the connection.\n")
@@ -4416,6 +4464,7 @@ def build_setup_plan(
     environment: Environment,
 ) -> dict[str, Any]:
     """Inspect one bounded setup without writing or exposing local paths or credentials."""
+    expected_handle = normalise_expected_handle(expected_handle) or ""
     selected_profile = validate_profile_name(profile)
     if runtime not in {"hermes", "openclaw", "both"}:
         raise ConnectorError("The runtime is not supported.", exit_code=EXIT_USAGE)

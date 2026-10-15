@@ -647,3 +647,181 @@ def test_matching_connector_state_does_not_override_an_active_target_refusal(
     assert plan["target_profile"]["reason"] == "target_profile_active"
     assert plan["invitation_input"] == "not_requested"
     assert plan["changes"] == []
+
+
+# --- A handle written with its usual leading `@`, and why a target is refused (#248) ---
+
+_REGISTRATION = "mcp_servers:\n  agentnexus-scout01:\n    env:\n      AGENTNEXUS_AGENT_ID: {id}\n"
+
+
+def _registered_profile(
+    tmp_path: Path, *, active: str | None = "operator-profile", registered_id: str = "agent-1"
+) -> tuple[Paths, Environment]:
+    """Build a half-finished registration whose key file is deliberately absent.
+
+    Reaching the key read therefore proves every handle and target-profile check passed.
+    """
+    paths = Paths.for_profile(tmp_path, "scout01")
+    paths.root.mkdir(parents=True)
+    State(
+        stage=connector_module.Stage.REDEEMED,
+        agent_id="agent-1",
+        key_id="key-1",
+        handle="scout-01",
+        private_key_path=str(paths.root / "missing-key.pem"),
+    ).save(paths.state_file)
+    environment, probe = _hermes_environment(
+        tmp_path, profiles=("operator-profile", "scout01"), active=active
+    )
+    target_config = probe.home / "profiles" / "scout01" / "config.yaml"
+    target_config.parent.mkdir(parents=True)
+    target_config.write_text(_REGISTRATION.format(id=registered_id), encoding="utf-8")
+    return paths, environment
+
+
+def _resume(paths: Paths, environment: Environment, handle: str | None) -> None:
+    adapter = HermesAdapter(
+        which=environment.which, runner=environment.run, context=paths.runtime_context()
+    )
+    run_setup(
+        paths=paths,
+        endpoints=Endpoints(
+            onboarding_base_url="https://onboarding.example",
+            agent_api_url="https://agent.example",
+        ),
+        environment=environment,
+        runtime="hermes",
+        expected_handle=handle,
+        adapters=[adapter],
+        soul_mode="skip",
+    )
+
+
+def _no_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(connector_module, "preflight", lambda *_: [])
+    monkeypatch.setattr(
+        connector_module,
+        "read_invitation",
+        lambda *_: pytest.fail("a resume or a refusal must never ask for an invitation"),
+    )
+
+
+def _plan(tmp_path: Path, handle: str) -> dict:
+    paths = Paths.for_profile(tmp_path, "scout01")
+    paths.root.mkdir(parents=True)
+    State(agent_id="agent-1", key_id="key-1", handle="scout-01").save(paths.state_file)
+    environment, _ = _hermes_environment(
+        tmp_path, profiles=("operator-profile", "scout01"), active="operator-profile"
+    )
+    return build_setup_plan(
+        install_root=tmp_path,
+        profile="scout01",
+        expected_handle=handle,
+        runtime="hermes",
+        setup_scope="forum",
+        environment=environment,
+    )
+
+
+@pytest.mark.parametrize("spelling", ["scout-01", "@scout-01"])
+def test_a_leading_at_sign_names_the_same_registered_handle_in_the_plan(
+    tmp_path: Path, spelling: str
+) -> None:
+    """`@name` is how a handle is written; the registered identity is stored as `name`."""
+    plan = _plan(tmp_path, spelling)
+
+    assert plan["identity"] == "resume"
+    assert plan["target_profile"]["disposition"] == "resume"
+    assert plan["invitation_input"] == "not_needed"
+    assert plan["expected_handle"] == "scout-01"
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "somebody-else",
+        "@somebody-else",
+        "@@scout-01",
+        "",
+        "@",
+        " scout-01",
+        "scout-01 ",
+        "@ scout-01",
+        "@scout-01 ",
+        "SCOUT-01",
+        "@SCOUT-01",
+    ],
+)
+def test_only_one_leading_at_sign_is_forgiven_and_every_other_handle_is_refused(
+    tmp_path: Path, spelling: str
+) -> None:
+    """The identity-binding guard is loosened by exactly one character and nothing else."""
+    plan = _plan(tmp_path, spelling)
+
+    assert plan["identity"] == "refused_handle_mismatch"
+    assert plan["target_profile"]["disposition"] == "refused"
+    assert plan["target_profile"]["reason"] == "identity_handle_mismatch"
+    assert plan["changes"] == []
+
+
+@pytest.mark.parametrize("spelling", ["scout-01", "@scout-01"])
+def test_setup_accepts_either_spelling_of_the_registered_handle(
+    tmp_path: Path, spelling: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resume goes past the handle checks for either spelling and never asks for an invitation."""
+    paths, environment = _registered_profile(tmp_path)
+    _no_prompt(monkeypatch)
+
+    with pytest.raises(ConnectorError, match="private-key file") as raised:
+        _resume(paths, environment, spelling)
+
+    assert raised.value.exit_code == connector_module.EXIT_KEY
+
+
+def test_a_different_handle_is_refused_before_any_key_or_invitation_is_touched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuinely different handle still stops setup first, and says nothing was changed."""
+    paths, environment = _registered_profile(tmp_path)
+    _no_prompt(monkeypatch)
+
+    with pytest.raises(ConnectorError, match="target profile") as raised:
+        _resume(paths, environment, "@somebody-else")
+
+    assert "Nothing was changed" in (raised.value.recovery or "")
+    assert not (paths.root / "keys").exists()
+
+
+def test_a_refused_target_names_its_reason_and_the_matching_next_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The planner already knows why it refused; the message must say so, once per cause."""
+    _no_prompt(monkeypatch)
+    seen: dict[str, ConnectorError] = {}
+
+    paths, environment = _registered_profile(tmp_path / "mismatch")
+    with pytest.raises(ConnectorError) as mismatch:
+        _resume(paths, environment, "somebody-else")
+    seen["identity_handle_mismatch"] = mismatch.value
+
+    paths, environment = _registered_profile(tmp_path / "active", active="scout01")
+    with pytest.raises(ConnectorError) as active:
+        _resume(paths, environment, "scout-01")
+    seen["target_profile_active"] = active.value
+
+    paths, environment = _registered_profile(tmp_path / "bound", registered_id="agent-2")
+    with pytest.raises(ConnectorError) as bound:
+        _resume(paths, environment, "scout-01")
+    seen["target_bound_to_another_identity"] = bound.value
+
+    next_steps = set()
+    for reason, error in seen.items():
+        text = str(error) + " " + (error.recovery or "")
+        assert reason in str(error), reason
+        assert "Nothing was changed" in (error.recovery or ""), reason
+        assert str(tmp_path) not in text, reason
+        next_steps.add(error.recovery)
+    assert len(next_steps) == 3, "each cause needs its own next step"
+    mismatch_recovery = seen["identity_handle_mismatch"].recovery or ""
+    assert "--handle" in mismatch_recovery
+    assert "profile status" in mismatch_recovery
