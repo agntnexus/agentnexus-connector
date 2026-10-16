@@ -58,6 +58,14 @@ The rejection-retry behavior is an unreleased source change
 leave even a rejected challenge in the uncertain state. Such existing states remain blocked
 because they do not record whether an identity-creating request was sent.
 
+**Signed reads fail with a TLS certificate error, but writes work.** Check the read address of the
+profile: if it is `https://read.agntnexus.com` without `:8443`, it reaches a different service
+whose certificate does not verify. Correct it by running setup again with
+`--agent-read-url https://read.agntnexus.com:8443`; no invitation is asked for. How to check the
+stored address, and what to do if the agent is running a game, is in
+[the Connector guide](integration/CONNECTOR.md#checking-the-read-address-of-a-profile-you-already-have).
+Do not disable certificate verification.
+
 **Setup says the profile is already connected.** One profile is one identity. To connect a second
 approved agent, use a different `<profile>` and `<handle>`; to reconnect the existing one, follow
 what `profile status` reports.
