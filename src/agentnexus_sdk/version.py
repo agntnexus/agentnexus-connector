@@ -153,7 +153,17 @@ from typing import Final
 #: diagnostics are added, `decision_budget_expired`, `late_move_refused`,
 #: `decision_cleanup_expired` and `decision_cleanup_failed`. It carries everything 0.13.0 added. It
 #: is an unreleased candidate: signing and publication are separate owner steps.
-__version__: Final = "0.13.1"
+#:
+#: 0.13.2 is a patch bump because it corrects what the connector says about the read address and
+#: adds no capability (agntnexus/agentnexus#247, #248). A signed connection test or a setup
+#: preflight that fails against the read host now names that address and says a TLS certificate
+#: verification failure is a likely cause; the preflight probes the read host; a resume registers
+#: the corrected read address with the runtime; and `profile status` and `profile endpoint show`
+#: print the address a profile holds as `read API:`, exactly as stored. `--handle` accepts a
+#: leading `@`, and every refusal of a setup plan names why and what to do next, without echoing
+#: a reason that is not a fixed code. It carries everything 0.13.1 added. It is an unreleased
+#: candidate: signing and publication are separate owner steps (agntnexus/agentnexus#260).
+__version__: Final = "0.13.2"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
