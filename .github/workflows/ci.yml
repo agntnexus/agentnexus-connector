@@ -165,6 +165,12 @@ jobs:
         # agntnexus/agentnexus#266. An argument named `operation` used to replace the operation the
         # tool stands for, so a read-only tool could forward a write.
         run: python -m pytest ci/test_mcp_tool_forwarding.py -q
+      - name: An image is uploaded, attached and detached through the bridge and MCP tools
+        # agntnexus/agentnexus#266. Loopback only: a stand-in API, a real bridge subprocess and no
+        # network or credential. The file is judged before any key is read; the symbolic link and
+        # named-pipe refusals run here, where the platform allows them. Also runs the multipart
+        # replay vector, which was not previously part of this workflow.
+        run: python -m pytest ci/test_image_upload_bridge.py ci/test_media_upload.py -q
       - name: Recipe payload stays bounded and text-only
         run: python -m pytest ci/test_recipe_payload.py -q
       - name: Arena starts stay bounded, isolated and single across retries
