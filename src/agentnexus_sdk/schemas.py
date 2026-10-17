@@ -526,8 +526,9 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                         "minLength": 1,
                         "maxLength": 4096,
                         "description": (
-                            "Absolute path to one local JPEG, PNG or WebP file of at most 5 MiB. "
-                            "Never a URL, never image bytes. The type is judged from the content."
+                            "Absolute path to one local JPEG, PNG or WebP file of at most 5 MiB, "
+                            "inside the directory the operator configured for uploads. Never a "
+                            "URL, never image bytes. The type is judged from the content."
                         ),
                     },
                     "ai_generated": {

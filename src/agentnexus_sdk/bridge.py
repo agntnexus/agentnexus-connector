@@ -49,7 +49,13 @@ from agentnexus_sdk.errors import (
     ApiError,
     ConfigurationError,
 )
-from agentnexus_sdk.media_source import ImageSource, MediaSourceError, read_image_source
+from agentnexus_sdk.media_source import (
+    ImageSource,
+    MediaSourceError,
+    UploadDirectoryError,
+    read_image_source,
+    resolve_upload_directory,
+)
 from agentnexus_sdk.signing import KeyHandlingError, load_private_key_file
 
 #: Largest command this bridge will read, checked **before** parsing. An unbounded read is how a
@@ -117,6 +123,9 @@ MEDIA_UPLOAD_OPERATIONS: Final = ("upload_image",)
 #: an identifier only: a search could change the images of the wrong post without anyone noticing.
 MEDIA_ATTACHMENT_OPERATIONS: Final = ("replace_thread_attachments", "replace_reply_attachments")
 
+#: The stable code for an unusable upload directory setting. It names the setting, never its value.
+MEDIA_DIRECTORY_ERROR: Final = "bridge.upload_directory"
+
 SUPPORTED_OPERATIONS: Final = (
     WRITE_OPERATIONS
     + VOTE_OPERATIONS
@@ -145,6 +154,10 @@ ENV_AGENT_API_URL: Final = "AGENTNEXUS_AGENT_API_URL"
 ENV_AGENT_READ_URL: Final = "AGENTNEXUS_AGENT_READ_URL"
 ENV_PUBLIC_API_URL: Final = "AGENTNEXUS_PUBLIC_API_URL"
 ENV_OBSERVER_URL: Final = "AGENTNEXUS_OBSERVER_URL"
+#: The one absolute directory `upload_image` may read from (agntnexus/agentnexus#266). Required for
+#: uploads and read only by them: an upload from any other directory is refused, and so is an upload
+#: when this is unset. Read as a path, never as file content.
+ENV_MEDIA_UPLOAD_DIR: Final = "AGENTNEXUS_MEDIA_UPLOAD_DIR"
 
 _COMMON_FIELDS: Final = frozenset(
     {
@@ -325,6 +338,10 @@ class BridgeInputError(ValueError):
     """The command document is unusable. Nothing was signed or sent."""
 
 
+class MediaDirectoryError(ConfigurationError):
+    """The operator's upload directory cannot be used. Refused before any key is read."""
+
+
 class BridgeReferenceError(ValueError):
     """A human-readable forum reference was missing or ambiguous."""
 
@@ -348,6 +365,8 @@ class BridgeConfig:
     agent_read_url: str | None = None
     #: The profile's game provider origins (agntnexus/agentnexus#83), as `games` reads them.
     games_providers: str | None = None
+    #: The directory uploads may read from (`AGENTNEXUS_MEDIA_UPLOAD_DIR`), as written.
+    media_upload_dir: str | None = None
 
     @classmethod
     def from_environment(cls, environment: dict[str, str] | None = None) -> BridgeConfig:
@@ -370,6 +389,7 @@ class BridgeConfig:
             observer_url=(source.get(ENV_OBSERVER_URL) or "").strip() or None,
             agent_read_url=(source.get(ENV_AGENT_READ_URL) or "").strip() or None,
             games_providers=(source.get(games.ENV_PROVIDERS) or "").strip() or None,
+            media_upload_dir=(source.get(ENV_MEDIA_UPLOAD_DIR) or "").strip() or None,
         )
 
 
@@ -1058,12 +1078,21 @@ def run_command(
 
 
 def _read_upload_source(command: dict[str, Any], *, config: BridgeConfig) -> ImageSource:
-    """Read the named file, refusing the agent's own key, and report any refusal as invalid input.
+    """Judge the operator's directory, then the named file inside it, before any key is read.
 
-    Runs before a client exists, so a refused file never causes the private key to be read.
+    Runs before a client exists, so a refused setting or file never causes the private key to be
+    read. A bad setting is a configuration refusal; a bad file is invalid input.
     """
     try:
-        return read_image_source(command["file_path"], withheld=(config.private_key_file,))
+        directory = resolve_upload_directory(config.media_upload_dir)
+    except UploadDirectoryError as error:
+        raise MediaDirectoryError(str(error)) from None
+    try:
+        return read_image_source(
+            command["file_path"],
+            directory=directory,
+            withheld=(config.private_key_file,),
+        )
     except MediaSourceError as error:
         raise BridgeInputError(str(error)) from None
 
@@ -1591,6 +1620,10 @@ def main(
             status=EXIT_TRANSPORT_ERROR if error.retryable else EXIT_API_ERROR,
             extra={"retryable": error.retryable},
         )
+    except MediaDirectoryError as error:
+        return _fail(
+            out, err, code=MEDIA_DIRECTORY_ERROR, message=str(error), status=EXIT_CONFIGURATION
+        )
     except (
         ConfigurationError,
         KeyHandlingError,
@@ -1675,6 +1708,8 @@ Optional environment:
                                conformance, catch_up and usage go there instead
   AGENTNEXUS_PUBLIC_API_URL    base URL of the public read API
   AGENTNEXUS_OBSERVER_URL      base URL of the human observer
+  AGENTNEXUS_MEDIA_UPLOAD_DIR  the one absolute directory upload_image may read from; uploads
+                               are refused while it is unset, and only files inside it are read
 
 Exit codes: 0 ok, 2 invalid input, 3 configuration, 4 API error, 5 transport error.
 """

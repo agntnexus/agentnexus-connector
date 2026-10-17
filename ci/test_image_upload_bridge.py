@@ -174,8 +174,24 @@ def key_file(tmp_path: Path) -> Path:
 def image_dir(tmp_path: Path) -> Path:
     """Return a directory whose name carries the marker that must never reach the output."""
     directory = tmp_path / MARKER
-    directory.mkdir()
+    directory.mkdir(exist_ok=True)
     return directory
+
+
+#: The operator's setting that names the one directory uploads may read from. Spelled out here
+#: rather than imported, so a missing constant in the bridge fails a test instead of the module.
+MEDIA_DIR_VARIABLE = "AGENTNEXUS_MEDIA_UPLOAD_DIR"
+
+
+@pytest.fixture(autouse=True)
+def media_upload_directory(image_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Configure the upload directory as the operator would: every test uploads from it.
+
+    A test that needs another setting changes it with `monkeypatch`, and `run_bridge_main` and the
+    round trip both read the setting from this environment.
+    """
+    monkeypatch.setenv(MEDIA_DIR_VARIABLE, str(image_dir))
+    return image_dir
 
 
 def run_bridge_main(
@@ -195,6 +211,7 @@ def run_bridge_main(
             bridge.ENV_PRIVATE_KEY_FILE: str(key_file),
             bridge.ENV_AGENT_API_URL: host.url,
             bridge.ENV_PUBLIC_API_URL: host.url,
+            MEDIA_DIR_VARIABLE: os.environ.get(MEDIA_DIR_VARIABLE, ""),
         },
     )
     return code, json.loads(out.getvalue()), out.getvalue(), err.getvalue()
@@ -480,8 +497,10 @@ class TestTheFileBoundary:
     def test_a_directory_is_refused(
         self, api_host: ApiHost, key_file: Path, image_dir: Path
     ) -> None:
-        """Only a regular file is an image; a directory is refused as one."""
-        outcome = run_bridge_main(upload_command(str(image_dir)), api_host, key_file)
+        """Only a regular file is an image; a directory inside the upload directory is refused."""
+        folder = image_dir / "a-folder"
+        folder.mkdir()
+        outcome = run_bridge_main(upload_command(str(folder)), api_host, key_file)
         assert_refused(outcome, api_host, reason="regular file")
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX named pipes only")
@@ -539,6 +558,15 @@ class TestTheFileBoundary:
         assert_refused(outcome, api_host, reason="5242880 bytes")
         assert reads == [], "an oversize file was read before it was refused"
 
+    def test_an_oversize_refusal_tells_the_model_what_to_produce_instead(
+        self, api_host: ApiHost, key_file: Path, image_dir: Path
+    ) -> None:
+        """The refusal is the instruction: a smaller image, or a JPEG at a lower quality."""
+        picture = image_dir / "large.png"
+        picture.write_bytes(PNG + bytes(MAX_BYTES - len(PNG) + 1))
+        outcome = run_bridge_main(upload_command(str(picture)), api_host, key_file)
+        assert_refused(outcome, api_host, reason=r"smaller image.*JPEG")
+
     @pytest.mark.parametrize(
         ("name", "content"),
         [
@@ -559,14 +587,183 @@ class TestTheFileBoundary:
         assert_refused(outcome, api_host, reason="JPEG, PNG or WebP")
 
     def test_the_agent_private_key_is_refused_even_when_it_looks_like_an_image(
-        self, api_host: ApiHost, tmp_path: Path
+        self, api_host: ApiHost, image_dir: Path
     ) -> None:
-        """Naming the key file is refused as the key, whatever its bytes say."""
-        key = tmp_path / "agent.key"
+        """Naming the key file is refused as the key, whatever its bytes say.
+
+        The key sits inside the upload directory on purpose: the containment check passes, and
+        only the key guard stands between the key and the upload.
+        """
+        key = image_dir / "agent.key"
         write_private_key_file(generate_key_pair().signer, key)
         key.write_bytes(PNG + b"-padded-to-look-like-an-image")
         outcome = run_bridge_main(upload_command(str(key)), api_host, key)
         assert_refused(outcome, api_host, reason="private key")
+
+
+class TestTheUploadDirectory:
+    """No upload happens without a usable directory, and no file outside it is ever read.
+
+    Each refusal is decided from the setting and the path alone. The private key is never loaded
+    for a refused upload, which the fixture below enforces the same way the file tests do.
+    """
+
+    @pytest.fixture(autouse=True)
+    def no_key_is_read_before_the_directory_is_judged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Any key load during a refusal is a failure: the directory is judged first."""
+
+        def forbidden(_path: object) -> None:
+            raise AssertionError("the private key was loaded before the directory was judged")
+
+        monkeypatch.setattr(bridge, "load_private_key_file", forbidden)
+
+    @pytest.mark.parametrize(
+        ("case", "reason"),
+        [
+            ("unset", "is not set"),
+            ("empty", "is not set"),
+            ("blank", "is not set"),
+            ("relative", "absolute path on this machine"),
+            ("dot-dot", re.escape("'.' or '..' components")),
+            ("missing", "existing directory"),
+            ("a-file", "real directory"),
+        ],
+    )
+    def test_an_unusable_setting_refuses_every_upload_with_one_stable_code(
+        self,
+        case: str,
+        reason: str,
+        api_host: ApiHost,
+        key_file: Path,
+        image_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Each unusable setting is a configuration refusal, exit 3, with its own reason."""
+        picture = image_dir / "a.png"
+        picture.write_bytes(PNG)
+        value = {
+            "unset": None,
+            "empty": "",
+            "blank": "   ",
+            "relative": "images",
+            "dot-dot": str(image_dir / ".." / image_dir.name),
+            "missing": str(image_dir / "absent"),
+            "a-file": str(picture),
+        }[case]
+        if value is None:
+            monkeypatch.delenv(MEDIA_DIR_VARIABLE)
+        else:
+            monkeypatch.setenv(MEDIA_DIR_VARIABLE, value)
+
+        code, result, out, err = run_bridge_main(upload_command(str(picture)), api_host, key_file)
+
+        assert code == bridge.EXIT_CONFIGURATION, result
+        assert result["ok"] is False
+        assert result["error_code"] == "bridge.upload_directory", result
+        assert re.search(reason, result["message"]), result["message"]
+        assert api_host.requests == [], "a refused upload still reached the host"
+        assert MARKER not in out and MARKER not in err, "the configured value leaked"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symbolic links need a POSIX host here")
+    def test_a_link_as_the_configured_directory_is_refused(
+        self,
+        api_host: ApiHost,
+        key_file: Path,
+        image_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The directory itself must be a real directory, so a link cannot redirect it."""
+        picture = image_dir / "a.png"
+        picture.write_bytes(PNG)
+        link = tmp_path / "linked-images"
+        os.symlink(image_dir, link)
+        monkeypatch.setenv(MEDIA_DIR_VARIABLE, str(link))
+        code, result, _out, _err = run_bridge_main(
+            upload_command(str(link / "a.png")), api_host, key_file
+        )
+        assert code == bridge.EXIT_CONFIGURATION, result
+        assert result["error_code"] == "bridge.upload_directory", result
+        assert re.search("real directory", result["message"]), result["message"]
+        assert api_host.requests == []
+
+
+class TestTheContainment:
+    """A file is uploaded only when it lies inside the configured directory, by path component."""
+
+    @pytest.fixture(autouse=True)
+    def no_key_is_read_before_the_containment_is_judged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Any key load during a refusal is a failure: the path is judged first."""
+
+        def forbidden(_path: object) -> None:
+            raise AssertionError("the private key was loaded before the path was judged")
+
+        monkeypatch.setattr(bridge, "load_private_key_file", forbidden)
+
+    def test_a_file_outside_the_directory_is_refused(
+        self, api_host: ApiHost, key_file: Path, tmp_path: Path
+    ) -> None:
+        """A picture elsewhere on the machine is not uploadable, however valid it is."""
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        picture = elsewhere / "a.png"
+        picture.write_bytes(PNG)
+        outcome = run_bridge_main(upload_command(str(picture)), api_host, key_file)
+        assert_refused(outcome, api_host, reason="inside the configured upload directory")
+
+    def test_a_dot_dot_escape_is_refused(
+        self, api_host: ApiHost, key_file: Path, image_dir: Path, tmp_path: Path
+    ) -> None:
+        """A path that climbs out of the directory and back down is refused as written."""
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "a.png").write_bytes(PNG)
+        escape = str(image_dir / ".." / "elsewhere" / "a.png")
+        outcome = run_bridge_main(upload_command(escape), api_host, key_file)
+        assert_refused(outcome, api_host, reason=re.escape("'.' or '..' components"))
+
+    def test_a_sibling_directory_with_the_same_leading_characters_is_refused(
+        self, api_host: ApiHost, key_file: Path, image_dir: Path, tmp_path: Path
+    ) -> None:
+        """`images2` is not inside `images`: a string prefix is not a containment check."""
+        sibling = tmp_path / (image_dir.name + "2")
+        sibling.mkdir()
+        picture = sibling / "a.png"
+        picture.write_bytes(PNG)
+        outcome = run_bridge_main(upload_command(str(picture)), api_host, key_file)
+        assert_refused(outcome, api_host, reason="inside the configured upload directory")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symbolic links need a POSIX host here")
+    def test_a_link_inside_the_directory_to_a_file_outside_is_refused(
+        self, api_host: ApiHost, key_file: Path, image_dir: Path, tmp_path: Path
+    ) -> None:
+        """A link in the directory is not the file it points at, and that file is outside."""
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        target = elsewhere / "secret.png"
+        target.write_bytes(PNG)
+        link = image_dir / "link.png"
+        os.symlink(target, link)
+        outcome = run_bridge_main(upload_command(str(link)), api_host, key_file)
+        assert_refused(outcome, api_host, reason="must not be a symbolic link")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symbolic links need a POSIX host here")
+    def test_a_symbolic_directory_inside_the_upload_directory_is_refused(
+        self, api_host: ApiHost, key_file: Path, image_dir: Path, tmp_path: Path
+    ) -> None:
+        """A linked directory inside the upload directory leads outside, so the path is refused."""
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "a.png").write_bytes(PNG)
+        os.symlink(elsewhere, image_dir / "linked")
+        outcome = run_bridge_main(
+            upload_command(str(image_dir / "linked" / "a.png")), api_host, key_file
+        )
+        assert_refused(outcome, api_host, reason="pass through a symbolic link")
 
 
 class TestAcceptedFiles:
@@ -830,6 +1027,16 @@ class TestWhatARuntimeReads:
         assert {"asset_id", "state", "attachment_count"} <= set(result)
         assert {"uploaded", "replaced"} <= set(result["operation_status"]["enum"])
 
+    def test_the_help_and_the_schema_name_the_upload_directory(self) -> None:
+        """A runtime operator reads the setting from `--help`, and the model reads the boundary."""
+        assert MEDIA_DIR_VARIABLE in bridge.HELP_TEXT
+        (rule,) = [
+            rule
+            for rule in schemas.BRIDGE_COMMAND_SCHEMA["allOf"]
+            if rule["if"]["properties"]["operation"] == {"const": "upload_image"}
+        ]
+        assert "configured" in rule["then"]["properties"]["file_path"]["description"]
+
     def test_the_help_names_the_new_operations(self) -> None:
         """`--help` lists each operation a runtime may call."""
         for operation in (
@@ -877,6 +1084,11 @@ class TestTheMcpSurface:
         assert file_path["type"] == "string"
         assert file_path["maxLength"] == 4096
         assert "absolute path" in file_path["description"].lower()
+
+    def test_the_upload_tool_is_limited_to_the_directory_the_operator_configured(self) -> None:
+        """The schema says a path must lie in the operator's directory, not anywhere."""
+        description = _tool("upload_image")["inputSchema"]["properties"]["file_path"]["description"]
+        assert "the operator configured" in description
 
     def test_the_upload_tool_says_what_it_refuses_and_when_to_use_it(self) -> None:
         """The description the model reads states the path rule and the untrusted-text rule."""

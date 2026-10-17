@@ -42,14 +42,40 @@ _MISSING: Final = "file_path does not name a readable file."
 _SYMLINK: Final = "file_path must not be a symbolic link."
 _NOT_REGULAR: Final = "file_path must name a regular file, not a directory, device or pipe."
 _EMPTY: Final = "The image file is empty."
-_TOO_LARGE: Final = f"The image file must be at most {MAX_SOURCE_BYTES} bytes."
+_TOO_LARGE: Final = (
+    f"The image file is larger than {MAX_SOURCE_BYTES} bytes. Produce a smaller image, or save it "
+    "as a JPEG at a lower quality, and upload that instead."
+)
 _CHANGED: Final = "The image file changed while it was being opened; nothing was sent."
 _WITHHELD: Final = "file_path must not name the agent's private key file."
 _NOT_AN_IMAGE: Final = "The image file must be a JPEG, PNG or WebP image, judged from its content."
+_TRAVERSAL: Final = "file_path must not contain '.' or '..' components."
+_OUTSIDE: Final = "file_path must lie inside the configured upload directory."
+_LINK_ON_PATH: Final = "file_path must not pass through a symbolic link or junction."
+
+_DIRECTORY_UNSET: Final = (
+    "AGENTNEXUS_MEDIA_UPLOAD_DIR is not set, so this runtime cannot upload images. Set it to the "
+    "one absolute directory that images may be uploaded from."
+)
+_DIRECTORY_RELATIVE: Final = "AGENTNEXUS_MEDIA_UPLOAD_DIR must be an absolute path on this machine."
+_DIRECTORY_NOT_NORMAL: Final = (
+    "AGENTNEXUS_MEDIA_UPLOAD_DIR must not contain '.' or '..' components."
+)
+_DIRECTORY_MISSING: Final = "AGENTNEXUS_MEDIA_UPLOAD_DIR does not name an existing directory."
+_DIRECTORY_NOT_REAL: Final = (
+    "AGENTNEXUS_MEDIA_UPLOAD_DIR must name a real directory, not a file or a link."
+)
+
+#: The Windows attribute that marks a reparse point, which includes a directory junction.
+_FILE_ATTRIBUTE_REPARSE_POINT: Final = 0x400
 
 
 class MediaSourceError(ValueError):
     """The named file cannot be uploaded. The message never carries the path itself."""
+
+
+class UploadDirectoryError(ValueError):
+    """The operator's upload directory is unusable. The message never carries the setting."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,8 +101,46 @@ def detect_image_mime(data: bytes) -> str | None:
     return None
 
 
-def read_image_source(path: object, *, withheld: Iterable[Path] = ()) -> ImageSource:
-    """Read and judge one image named by `path`. Nothing is read until every metadata check passes.
+def resolve_upload_directory(value: str | None) -> Path:
+    """Return the operator's upload directory, or refuse a setting that cannot be one.
+
+    The directory must be an absolute, normalised path to a real directory: not a file, not a link,
+    and not a network path. Its value is never echoed in a refusal.
+    """
+    text = (value or "").strip()
+    if not text:
+        raise UploadDirectoryError(_DIRECTORY_UNSET)
+    if any(ord(character) < 32 or ord(character) == 127 for character in text):
+        raise UploadDirectoryError(_DIRECTORY_RELATIVE)
+    if text.startswith(("\\\\", "//")):
+        raise UploadDirectoryError(_DIRECTORY_RELATIVE)
+    directory = Path(text)
+    if not directory.is_absolute():
+        raise UploadDirectoryError(_DIRECTORY_RELATIVE)
+    if _has_dot_components(text):
+        raise UploadDirectoryError(_DIRECTORY_NOT_NORMAL)
+    try:
+        status = os.lstat(directory)
+    except OSError:
+        raise UploadDirectoryError(_DIRECTORY_MISSING) from None
+    if (
+        stat.S_ISLNK(status.st_mode)
+        or _is_reparse_point(status)
+        or not stat.S_ISDIR(status.st_mode)
+    ):
+        raise UploadDirectoryError(_DIRECTORY_NOT_REAL)
+    return directory
+
+
+def read_image_source(
+    path: object, *, directory: Path, withheld: Iterable[Path] = ()
+) -> ImageSource:
+    """Read and judge one image named by `path`, which must lie inside `directory`.
+
+    Nothing is read until every check on the path and the file's metadata has passed. The path is
+    judged by its components, never by a string prefix, and a link anywhere on it is refused: the
+    walk from the root of the path to the file, and a second check on fully resolved paths, must
+    both agree that the file lies inside the directory.
 
     `withheld` lists files that must never be read as an image, such as the agent's own key. The
     comparison uses resolved paths, so a differently spelt route to the same file is refused too.
@@ -93,6 +157,11 @@ def read_image_source(path: object, *, withheld: Iterable[Path] = ()) -> ImageSo
     candidate = Path(path)
     if not candidate.is_absolute():
         raise MediaSourceError(_RELATIVE)
+    if _has_dot_components(path):
+        raise MediaSourceError(_TRAVERSAL)
+    if not _is_within(candidate, directory):
+        raise MediaSourceError(_OUTSIDE)
+    _refuse_linked_ancestors(candidate)
 
     try:
         before = os.lstat(candidate)
@@ -106,6 +175,9 @@ def read_image_source(path: object, *, withheld: Iterable[Path] = ()) -> ImageSo
         raise MediaSourceError(_EMPTY)
     if before.st_size > MAX_SOURCE_BYTES:
         raise MediaSourceError(_TOO_LARGE)
+    # The second containment check, on fully resolved paths: it must agree with the walk above.
+    if not _is_within(os.path.realpath(candidate), Path(os.path.realpath(directory))):
+        raise MediaSourceError(_OUTSIDE)
     if _is_withheld(candidate, withheld):
         raise MediaSourceError(_WITHHELD)
 
@@ -114,6 +186,43 @@ def read_image_source(path: object, *, withheld: Iterable[Path] = ()) -> ImageSo
     if mime is None:
         raise MediaSourceError(_NOT_AN_IMAGE)
     return ImageSource(data=data, mime=mime)
+
+
+def _has_dot_components(text: str) -> bool:
+    """Report whether a path, as written, contains a `.` or `..` component."""
+    return any(part in (".", "..") for part in text.replace("\\", "/").split("/"))
+
+
+def _is_within(child: str | Path, parent: Path) -> bool:
+    """Report whether `child` lies strictly inside `parent`, comparing whole path components.
+
+    A string prefix would accept `/a/images2/x.png` for `/a/images`; comparing components does not.
+    The comparison is case-insensitive on platforms whose file names are.
+    """
+    child_parts = [os.path.normcase(part) for part in Path(child).parts]
+    parent_parts = [os.path.normcase(part) for part in parent.parts]
+    return len(child_parts) > len(parent_parts) and child_parts[: len(parent_parts)] == parent_parts
+
+
+def _is_reparse_point(status: os.stat_result) -> bool:
+    """Report whether a file-system entry is a reparse point, such as a junction (Windows only)."""
+    return bool(getattr(status, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _refuse_linked_ancestors(candidate: Path) -> None:
+    """Refuse a path on which any directory, from the root down to the file, is a link.
+
+    The file itself is not included here: its own link is refused with its own message.
+    """
+    parts = candidate.parts
+    for depth in range(1, len(parts)):
+        ancestor = Path(*parts[:depth])
+        try:
+            status = os.lstat(ancestor)
+        except OSError:
+            raise MediaSourceError(_MISSING) from None
+        if stat.S_ISLNK(status.st_mode) or _is_reparse_point(status):
+            raise MediaSourceError(_LINK_ON_PATH)
 
 
 def _is_withheld(candidate: Path, withheld: Iterable[Path]) -> bool:
