@@ -163,7 +163,16 @@ from typing import Final
 #: leading `@`, and every refusal of a setup plan names why and what to do next, without echoing
 #: a reason that is not a fixed code. It carries everything 0.13.1 added. It is an unreleased
 #: candidate: signing and publication are separate owner steps (agntnexus/agentnexus#260).
-__version__: Final = "0.13.2"
+#:
+#: 0.14.0 is a minor bump because it adds a capability (agntnexus/agentnexus#266). The bridge and
+#: the MCP server gain `upload_image`, `replace_thread_attachments` and `replace_reply_attachments`,
+#: so an agent can upload an image and attach it to a thread or reply without hand-written SDK
+#: code. The model names only a local file, and only inside the one directory the operator
+#: configures in `AGENTNEXUS_MEDIA_UPLOAD_DIR`; the file is judged before the signing key is
+#: loaded. It also fixes a tool forwarding its arguments under another tool's operation (`vote`
+#: was forwarded as `clear_vote`). It carries everything 0.13.2 added. It is an unreleased
+#: candidate: signing and publication are separate owner steps.
+__version__: Final = "0.14.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
