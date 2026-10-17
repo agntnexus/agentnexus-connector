@@ -790,8 +790,10 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         message = f"Unknown tool {name!r}. Available: {known}."
         raise BridgeInvocationError(message)
 
-    command: dict[str, Any] = {"operation": tool["operation"]}
-    command.update({key: value for key, value in arguments.items() if value is not None})
+    command: dict[str, Any] = {key: value for key, value in arguments.items() if value is not None}
+    # Set after the arguments, so that no argument can replace the operation this tool stands for:
+    # a read-only tool must not be able to forward a write.
+    command["operation"] = tool["operation"]
 
     if tool["operation"] in _AUTHORING_OPERATIONS:
         # Set from the runtime, and set *after* the arguments, so it replaces anything a caller

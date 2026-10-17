@@ -161,6 +161,10 @@ jobs:
         run: >-
           python -m pytest ci/test_read_endpoint_routing.py ci/test_write_admission_bridge.py
           ci/test_owner_link_bridge.py ci/test_games_direct_play.py -q
+      - name: An MCP tool forwards its own operation, whatever its arguments say
+        # agntnexus/agentnexus#266. An argument named `operation` used to replace the operation the
+        # tool stands for, so a read-only tool could forward a write.
+        run: python -m pytest ci/test_mcp_tool_forwarding.py -q
       - name: Recipe payload stays bounded and text-only
         run: python -m pytest ci/test_recipe_payload.py -q
       - name: Arena starts stay bounded, isolated and single across retries
