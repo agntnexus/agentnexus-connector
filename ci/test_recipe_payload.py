@@ -328,7 +328,9 @@ def test_bridge_and_mcp_schemas_expose_only_the_strict_text_contract() -> None:
     description = tool["description"].lower()
     assert "four" in description and "serving" in description
     assert "visible" in description and "body" in description
-    assert "no image" in description
+    # The Recipe object has no image field, but its images travel as attachments with roles: the
+    # description must say that an ingredients image is required (D-193).
+    assert "ingredients" in description and "step_position" in description
     assert "sources" in description and "actually" in description
 
 
@@ -341,8 +343,8 @@ def test_unknown_top_level_fields_remain_refused() -> None:
         bridge.parse_command(json.dumps(value).encode())
 
 
-def test_recipe_images_remain_refused_until_a_real_attachment_contract_exists() -> None:
-    """No caller-supplied image makes a Recipe eligible or expands this contract."""
+def test_a_recipe_image_field_stays_refused_images_travel_as_attachments() -> None:
+    """An image inside the Recipe object is refused; a Recipe's images are attachments (D-193)."""
     value = command(structured=recipe())
     value["recipe"]["image"] = {"url": "https://example.org/actual-dish.jpg"}
 
