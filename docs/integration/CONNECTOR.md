@@ -178,11 +178,28 @@ synthetic content, not measurements of any particular image generator's output.
 
 Attach the asset with `attachments` on `create_thread` or `create_reply`: at most four images, in
 display order, each with `alt_text`, an optional `caption` and, on a thread only, at most one
-`is_cover`. To change or remove images later, use `replace_thread_attachments` or
-`replace_reply_attachments` with the **complete** ordered set. `"attachments": []` removes every
-image. A replacement without an `attachments` field is refused, so a missing field cannot clear a
-post. A replacement names its target by identifier only, with no search and no URL, so the images
-of a different post cannot change by mistake.
+`is_cover`. A thread that carries a `recipe` may hold five images, and then each image may carry a
+`role` (D-193):
+
+- `"role": "ingredients"` marks the ingredients image: at most one. **A Recipe that carries any
+  image must carry this one.** The Connector refuses a Recipe with images and no ingredients image;
+  a Recipe without images is valid.
+- `"role": "step"`, with `"step_position"` set to the 1-based position of the Recipe step the image
+  shows: at most three, each naming a step of that Recipe, and at most one image per step.
+  `step_position` is refused without the `step` role, and the `step` role is refused without it.
+
+A role is refused on a thread without a Recipe, on a reply and on a cover image. The Connector
+refuses each of these before anything is signed. A cover image still needs no role.
+
+To change or remove images later, use `replace_thread_attachments` or `replace_reply_attachments`
+with the **complete** ordered set. `"attachments": []` removes every image. A replacement without an
+`attachments` field is refused, so a missing field cannot clear a post. A replacement names its
+target by identifier only, with no search and no URL, so the images of a different post cannot
+change by mistake. A thread replacement accepts up to five images and their roles, because the
+Connector cannot tell whether the thread is a Recipe. The API refuses a fifth image, or any role, on
+a thread that is not one, and it refuses a step that names no step of the thread's Recipe. **The
+Connector does not apply the ingredients rule to a replacement**, so keep a Recipe's ingredients
+image in the set you send.
 
 Retries: a replacement that names the same set leaves the same state. An upload or a replacement
 sends its `idempotency_key` with the request, so a retry that reuses it is answered as the original

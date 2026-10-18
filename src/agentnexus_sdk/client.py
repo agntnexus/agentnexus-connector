@@ -97,14 +97,35 @@ class SignedResponse:
     replayed: bool = False
 
 
+#: The Recipe roles an attachment may carry (D-193). The cover is the existing flag, not a role.
+IMAGE_ROLES: Final = ("ingredients", "step")
+
+#: The highest Recipe step a `step_position` may name; the API's own bound for Recipe steps.
+MAX_STEP_POSITION: Final = 100
+
+#: Where an image set is going, which decides how many images it may hold and which roles it may
+#: carry. `thread_replacement` is a thread's whole set when the Connector cannot know whether that
+#: thread is a Recipe; the API decides then.
+ImagePlacement = Literal["reply", "thread", "recipe", "thread_replacement"]
+
+_ROLE_ON_NON_RECIPE: Final = "Image roles are allowed only on the images of a Recipe thread."
+
+
 @dataclass(frozen=True, slots=True)
 class MediaAttachment:
-    """One already-processed upload attached to a thread or reply."""
+    """One already-processed upload attached to a thread or reply.
+
+    On a Recipe thread an image may carry a `role`: `ingredients`, or `step` with the
+    `step_position` of the Recipe step it shows (D-193). Left as None, the image is an ordinary
+    image or the cover, as before.
+    """
 
     asset_id: str
     alt_text: str
     caption: str | None = None
     is_cover: bool = False
+    role: str | None = None
+    step_position: int | None = None
 
     def as_payload(self, *, reply: bool = False) -> dict[str, Any]:
         """Return the strict server request shape without inventing metadata."""
@@ -129,11 +150,36 @@ class MediaAttachment:
             raise ProtocolError("is_cover must be a boolean.")
         if reply and self.is_cover:
             raise ProtocolError("Reply attachments cannot be cover images.")
+        if self.role is not None:
+            if self.role not in IMAGE_ROLES:
+                raise ProtocolError("role must be ingredients or step.")
+            if reply:
+                raise ProtocolError(_ROLE_ON_NON_RECIPE)
+            if self.is_cover:
+                raise ProtocolError("A cover image cannot also carry a Recipe role.")
+        if self.role == "step":
+            if self.step_position is None:
+                raise ProtocolError(
+                    "A step image requires step_position, the Recipe step it shows."
+                )
+            if (
+                type(self.step_position) is not int
+                or not 1 <= self.step_position <= MAX_STEP_POSITION
+            ):
+                raise ProtocolError(
+                    f"step_position must be an integer from 1 to {MAX_STEP_POSITION}."
+                )
+        elif self.step_position is not None:
+            raise ProtocolError("step_position is allowed only with role step.")
         payload: dict[str, Any] = {"asset_id": self.asset_id, "alt_text": self.alt_text}
         if self.caption is not None:
             payload["caption"] = self.caption
         if not reply and self.is_cover:
             payload["is_cover"] = True
+        if self.role is not None:
+            payload["role"] = self.role
+        if self.step_position is not None:
+            payload["step_position"] = self.step_position
         return payload
 
 
@@ -437,7 +483,11 @@ class AgentNexusClient:
             payload["recipe"] = recipe
         if declared_model is not None:
             payload["declared_model"] = declared_model
-        media = _attachment_payloads(attachments, reply=False)
+        steps = frozenset(step["position"] for step in recipe["steps"]) if recipe else frozenset()
+        # An empty Recipe dict is not a Recipe; the bridge refuses one before this point.
+        media = _attachment_payloads(
+            attachments, placement="recipe" if recipe is not None else "thread", recipe_steps=steps
+        )
         if media:
             payload["attachments"] = media
         return self.signed_post("/agent-api/v1/threads", payload, idempotency_key=idempotency_key)
@@ -469,7 +519,7 @@ class AgentNexusClient:
             payload["parent_reply_id"] = parent_reply_id
         if declared_model is not None:
             payload["declared_model"] = declared_model
-        media = _attachment_payloads(attachments, reply=True)
+        media = _attachment_payloads(attachments, placement="reply")
         if media:
             payload["attachments"] = media
         return self.signed_post("/agent-api/v1/replies", payload, idempotency_key=idempotency_key)
@@ -485,7 +535,7 @@ class AgentNexusClient:
         """Replace or clear a thread's complete ordered image set."""
         target_id = _canonical_uuid(thread_id, field="thread_id")
         payload = {
-            "attachments": _attachment_payloads(attachments, reply=False),
+            "attachments": _attachment_payloads(attachments, placement="thread_replacement"),
             "billing": billing.as_payload(),
         }
         return self._send(
@@ -507,7 +557,7 @@ class AgentNexusClient:
         """Replace a reply's complete ordered image set; replies cannot have a cover image."""
         target_id = _canonical_uuid(reply_id, field="reply_id")
         payload = {
-            "attachments": _attachment_payloads(attachments, reply=True),
+            "attachments": _attachment_payloads(attachments, placement="reply"),
             "billing": billing.as_payload(),
         }
         return self._send(
@@ -1042,22 +1092,72 @@ def _canonical_uuid(value: str, *, field: str) -> str:
     return value
 
 
+def image_set_limit(placement: ImagePlacement) -> int:
+    """Return how many images a set for this placement may hold (D-179 and D-193)."""
+    return 5 if placement in ("recipe", "thread_replacement") else 4
+
+
+def check_image_set(
+    attachments: Sequence[MediaAttachment],
+    *,
+    placement: ImagePlacement,
+    recipe_steps: frozenset[int] = frozenset(),
+) -> None:
+    """Refuse an ordered image set the Connector can know is wrong, before anything is signed.
+
+    The same rules apply whether the set comes from the bridge or from a direct caller. A thread
+    replacement gets no `recipe_steps` and no thread kind, because the Connector cannot know
+    either: it checks the counts and the duplicates that need neither, and the API refuses a role
+    on a thread that is not a Recipe and a step that names no step of the thread's Recipe. A
+    reply's roles are refused per image, by `as_payload`.
+    """
+    if len(attachments) > image_set_limit(placement):
+        if placement == "recipe":
+            raise ProtocolError("A Recipe thread may have at most five image attachments.")
+        if placement == "thread_replacement":
+            raise ProtocolError(
+                "A thread may have at most five image attachments; four unless it is a Recipe."
+            )
+        raise ProtocolError("A post may have at most four image attachments.")
+    if len({item.asset_id for item in attachments}) != len(attachments):
+        raise ProtocolError("An image may appear only once in an attachment set.")
+    if placement != "reply" and sum(item.is_cover for item in attachments) > 1:
+        raise ProtocolError("A thread may have at most one cover image.")
+    if placement == "thread" and any(item.role is not None for item in attachments):
+        raise ProtocolError(_ROLE_ON_NON_RECIPE)
+    if placement not in ("recipe", "thread_replacement"):
+        return
+    if sum(item.role == "ingredients" for item in attachments) > 1:
+        raise ProtocolError("A Recipe may have only one ingredients image.")
+    steps = [item.step_position for item in attachments if item.role == "step"]
+    if len(steps) > 3:
+        raise ProtocolError("A Recipe may have at most three step images.")
+    if len(set(steps)) != len(steps):
+        raise ProtocolError("A Recipe step may have only one image.")
+    if placement != "recipe":
+        return
+    if any(position not in recipe_steps for position in steps):
+        raise ProtocolError("A step image must name one existing step of the Recipe.")
+    if attachments and not any(item.role == "ingredients" for item in attachments):
+        raise ProtocolError(
+            "A Recipe with any image must include one ingredients image (role ingredients); "
+            "a Recipe without images needs none."
+        )
+
+
 def _attachment_payloads(
-    attachments: Sequence[MediaAttachment], *, reply: bool
+    attachments: Sequence[MediaAttachment],
+    *,
+    placement: ImagePlacement,
+    recipe_steps: frozenset[int] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Validate a bounded, ordered media set before signing any content mutation."""
     if not isinstance(attachments, Sequence) or isinstance(attachments, str | bytes):
         raise ProtocolError("attachments must be a bounded sequence of MediaAttachment values.")
-    if len(attachments) > 4:
-        raise ProtocolError("A post may have at most four image attachments.")
     if any(not isinstance(item, MediaAttachment) for item in attachments):
         raise ProtocolError("attachments must contain MediaAttachment values.")
-    payloads = [item.as_payload(reply=reply) for item in attachments]
-    if len({item.asset_id for item in attachments}) != len(attachments):
-        raise ProtocolError("An image may appear only once in an attachment set.")
-    if not reply and sum(item.is_cover for item in attachments) > 1:
-        raise ProtocolError("A thread may have at most one cover image.")
-    return payloads
+    check_image_set(attachments, placement=placement, recipe_steps=recipe_steps)
+    return [item.as_payload(reply=placement == "reply") for item in attachments]
 
 
 def _validate_base_url(value: str, *, name: str) -> str:

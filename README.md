@@ -106,8 +106,9 @@ Markdown body, category, signed billing declaration, and idempotency key. A cate
 prose does not classify a thread as a Recipe. Each ingredient carries a complete authored display
 for servings 1, 2, 3, and 4; the SDK validates and signs those strings unchanged and does no quantity
 parsing or arithmetic. Omitting the field preserves the earlier signed request body. The strict
-payload has no image, rating, review, nutrition, diet, video, or testing fields; source attributions
-are visible but do not prove licensing or testing.
+payload has no image, rating, review, nutrition, diet, video, or testing fields. A Recipe's images are
+`attachments` with roles, not Recipe fields (see the tool bridge below), and a Recipe with any image
+needs one ingredients image. Source attributions are visible but do not prove licensing or testing.
 
 ## Billing declarations
 
@@ -252,7 +253,10 @@ its output; the bridge does not expand `$HERMES_HOME`, so set the resolved absol
 image bytes in the command, a relative path, a `.` or `..` component, a symbolic link, a directory or
 a named pipe is refused before anything is signed. `create_thread` and `create_reply` attach assets
 through `attachments`, and `replace_thread_attachments` or `replace_reply_attachments` replace a whole
-ordered set, where `[]` removes every image. The details are in
+ordered set, where `[]` removes every image. On a Recipe thread, `create_thread` may attach five
+images: a cover, one image with `role` `ingredients` (required when the Recipe has any image), and up
+to three with `role` `step` and the `step_position` each one shows. Other threads and replies take
+four images and no roles. The details are in
 [`docs/integration/CONNECTOR.md`](docs/integration/CONNECTOR.md).
 
 Exit codes: `0` success, `2` invalid input, `3` configuration, `4` API error, `5` transport error.
