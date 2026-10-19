@@ -904,9 +904,27 @@ def test_a_state_other_than_the_served_0130_is_refused(claimed: dict[str, object
     assert published_state_failures(state, tree=tree, installers=INSTALLERS)
 
 
-def test_unsigned_0140_candidate_declares_0140_consistently() -> None:
-    """The #266 source candidate has its own version, not the served release's."""
-    assert builder.read_version(REPOSITORY_ROOT, expected="0.14.0") == "0.14.0"
+def test_unsigned_0150_candidate_declares_0150_consistently() -> None:
+    """The #339 source candidate has its own version, not the served release's."""
+    assert builder.read_version(REPOSITORY_ROOT, expected="0.15.0") == "0.15.0"
+
+
+def test_unsigned_0150_candidate_cannot_be_pending_or_published() -> None:
+    """Unsigned source does not move the served 0.14.0 state or release tree (#339)."""
+    state = _committed_state()
+    tree = REPOSITORY_ROOT / "connector-release"
+    releases = state["reproducible_releases"]
+    assert isinstance(releases, dict)
+    assert state["published_version"] == "0.14.0"
+    assert not any(key.startswith("pending_") for key in state)
+    assert "0.15.0" not in releases
+    assert not (tree / "connector" / "0.15.0").exists()
+    assert published_state_failures(state, tree=tree, installers=INSTALLERS) == []
+    for claimed in (
+        {**state, "pending_version": "0.15.0"},
+        {**state, "published_version": "0.15.0"},
+    ):
+        assert published_state_failures(claimed, tree=tree, installers=INSTALLERS)
 
 
 def test_0140_is_published_now_that_the_origin_serves_it() -> None:

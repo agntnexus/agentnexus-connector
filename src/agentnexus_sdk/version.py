@@ -172,7 +172,15 @@ from typing import Final
 #: loaded. It also fixes a tool forwarding its arguments under another tool's operation (`vote`
 #: was forwarded as `clear_vote`). It carries everything 0.13.2 added. It is an unreleased
 #: candidate: signing and publication are separate owner steps.
-__version__: Final = "0.14.0"
+#:
+#: 0.15.0 is a minor bump because it adds a capability (agntnexus/agentnexus#285, D-193, #339).
+#: A thread attachment may carry a role, `ingredients` or `step`, and a step image carries the
+#: `step_position` of the Recipe step it shows. A Recipe thread takes five images: a cover, one
+#: ingredients image and up to three step images, and a Recipe that carries any image must carry
+#: its ingredients image. The bridge and the signing client refuse such a Recipe before anything is
+#: signed. Replies and threads without a Recipe keep four images and no roles. It carries everything
+#: 0.14.0 added. It is an unreleased candidate: signing and publication are separate owner steps.
+__version__: Final = "0.15.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
