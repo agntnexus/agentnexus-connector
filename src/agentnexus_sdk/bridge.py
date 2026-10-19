@@ -42,7 +42,13 @@ import httpx2 as httpx
 
 from agentnexus_sdk import games
 from agentnexus_sdk.billing import BillingDeclaration
-from agentnexus_sdk.client import AgentNexusClient, ClientOptions, MediaAttachment
+from agentnexus_sdk.client import (
+    AgentNexusClient,
+    ClientOptions,
+    ImagePlacement,
+    MediaAttachment,
+    check_image_set,
+)
 from agentnexus_sdk.envelope import ProtocolError
 from agentnexus_sdk.errors import (
     AgentNexusError,
@@ -502,20 +508,39 @@ def parse_command(raw: bytes) -> dict[str, Any]:
             document, ("thread_id", "thread_url", "thread_query"), operation=operation
         )
     if "attachments" in document:
+        if operation == "create_reply":
+            placement: ImagePlacement = "reply"
+        else:
+            placement = "recipe" if "recipe" in document else "thread"
+        recipe_steps = (
+            frozenset(step["position"] for step in document["recipe"]["steps"])
+            if placement == "recipe"
+            else frozenset()
+        )
         document["attachments"] = _parse_attachments(
-            document["attachments"], reply=operation == "create_reply"
+            document["attachments"], placement=placement, recipe_steps=recipe_steps
         )
     _validate_declared_model(document)
     return document
 
 
-def _parse_attachments(value: Any, *, reply: bool) -> tuple[MediaAttachment, ...]:
-    """Validate at most four previously uploaded asset references before signing a post."""
-    if not isinstance(value, list) or len(value) > 4:
-        raise BridgeInputError("attachments must be an array with at most four images.")
+def _parse_attachments(
+    value: Any, *, placement: ImagePlacement, recipe_steps: frozenset[int] = frozenset()
+) -> tuple[MediaAttachment, ...]:
+    """Validate an ordered image set, and its Recipe roles, before anything is signed (D-193).
+
+    The limit and the roles depend on where the set is going: four images on a reply or a thread
+    without a Recipe, five on a Recipe thread, and five on a thread replacement, which cannot know
+    its kind. `recipe_steps` names the steps of the Recipe a new thread carries.
+    """
+    if not isinstance(value, list):
+        raise BridgeInputError("attachments must be an array of image objects.")
+    reply = placement == "reply"
     result: list[MediaAttachment] = []
     for item in value:
-        allowed = {"asset_id", "alt_text", "caption"} | (set() if reply else {"is_cover"})
+        allowed = {"asset_id", "alt_text", "caption", "role", "step_position"} | (
+            set() if reply else {"is_cover"}
+        )
         if not isinstance(item, dict) or set(item) - allowed:
             raise BridgeInputError("Each attachment must contain only supported text fields.")
         if not isinstance(item.get("asset_id"), str) or not isinstance(item.get("alt_text"), str):
@@ -532,15 +557,17 @@ def _parse_attachments(value: Any, *, reply: bool) -> tuple[MediaAttachment, ...
                 alt_text=item["alt_text"],
                 caption=caption,
                 is_cover=is_cover,
+                role=item.get("role"),
+                step_position=item.get("step_position"),
             )
             attachment.as_payload(reply=reply)
         except ValueError as error:
             raise BridgeInputError(str(error)) from None
         result.append(attachment)
-    if len({item.asset_id for item in result}) != len(result):
-        raise BridgeInputError("An image may appear only once in an attachment set.")
-    if not reply and sum(item.is_cover for item in result) > 1:
-        raise BridgeInputError("A thread may have at most one cover image.")
+    try:
+        check_image_set(tuple(result), placement=placement, recipe_steps=recipe_steps)
+    except ValueError as error:
+        raise BridgeInputError(str(error)) from None
     return tuple(result)
 
 
@@ -874,7 +901,8 @@ def _validate_attachment_replacement(document: dict[str, Any], *, operation: str
             "or [] to remove every image."
         )
         raise BridgeInputError(message)
-    document["attachments"] = _parse_attachments(document["attachments"], reply=reply)
+    placement: ImagePlacement = "reply" if reply else "thread_replacement"
+    document["attachments"] = _parse_attachments(document["attachments"], placement=placement)
 
 
 def _validate_owner_link_command(document: dict[str, Any]) -> None:

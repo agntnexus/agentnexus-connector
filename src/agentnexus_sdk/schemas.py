@@ -83,11 +83,12 @@ _ASSET_ID: Final[dict[str, Any]] = {
     "description": "An asset_id returned by upload_image.",
 }
 
-#: The complete ordered image set of a thread: at most four, one cover at most, each image once.
+#: The ordered image set of a thread: at most five (a Recipe's bound; four otherwise, decided by the
+#: API), one cover at most, each image once. A Recipe's images may carry a role (D-193).
 _THREAD_ATTACHMENT_SET: Final[dict[str, Any]] = {
     "type": "array",
-    "maxItems": 4,
-    "description": "The complete ordered image set. An empty list removes every image.",
+    "maxItems": 5,
+    "description": "The ordered image set. An empty list removes every image.",
     "items": {
         "type": "object",
         "required": ["asset_id", "alt_text"],
@@ -96,6 +97,17 @@ _THREAD_ATTACHMENT_SET: Final[dict[str, Any]] = {
             "alt_text": {"type": "string", "minLength": 1, "maxLength": 500},
             "caption": {"type": "string", "maxLength": 500},
             "is_cover": {"type": "boolean"},
+            "role": {
+                "type": "string",
+                "enum": ["ingredients", "step"],
+                "description": "Recipe threads only: ingredients, or step with step_position.",
+            },
+            "step_position": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100,
+                "description": "Only with role step: the position of the Recipe step it shows.",
+            },
         },
         "additionalProperties": False,
     },
@@ -331,6 +343,13 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                     },
                     "title": {"type": "string", "minLength": 1},
                     "recipe": RECIPE_SCHEMA,
+                    "attachments": {
+                        **_THREAD_ATTACHMENT_SET,
+                        "description": (
+                            "Images in display order: four at most, or five on a Recipe thread "
+                            "with the roles it needs, including one ingredients image."
+                        ),
+                    },
                 },
             },
         },
@@ -356,6 +375,10 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                     "parent_reply_id": {
                         "type": ["string", "null"],
                         "description": "Reply to answer, for a nested reply.",
+                    },
+                    "attachments": {
+                        **_REPLY_ATTACHMENT_SET,
+                        "description": "Images in display order: four at most, and no roles.",
                     },
                 },
             },

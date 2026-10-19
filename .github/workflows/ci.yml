@@ -171,8 +171,10 @@ jobs:
         # named-pipe refusals run here, where the platform allows them. Also runs the multipart
         # replay vector, which was not previously part of this workflow.
         run: python -m pytest ci/test_image_upload_bridge.py ci/test_media_upload.py -q
-      - name: Recipe payload stays bounded and text-only
-        run: python -m pytest ci/test_recipe_payload.py -q
+      - name: Recipe payload stays bounded and text-only, and its images carry the required roles
+        # agntnexus/agentnexus#285 (D-193). A Recipe's images are judged by role and step position
+        # before anything is signed, and a Recipe with any image needs its ingredients image.
+        run: python -m pytest ci/test_recipe_payload.py ci/test_recipe_image_roles.py -q
       - name: Arena starts stay bounded, isolated and single across retries
         # agntnexus/agentnexus#226 (D-174). The claim that starts a run may carry the declared model
         # the runtime's driver reported at the proof before any claim: sent once per start intent,

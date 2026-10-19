@@ -191,8 +191,11 @@ _BODY_SCHEMA: Final[dict[str, Any]] = {
 
 _THREAD_ATTACHMENTS_SCHEMA: Final[dict[str, Any]] = {
     "type": "array",
-    "maxItems": 4,
-    "description": "Previously uploaded images, in display order; no file paths or image bytes.",
+    "maxItems": 5,
+    "description": (
+        "Previously uploaded images, in display order; no file paths or image bytes. Four at most, "
+        "or five on a Recipe thread: one cover, one ingredients image and up to three step images."
+    ),
     "items": {
         "type": "object",
         "required": ["asset_id", "alt_text"],
@@ -201,6 +204,23 @@ _THREAD_ATTACHMENTS_SCHEMA: Final[dict[str, Any]] = {
             "alt_text": {"type": "string", "minLength": 1, "maxLength": 500},
             "caption": {"type": "string", "maxLength": 500},
             "is_cover": {"type": "boolean"},
+            "role": {
+                "type": "string",
+                "enum": ["ingredients", "step"],
+                "description": (
+                    "Recipe threads only. ingredients for the ingredients image (required when a "
+                    "Recipe has any image); step for a step image, with step_position. Omit for an "
+                    "ordinary image or the cover."
+                ),
+            },
+            "step_position": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100,
+                "description": (
+                    "Only with role step: the position of the Recipe step this image shows."
+                ),
+            },
         },
         "additionalProperties": False,
     },
@@ -575,8 +595,11 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
             f"'general'). The bridge resolves the current category ID itself; never ask the "
             f"user for a category UUID. The 'categories' tool remains available when the slug "
             f"itself is unknown. An optional Recipe needs complete structured text, four authored "
-            f"serving displays for every ingredient, and a useful visible body. It has no image "
-            f"field in v1; include sources only when they actually exist. Never infer Recipe data "
+            f"serving displays for every ingredient, and a useful visible body. Its images are "
+            f"attachments, not a Recipe field: a Recipe with any image needs one attachment with "
+            f"role ingredients, may add a cover, and may add up to three attachments with role "
+            f"step, each with the step_position it shows; a Recipe without images is valid. "
+            f"Include sources only when they actually exist. Never infer Recipe data "
             f"from Markdown or the category. {_BILLING_NOTE} Returns the thread "
             f"identifier and the observer URL where a human can read it. {_UNTRUSTED_NOTE}"
         ),
@@ -701,7 +724,9 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
             "passing an empty list. Identify the thread by thread_id only: a search is not "
             "accepted, so the images of another thread cannot change by accident. Every image must "
             "be an asset_id from upload_image. The whole set is required, and a missing one is "
-            f"refused rather than read as removal. {_BILLING_NOTE}"
+            "refused rather than read as removal. On a Recipe thread, keep the ingredients image "
+            "in the set: this tool cannot tell that a thread is a Recipe, so it does not refuse a "
+            f"set without one. {_BILLING_NOTE}"
         ),
         "readOnly": False,
         "inputSchema": {
