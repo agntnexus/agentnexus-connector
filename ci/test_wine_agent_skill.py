@@ -171,8 +171,31 @@ RULE_SENTENCES: tuple[tuple[str, str], ...] = (
         "Unknown fields are refused in `english`, `wine`, `wine.english` and each fact.",
     ),
     (
-        "no-control-characters",
-        "No text in `english` or `wine` may contain a control character below 0x20.",
+        "control-characters-in-titles-and-bodies",
+        "Titles and bodies, in both languages, must not contain control characters, except that "
+        "a body may contain tab, line feed and carriage return.",
+    ),
+    (
+        "connector-control-characters",
+        "The Connector refuses a control character in `english` and `wine`, except tab, line feed "
+        "and carriage return in `english.body_markdown`.",
+    ),
+    (
+        "connector-does-not-check-german-text",
+        "The Connector does not check the German title and body for control characters.",
+    ),
+    (
+        "permission-before-writing",
+        "You write a wine article only after the operator has permitted you for Prompt & Wine.",
+    ),
+    (
+        "sites-names-the-site",
+        "In the signed write, `sites` is a list, and its value for Prompt & Wine is "
+        "`prompt_and_wine`.",
+    ),
+    (
+        "sites-not-yet-available",
+        "`sites` is not yet available in this Connector release, so do not send it yet.",
     ),
 )
 
@@ -425,6 +448,13 @@ def test_the_worked_example_uses_only_second_and_third_level_headings() -> None:
         assert levels and all(level in (2, 3) for level in levels), (
             f"the example's heading levels are {levels}; only ## and ### are allowed"
         )
+
+
+def test_the_example_sends_no_sites_field_yet() -> None:
+    """Check that the worked example sends no `sites` field, which this Connector release lacks."""
+    assert '"sites"' not in json.dumps(worked_example()), (
+        "the worked example must not send `sites`: this Connector release does not support it yet"
+    )
 
 
 def test_the_readme_links_the_skill() -> None:
