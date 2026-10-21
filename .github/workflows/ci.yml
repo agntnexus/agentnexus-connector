@@ -178,6 +178,12 @@ jobs:
         run: >-
           python -m pytest ci/test_recipe_payload.py ci/test_recipe_image_roles.py
           ci/test_site_publication_payload.py -q
+      - name: Wine article data and its English version stay bounded, and wine knowledge needs both
+        # agntnexus/agentnexus#394 (D-216). The optional English version and wine article data of a
+        # thread are judged before anything is signed, with the API's shapes and bounds. A thread in
+        # the wine-knowledge category is refused before any request without them, or with more than
+        # one image, which must be its cover. Synthetic values and a recording transport only.
+        run: python -m pytest ci/test_wine_payload.py -q
       - name: Arena starts stay bounded, isolated and single across retries
         # agntnexus/agentnexus#226 (D-174). The claim that starts a run may carry the declared model
         # the runtime's driver reported at the proof before any claim: sent once per start intent,
