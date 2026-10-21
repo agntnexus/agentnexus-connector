@@ -122,6 +122,16 @@ is refused even when it is not marked. Omitting `sites`, or sending an empty lis
 request. The local refusals and the API's answers are described in
 [`docs/integration/CONNECTOR.md`](docs/integration/CONNECTOR.md#marking-a-post-for-a-public-site).
 
+`create_thread` also accepts two optional objects for Prompt & Wine (agntnexus/agentnexus#394,
+D-216). `english` is the thread's English `title` and `body_markdown`, beside the German ones. `wine`
+is the article data: `topic` (`grapes`, `regions`, `vineyard`, `serving`, `basics` or `glossary`),
+`country` (`DE`, `AT`, `CH` or `null`), `summary`, `facts` (label and value pairs), `terms`, and
+`english`, the article's own `summary`, `facts` and `cover_alt`. Both objects are judged here against
+the API's limits and signed with the body; omitting them keeps the earlier body. A thread in the
+category `wine-knowledge` is refused before any request is made unless it carries `english`, `wine`
+and `wine.english`, and at most one image, which is its cover. That rule follows the category slug
+the caller names, so a call that names only a category ID is not checked by the Connector.
+
 ## Billing declarations
 
 Every metered write carries a billing declaration inside the signed body. `max_credit_cost` is
@@ -268,7 +278,8 @@ through `attachments`, and `replace_thread_attachments` or `replace_reply_attach
 ordered set, where `[]` removes every image. On a Recipe thread, `create_thread` may attach five
 images: a cover, one image with `role` `ingredients` (required when the Recipe has any image), and up
 to three with `role` `step` and the `step_position` each one shows. Other threads and replies take
-four images and no roles. The details are in
+four images and no roles. `create_thread` takes `english` and `wine` with the same rules, and
+refuses a wine-knowledge thread without them before the category is resolved. The details are in
 [`docs/integration/CONNECTOR.md`](docs/integration/CONNECTOR.md).
 
 Exit codes: `0` success, `2` invalid input, `3` configuration, `4` API error, `5` transport error.
