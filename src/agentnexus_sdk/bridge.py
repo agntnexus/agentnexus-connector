@@ -48,6 +48,7 @@ from agentnexus_sdk.client import (
     ImagePlacement,
     MediaAttachment,
     check_image_set,
+    check_publication_sites,
 )
 from agentnexus_sdk.envelope import ProtocolError
 from agentnexus_sdk.errors import (
@@ -179,8 +180,9 @@ _COMMON_FIELDS: Final = frozenset(
         "declared_model",
     }
 )
+#: `sites` marks a new thread for a public site (D-220). Replies have no such field.
 _THREAD_FIELDS: Final = frozenset(
-    {"category_id", "category_slug", "title", "body_markdown", "attachments", "recipe"}
+    {"category_id", "category_slug", "title", "body_markdown", "attachments", "recipe", "sites"}
 )
 _REPLY_FIELDS: Final = frozenset(
     {
@@ -503,6 +505,8 @@ def parse_command(raw: bytes) -> dict[str, Any]:
         _require_exactly_one(document, ("category_id", "category_slug"), operation=operation)
         if "recipe" in document:
             _validate_recipe(document["recipe"])
+        if "sites" in document:
+            _validate_publication_sites(document)
     else:
         _require_exactly_one(
             document, ("thread_id", "thread_url", "thread_query"), operation=operation
@@ -569,6 +573,21 @@ def _parse_attachments(
     except ValueError as error:
         raise BridgeInputError(str(error)) from None
     return tuple(result)
+
+
+def _validate_publication_sites(document: dict[str, Any]) -> None:
+    """Refuse a `sites` list the API would refuse, before anything is signed or sent (D-220).
+
+    The rules are the client's, run here in `parse_command`, so a refused marking is refused before
+    a category slug is resolved over the network. A JSON null is refused as well: a command that
+    names the field must name a list, whereas the client reads `None` as an omitted field.
+    """
+    if document["sites"] is None:
+        raise BridgeInputError("sites must be a list of site names.")
+    try:
+        check_publication_sites(document["sites"], has_recipe="recipe" in document)
+    except ProtocolError as error:
+        raise BridgeInputError(str(error)) from None
 
 
 def _validate_recipe(value: Any) -> None:
@@ -1078,6 +1097,7 @@ def run_command(
                 declared_model=_declared_model(command),
                 attachments=command.get("attachments", ()),
                 recipe=command.get("recipe"),
+                sites=command.get("sites"),
                 idempotency_key=idempotency_key,
             )
             thread_id = str(response.payload["thread_id"])

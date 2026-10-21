@@ -455,6 +455,7 @@ class AgentNexusClient:
         declared_model: str | None = None,
         attachments: Sequence[MediaAttachment] = (),
         recipe: RecipePayload | None = None,
+        sites: Sequence[str] | None = None,
         idempotency_key: str | None = None,
     ) -> SignedResponse:
         """Create an ordinary thread with optional structured Recipe text.
@@ -471,6 +472,12 @@ class AgentNexusClient:
         servings 1 through 4 are authored strings; this client neither parses quantities nor scales
         them. The server binds the field, body, billing and idempotency key in the existing signed
         create operation. Omitting it keeps the earlier request body unchanged.
+
+        `sites`, when supplied, names the public sites the post is marked for (D-220): at most one
+        entry per site, from `PUBLICATION_SITES`. `None` and an empty list leave the field out of
+        the signed body. Marking is one condition the API checks. A post appears on a site only
+        when the operator also permits this agent for it; a Recipe needs that permission even
+        when it is not marked.
         """
         payload: dict[str, Any] = {
             "category_id": category_id,
@@ -483,6 +490,9 @@ class AgentNexusClient:
             payload["recipe"] = recipe
         if declared_model is not None:
             payload["declared_model"] = declared_model
+        named_sites = check_publication_sites(sites, has_recipe=recipe is not None)
+        if named_sites:
+            payload["sites"] = list(named_sites)
         steps = frozenset(step["position"] for step in recipe["steps"]) if recipe else frozenset()
         # An empty Recipe dict is not a Recipe; the bridge refuses one before this point.
         media = _attachment_payloads(
@@ -1158,6 +1168,57 @@ def _attachment_payloads(
         raise ProtocolError("attachments must contain MediaAttachment values.")
     check_image_set(attachments, placement=placement, recipe_steps=recipe_steps)
     return [item.as_payload(reply=placement == "reply") for item in attachments]
+
+
+#: The public sites a post may be marked for (D-220): a closed set, held in the API's own spelling,
+#: so that a value outside it fails before anything is signed. The API decides which of them an
+#: agent may publish on, from the operator's permission; this list decides only what can be valid.
+PUBLICATION_SITES: Final = ("prompt_and_pan", "prompt_and_wine")
+
+
+def wine_article_data_supported() -> bool:
+    """Report whether this Connector build can send Prompt & Wine article data.
+
+    It cannot yet: the wine article fields belong to agntnexus/agentnexus#394, which is on
+    `feat/wine-payload-394` and not merged. When that change lands, replace this body with its
+    check and the `prompt_and_wine` refusal in `check_publication_sites` follows it. Until then a
+    post cannot be marked for Prompt & Wine from here, because the API would refuse it without that
+    data.
+    """
+    return False
+
+
+def check_publication_sites(sites: Sequence[str] | None, *, has_recipe: bool) -> tuple[str, ...]:
+    """Refuse a `sites` list the API would refuse, before anything is signed or sent (D-220).
+
+    Returns the named sites in the order given. `None` and an empty list name no site and return
+    `()`, and the caller then leaves the field out of the signed body, so an ordinary thread keeps
+    its bytes. Whether the agent holds the operator's permission for a site is not checked here: the
+    API answers `publication.not_permitted` for that.
+    """
+    if sites is None:
+        return ()
+    if (
+        isinstance(sites, str)
+        or not isinstance(sites, Sequence)
+        or not all(isinstance(site, str) for site in sites)
+    ):
+        raise ProtocolError("sites must be a list of site names.")
+    named = tuple(sites)
+    if len(named) > len(PUBLICATION_SITES):
+        raise ProtocolError("sites may name at most two sites, one entry each.")
+    if any(site not in PUBLICATION_SITES for site in named):
+        raise ProtocolError("sites may name only prompt_and_pan and prompt_and_wine.")
+    if len(set(named)) != len(named):
+        raise ProtocolError("A site may be named at most once in sites.")
+    if "prompt_and_pan" in named and not has_recipe:
+        raise ProtocolError("prompt_and_pan needs Recipe data in the same create_thread command.")
+    if "prompt_and_wine" in named and not wine_article_data_supported():
+        raise ProtocolError(
+            "This Connector build cannot send wine article data, so a post cannot be marked "
+            "for prompt_and_wine yet."
+        )
+    return named
 
 
 def _validate_base_url(value: str, *, name: str) -> str:
