@@ -119,12 +119,39 @@ RULE_SENTENCES: tuple[tuple[str, str], ...] = (
     ),
     ("page-adds-caption", "The page adds the AI-illustration caption itself."),
     ("toc-from-second-level", "Second-level headings (`##`) become the table of contents."),
-    ("table-may-carry-caption", "A table may carry a caption line."),
+    (
+        "third-level-not-in-toc",
+        "Third-level headings (`###`) do not enter the table of contents.",
+    ),
+    (
+        "heading-levels",
+        "Use second-level (`##`) and third-level (`###`) headings only; a first-level heading "
+        "(`#`) and a heading of level four or deeper are refused.",
+    ),
+    (
+        "heading-ids-by-the-site",
+        "The site generates the id of each heading from its text, so never write an id or any "
+        "other attribute.",
+    ),
+    (
+        "headings-and-tables-in-wine-articles",
+        "Headings and tables are allowed only in the body of a wine article, which is a thread "
+        "that carries `wine`.",
+    ),
+    ("table-limits", "A table has at most 8 columns and 60 rows, the header row included."),
+    (
+        "table-caption",
+        "A table may carry a caption: the paragraph directly before the table, whose text begins "
+        "`Tabelle: ` in German or `Table: ` in English, is its caption.",
+    ),
     ("block-quote-renders-as-box", 'A block quote renders as the "Good to know" box.'),
     (
         "german-box-label",
         "On a German article the box is labelled „Gut zu wissen“.",
     ),
+    ("english-box-label", 'On an English article the box is labelled "Good to know".'),
+    ("quote-text-only", "Write the text of the quote only, never the label."),
+    ("raw-html-refused", "Raw HTML is refused."),
     (
         "sources-in-last-section",
         "The last section of the body is the sources section, named `Quellen` in German "
@@ -154,6 +181,9 @@ BLOCK_QUOTE = re.compile(r"^> \S", re.MULTILINE)
 HEADING = re.compile(r"^## (.+)$", re.MULTILINE)
 SWISS_SS_FORMS = re.compile(r"\b(strasse|gruss|fuss|gross|heiss|weiss|süsse)\b", re.IGNORECASE)
 LINK = re.compile(r"\]\(([^)\s]+)\)")
+CAPTION_EXAMPLE = re.compile(r"```markdown\nTabelle: [^\n]+\n\n\|")
+TABLE_COLUMNS_MAX = 8
+TABLE_ROWS_MAX = 60
 
 
 def skill_text() -> str:
@@ -228,6 +258,38 @@ def assert_article_structure(body: str, *, last_section: str) -> None:
     assert headings and headings[-1] == last_section, (
         f"the last second-level heading must be {last_section!r}, the sources section"
     )
+
+
+def example_bodies() -> tuple[str, str]:
+    """Return the German body and the English body of the worked example."""
+    value = worked_example()
+    return value["body_markdown"], value["english"]["body_markdown"]
+
+
+def tables_of(body: str) -> list[list[str]]:
+    """Return each table of a Markdown body as its lines, a table being a run of pipe lines."""
+    found: list[list[str]] = []
+    run: list[str] = []
+    for line in body.split("\n"):
+        if line.startswith("|"):
+            run.append(line)
+        elif run:
+            found.append(run)
+            run = []
+    if run:
+        found.append(run)
+    return found
+
+
+def captions_of(body: str) -> list[str]:
+    """Return the line directly before each table of a Markdown body, or an empty string."""
+    lines = body.split("\n")
+    found: list[str] = []
+    for index, line in enumerate(lines):
+        if line.startswith("|") and (index == 0 or not lines[index - 1].startswith("|")):
+            directly_before = index >= 2 and lines[index - 1] == ""
+            found.append(lines[index - 2] if directly_before else "")
+    return found
 
 
 def test_the_skill_document_exists() -> None:
@@ -306,6 +368,63 @@ def test_the_german_example_writes_eszett_and_no_swiss_ss() -> None:
     swiss = SWISS_SS_FORMS.search(german)
     found = swiss.group(0) if swiss else ""
     assert swiss is None, f"the German example writes Swiss ss, as in {found!r}"
+
+
+def test_the_old_caption_sentence_is_gone() -> None:
+    """Check that the skill no longer says the caption syntax is undefined (D-216, statement 16)."""
+    text = flat(skill_text())
+    assert "Its syntax is not yet defined" not in text, (
+        "the skill still says the caption syntax is undefined; D-216 statement 16 defines it"
+    )
+    assert "until this skill names one" not in text, (
+        "the skill still withholds the caption line until it names the syntax"
+    )
+
+
+def test_the_skill_shows_a_table_caption_before_its_table() -> None:
+    """Check that the skill shows a caption as a small example: a paragraph before its table."""
+    assert CAPTION_EXAMPLE.search(skill_text()), (
+        "the skill must show a table caption in a fenced markdown block: a `Tabelle: ` paragraph "
+        "directly before its table"
+    )
+
+
+def test_the_german_example_table_has_its_caption_directly_before_it() -> None:
+    """Check that the German table of the worked example has a `Tabelle: ` caption before it."""
+    german, _ = example_bodies()
+    found = captions_of(german)
+    assert found and all(line.startswith("Tabelle: ") for line in found), (
+        "the German table of the worked example needs its caption directly before it, "
+        "beginning `Tabelle: `"
+    )
+
+
+def test_the_english_example_table_has_its_caption_directly_before_it() -> None:
+    """Check that the English table of the worked example has a `Table: ` caption before it."""
+    _, english_body = example_bodies()
+    found = captions_of(english_body)
+    assert found and all(line.startswith("Table: ") for line in found), (
+        "the English table of the worked example needs its caption directly before it, "
+        "beginning `Table: `"
+    )
+
+
+def test_the_worked_example_tables_are_within_the_limits() -> None:
+    """Check that every table of the worked example has at most 8 columns and 60 rows."""
+    for body in example_bodies():
+        for table in tables_of(body):
+            columns = len(table[0].strip().strip("|").split("|"))
+            assert columns <= TABLE_COLUMNS_MAX, f"a table has {columns} columns; 8 at most"
+            assert len(table) <= TABLE_ROWS_MAX, f"a table has {len(table)} rows; 60 at most"
+
+
+def test_the_worked_example_uses_only_second_and_third_level_headings() -> None:
+    """Check that the worked example's headings are second- or third-level, as the skill allows."""
+    for body in example_bodies():
+        levels = [len(marker) for marker in re.findall(r"^(#+) ", body, re.MULTILINE)]
+        assert levels and all(level in (2, 3) for level in levels), (
+            f"the example's heading levels are {levels}; only ## and ### are allowed"
+        )
 
 
 def test_the_readme_links_the_skill() -> None:

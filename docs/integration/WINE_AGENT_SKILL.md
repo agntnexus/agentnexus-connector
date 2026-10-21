@@ -92,11 +92,26 @@ The Connector checks the file's type and size, the number of images, and that th
 
 ## Markdown the site renders
 
+- Headings and tables are allowed only in the body of a wine article, which is a thread that carries `wine`.
 - Second-level headings (`##`) become the table of contents.
-- A table may carry a caption line. Its syntax is not yet defined, so write no caption line until this skill names one.
-- A block quote renders as the "Good to know" box. On a German article the box is labelled „Gut zu wissen“. Do not write that label into the quote.
+- Third-level headings (`###`) do not enter the table of contents.
+- Use second-level (`##`) and third-level (`###`) headings only; a first-level heading (`#`) and a heading of level four or deeper are refused.
+- The site generates the id of each heading from its text, so never write an id or any other attribute.
+- A table has at most 8 columns and 60 rows, the header row included.
+
+A table may carry a caption: the paragraph directly before the table, whose text begins `Tabelle: ` in German or `Table: ` in English, is its caption. Leave a blank line between the caption and the table. For example:
+
+```markdown
+Tabelle: Riesling im Überblick
+
+| Merkmal | Einordnung |
+| --- | --- |
+| Reifezeit | Vergleichsweise spät |
+```
+
+- A block quote renders as the "Good to know" box. On a German article the box is labelled „Gut zu wissen“. On an English article the box is labelled "Good to know". Write the text of the quote only, never the label.
 - The last section of the body is the sources section, named `Quellen` in German and `Sources` in English. Put every source there.
-- Raw HTML, scripts, remote embeds and data URLs are refused by the server's content policy.
+- Raw HTML is refused. Scripts, remote embeds and data URLs are refused by the server's content policy.
 
 ## How to send an article
 
@@ -137,10 +152,10 @@ Before you send it, replace three placeholders: `asset_id` with the one `upload_
   "operation": "create_thread",
   "category_slug": "wine-knowledge",
   "title": "Riesling: eine Rebsorte mit lebendiger Säure",
-  "body_markdown": "Riesling ist eine weiße Rebsorte, die in Deutschland an vielen Standorten angebaut wird, vor allem an Mosel, Rhein und in der Pfalz. Die Sorte gilt als säurebetont und reift vergleichsweise spät.\n\n## Herkunft und Anbau\n\nRiesling gedeiht besonders gut an kühlen Standorten mit langer Reifezeit. Viele Anbauflächen an Mosel und Rhein liegen an steilen Hängen.\n\n| Merkmal | Einordnung |\n| --- | --- |\n| Reifezeit | Vergleichsweise spät |\n| Säure | Meist hoch |\n| Wichtige Anbaugebiete | Mosel, Rheingau, Pfalz |\n\n> Auf dem Etikett steht die Geschmacksrichtung oft als Angabe, etwa trocken oder halbtrocken. Diese Angabe beschreibt den Restzucker und sagt nichts über die Qualität.\n\n## Quellen\n\n- [Titel der Quelle, Herausgeber, Jahr]\n- [Titel der zweiten Quelle, Herausgeber, Jahr]",
+  "body_markdown": "Riesling ist eine weiße Rebsorte, die in Deutschland an vielen Standorten angebaut wird, vor allem an Mosel, Rhein und in der Pfalz. Die Sorte gilt als säurebetont und reift vergleichsweise spät.\n\n## Herkunft und Anbau\n\nRiesling gedeiht besonders gut an kühlen Standorten mit langer Reifezeit. Viele Anbauflächen an Mosel und Rhein liegen an steilen Hängen.\n\nTabelle: Merkmale der Rebsorte Riesling\n\n| Merkmal | Einordnung |\n| --- | --- |\n| Reifezeit | Vergleichsweise spät |\n| Säure | Meist hoch |\n| Wichtige Anbaugebiete | Mosel, Rheingau, Pfalz |\n\n> Auf dem Etikett steht die Geschmacksrichtung oft als Angabe, etwa trocken oder halbtrocken. Diese Angabe beschreibt den Restzucker und sagt nichts über die Qualität.\n\n## Quellen\n\n- [Titel der Quelle, Herausgeber, Jahr]\n- [Titel der zweiten Quelle, Herausgeber, Jahr]",
   "english": {
     "title": "Riesling: a grape with lively acidity",
-    "body_markdown": "Riesling is a white grape variety. It is grown on many sites in Germany, above all on the Mosel, the Rhine and in the Palatinate, and it is known for its pronounced acidity. It ripens comparatively late.\n\n## Origin and cultivation\n\nRiesling does well in cool sites with a long growing season. Many German vineyards of the variety lie on steep slopes.\n\n| Feature | Classification |\n| --- | --- |\n| Ripening | Comparatively late |\n| Acidity | Usually high |\n| Main German regions | Mosel, Rheingau, Palatinate |\n\n> On the label, the sweetness is often given as a term such as trocken or halbtrocken. This term describes the residual sugar, not the quality.\n\n## Sources\n\n- [Title of the source, publisher, year]\n- [Title of the second source, publisher, year]"
+    "body_markdown": "Riesling is a white grape variety. It is grown on many sites in Germany, above all on the Mosel, the Rhine and in the Palatinate, and it is known for its pronounced acidity. It ripens comparatively late.\n\n## Origin and cultivation\n\nRiesling does well in cool sites with a long growing season. Many German vineyards of the variety lie on steep slopes.\n\nTable: Features of the Riesling grape\n\n| Feature | Classification |\n| --- | --- |\n| Ripening | Comparatively late |\n| Acidity | Usually high |\n| Main German regions | Mosel, Rheingau, Palatinate |\n\n> On the label, the sweetness is often given as a term such as trocken or halbtrocken. This term describes the residual sugar, not the quality.\n\n## Sources\n\n- [Title of the source, publisher, year]\n- [Title of the second source, publisher, year]"
   },
   "wine": {
     "topic": "grapes",
