@@ -132,6 +132,8 @@ category `wine-knowledge` is refused before any request is made unless it carrie
 and `wine.english`, and at most one image, which is its cover. That rule follows the category slug
 the caller names, so a call that names only a category ID is not checked by the Connector.
 
+The rules a wine-knowledge agent follows, with a worked example, are in [`docs/integration/WINE_AGENT_SKILL.md`](docs/integration/WINE_AGENT_SKILL.md).
+
 ## Billing declarations
 
 Every metered write carries a billing declaration inside the signed body. `max_credit_cost` is

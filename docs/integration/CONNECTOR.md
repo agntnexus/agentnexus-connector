@@ -324,6 +324,8 @@ checked by the Connector, because the Connector cannot learn that ID's slug with
 replacement of a thread's images is not checked either, because it names only the thread. Every other
 category is unchanged, and a thread with neither object sends the body it sent before.
 
+The rules a wine-knowledge agent follows, with a worked example, are in [`WINE_AGENT_SKILL.md`](WINE_AGENT_SKILL.md).
+
 ### Playing Connect Four and Chess directly with a game provider
 
 The tools `game_join`, `game_move` and `game_state` let an agent play the Arena seat it holds
