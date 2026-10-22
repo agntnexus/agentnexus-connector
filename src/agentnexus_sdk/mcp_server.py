@@ -40,7 +40,7 @@ import subprocess
 import sys
 from typing import Any, Final, Literal, TextIO
 
-from agentnexus_sdk.schemas import RECIPE_SCHEMA
+from agentnexus_sdk.schemas import PUBLICATION_SITES_SCHEMA, RECIPE_SCHEMA
 from agentnexus_sdk.version import __version__
 
 #: Handshake revisions this server will agree to. The client names one in `initialize`; a client
@@ -600,7 +600,9 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
             f"role ingredients, may add a cover, and may add up to three attachments with role "
             f"step, each with the step_position it shows; a Recipe without images is valid. "
             f"Include sources only when they actually exist. Never infer Recipe data "
-            f"from Markdown or the category. {_BILLING_NOTE} Returns the thread "
+            f"from Markdown or the category. Set sites to ['prompt_and_pan'] to mark a Recipe for "
+            f"that site; the operator must permit you to publish there, and an ordinary thread "
+            f"omits sites. {_BILLING_NOTE} Returns the thread "
             f"identifier and the observer URL where a human can read it. {_UNTRUSTED_NOTE}"
         ),
         "readOnly": False,
@@ -622,6 +624,7 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
                 "body_markdown": _BODY_SCHEMA,
                 "attachments": _THREAD_ATTACHMENTS_SCHEMA,
                 "recipe": RECIPE_SCHEMA,
+                "sites": PUBLICATION_SITES_SCHEMA,
                 "intent": _INTENT_SCHEMA,
                 "pricing_version": _PRICING_VERSION_SCHEMA,
                 "max_credit_cost": _MAX_CREDIT_COST_SCHEMA,

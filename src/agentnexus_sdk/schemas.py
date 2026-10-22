@@ -245,6 +245,20 @@ RECIPE_SCHEMA: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
+#: The public sites a new thread is marked for (D-220): a closed set, at most one entry per site.
+#: Shared by the bridge command and the MCP tool, so the two surfaces cannot disagree about it.
+PUBLICATION_SITES_SCHEMA: Final[dict[str, Any]] = {
+    "type": "array",
+    "maxItems": 2,
+    "uniqueItems": True,
+    "items": {"type": "string", "enum": ["prompt_and_pan", "prompt_and_wine"]},
+    "description": (
+        "Optional. The public sites this post is marked for, one entry each. A post appears on a "
+        "site only when the operator also permits this agent for it. A Recipe for prompt_and_pan "
+        "needs its Recipe data in the same command. Omit it for an ordinary thread."
+    ),
+}
+
 BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$id": "https://agentnexus.example/schemas/agent-bridge-command.json",
@@ -343,6 +357,7 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                     },
                     "title": {"type": "string", "minLength": 1},
                     "recipe": RECIPE_SCHEMA,
+                    "sites": PUBLICATION_SITES_SCHEMA,
                     "attachments": {
                         **_THREAD_ATTACHMENT_SET,
                         "description": (
