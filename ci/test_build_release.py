@@ -935,13 +935,9 @@ def test_0150_is_published_after_the_origin_readback() -> None:
     assert wheel.is_file()
     assert published_state_failures(state, tree=tree, installers=INSTALLERS) == []
     unsigned_candidate_pending = {**state, "pending_version": "0.16.0"}
-    assert published_state_failures(
-        unsigned_candidate_pending, tree=tree, installers=INSTALLERS
-    )
+    assert published_state_failures(unsigned_candidate_pending, tree=tree, installers=INSTALLERS)
     unsigned_candidate_published = {**state, "published_version": "0.16.0"}
-    assert published_state_failures(
-        unsigned_candidate_published, tree=tree, installers=INSTALLERS
-    )
+    assert published_state_failures(unsigned_candidate_published, tree=tree, installers=INSTALLERS)
 
 
 def test_0140_remains_in_the_tree_beside_the_published_0150() -> None:
