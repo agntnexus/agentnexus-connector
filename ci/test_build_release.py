@@ -887,8 +887,7 @@ def test_the_origin_serves_0150_and_the_state_says_so() -> None:
         "build_backend": "setuptools==84.0.0",
     }
     assert releases["0.16.0"] == {
-        key: SIGNED_0160[key]
-        for key in ("source_commit", "source_date_epoch", "build_backend")
+        key: SIGNED_0160[key] for key in ("source_commit", "source_date_epoch", "build_backend")
     }
     connector = REPOSITORY_ROOT / "connector-release" / "connector"
     manifest = (connector / builder.MANIFEST_NAME).read_bytes()
@@ -962,8 +961,7 @@ def test_signed_0160_candidate_declares_0160_consistently() -> None:
     releases = state["reproducible_releases"]
     assert isinstance(releases, dict)
     assert releases["0.16.0"] == {
-        key: SIGNED_0160[key]
-        for key in ("source_commit", "source_date_epoch", "build_backend")
+        key: SIGNED_0160[key] for key in ("source_commit", "source_date_epoch", "build_backend")
     }
     tree = REPOSITORY_ROOT / "connector-release"
     manifest = (tree / "connector" / builder.MANIFEST_NAME).read_bytes()
