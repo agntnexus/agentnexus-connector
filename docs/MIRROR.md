@@ -28,7 +28,7 @@ Issues follow the same rule as the rest of the portfolio: see [`AGENTS.md`](../A
 | `LICENSE` | Apache-2.0, as the metadata declares |
 | `SECURITY.md` | The security and support policy |
 | `docs/BEHAVIOUR.md`, `docs/INSTALL.md`, `docs/VERIFY.md`, `docs/TROUBLESHOOTING.md` | The public documents |
-| `connector-release/**` | The published release origin: the three stamped loaders, ten wheels from 0.1.0 to 0.6.1, the signed release manifest and its signature |
+| `connector-release/**` | The published release origin: stamped loaders, versioned wheels, the signed release manifest and its signature; release state records the reproducible build coordinates |
 
 Found a bug, a wrong statement or a security issue in any of them? `SECURITY.md` says how to
 report a security issue, and says why that one does not start in public. Anything else starts as an
@@ -71,6 +71,7 @@ Repository-owned paths that support the published source and its evidence:
 | `docs/MIRROR.md` | This page. |
 | `docs/releases/connector-0.11.0.md` | Exact owner-approved build coordinates and HTTPS/signature/rollback publication evidence for `agntnexus/agentnexus#195`; the CI file catalogue admits this named page only. |
 | `docs/releases/connector-0.13.0.md` | Exact signed build coordinates and the HTTPS/signature origin read-back that moved `published_version` to 0.13.0 for `agntnexus/agentnexus#202`; the CI file catalogue admits this named page only. |
+| `docs/releases/connector-0.16.0.md` | Source-candidate notes for `agntnexus/agentnexus#427`; it records no build coordinates or published-release claim, and the CI file catalogue admits this named page only. |
 | `AGENTS.md` | Where this repository's issues live and how work starts here. It is local because the rule it carries is *this* repository's: a public repository whose CI must stay GitHub-hosted, because a public pull request can contain code nobody has reviewed. The canonical policy it points at is not published here. |
 
 CI refuses a tracked file that is in neither list, so another kind cannot appear quietly.

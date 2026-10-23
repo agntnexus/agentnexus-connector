@@ -179,8 +179,17 @@ from typing import Final
 #: ingredients image and up to three step images, and a Recipe that carries any image must carry
 #: its ingredients image. The bridge and the signing client refuse such a Recipe before anything is
 #: signed. Replies and threads without a Recipe keep four images and no roles. It carries everything
-#: 0.14.0 added. It is an unreleased candidate: signing and publication are separate owner steps.
-__version__: Final = "0.15.0"
+#: 0.14.0 added. The installation origin served 0.15.0 as of the 2026-10-23 manifest read-back;
+#: the wheel was not downloaded and the signature was not verified in that observation.
+#:
+#: 0.16.0 is a minor bump because it adds public-site selection to `create_thread`
+#: (agntnexus/agentnexus#401, #427). `sites` is optional, and an omitted or empty list preserves
+#: the ordinary request body. A Recipe requires operator permission even when `sites` is omitted;
+#: marking it for Prompt & Pan requires Recipe data in the same command. The API decides whether a
+#: marked post is actually published. This Connector still refuses Prompt & Wine until its article
+#: data is supported (#394). This source candidate has not been signed or published; those are
+#: separate owner-approved steps.
+__version__: Final = "0.16.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
