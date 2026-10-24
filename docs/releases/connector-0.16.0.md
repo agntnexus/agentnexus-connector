@@ -1,8 +1,9 @@
-# Connector 0.16.0 — signed pending candidate
+# Connector 0.16.0 — published signed release
 
-This page records the signed 0.16.0 candidate for `agntnexus/agentnexus#427`. It is pending
-distribution, not live: the installation origin last served 0.15.0, and the release state keeps
-`published_version` at 0.15.0 while naming 0.16.0 as pending.
+This page records the signed and published 0.16.0 release for `agntnexus/agentnexus#427`. The
+canonical installation origin served it in the verified read-back below. The release state now
+sets `published_version` to 0.16.0 with no pending version; 0.15.0 remains in the tree as a
+historical release.
 
 ## Change
 
@@ -17,14 +18,34 @@ for the request contract and refusal behavior.
 
 ## Installation-origin state observed
 
-An HTTPS read-back of the canonical `connector-release.json` on 2026-10-23 at
-`06:26:50.2779802Z` returned HTTP 200 and reported version `0.15.0`, released at
-`2026-10-19T11:59:19Z`. The served manifest SHA-256 was
-`96a452b24979e4d527b32b75118ca22b47b4d8366395973d0cb302d181222cc6`. This observation establishes
-what the origin served at that time; it did not verify the manifest signature or download a wheel.
-It is historical read-back evidence, not the current manifest: the signed 0.16.0 manifest now
-replaces the mutable latest-manifest files in the release tree. No 0.16.0 origin read-back or
-Observer promotion is recorded here.
+The canonical origin read-back checked at `2026-10-24T07:02:29.178974+00:00` returned HTTP 200
+for the 0.16.0 manifest, detached signature and wheel. The manifest declares `connector_version`
+`0.16.0` and `released_at` `2026-10-23T13:21:52Z`; it contains no source-revision field. Its
+measured size was 347 bytes and SHA-256 was
+`69ea6ce842c8b8ce45c3c8be7580bd211b80e3800e29ccffd24409ef41897721`. It was byte-identical to
+the signed release manifest and detached-signature verification passed. The signature measured
+128 bytes with SHA-256
+`e7fd7f442f6fb533cc0624eaa4d65223036b5b7172f2bbe6c9275ca78c9c7362`. The served 0.16.0 wheel
+measured 376241 bytes with SHA-256
+`a89dc3975b277188a769cf315c5c5b8ce4c66cd2f3431d57dd739849b6691c66`.
+
+The origin receipt compared the served manifest byte-for-byte with the signed-tree merge at
+Connector commit `3161285879edddda50b86cdffbfe91da22904e8a`. That comparison revision is distinct
+from the signed build's source witness, Connector commit
+`f4e67b76775d82d4e44175e1eeec9d30fc9cbfa1`, built with `SOURCE_DATE_EPOCH=1792759076`; the
+manifest itself does not claim either as a source revision.
+
+The retained 0.15.0 wheel also returned HTTP 200: 374083 bytes, SHA-256
+`b1cc9cd06b6cd0ca4f2166e72a04df4f208842f7586821ed7d0f737d63fdb807`. The earlier origin
+read-back, checked at `2026-10-23T06:26:50.2779802Z`, reported 0.15.0 released at
+`2026-10-19T11:59:19Z` with manifest SHA-256
+`96a452b24979e4d527b32b75118ca22b47b4d8366395973d0cb302d181222cc6`; it did not verify the
+signature or download a wheel. That observation remains historical evidence of what the origin
+served before the 0.16.0 publication.
+
+A separate agent-profile configuration read-back recorded two command pointers moved to the
+0.16.0 environment; Skills were unchanged. It verifies configuration only, not that an MCP process
+reloaded or that a Recipe smoke acceptance passed.
 
 ## Signed artifact and build coordinates
 
@@ -43,6 +64,6 @@ continuity, and absence of private material in the generated output.
 | Signed manifest SHA-256 | `69ea6ce842c8b8ce45c3c8be7580bd211b80e3800e29ccffd24409ef41897721` |
 | Manifest `released_at` | `2026-10-23T13:21:52Z` |
 
-The artifact is pending delivery only. Its presence in the signed release tree does not mean the
-installation origin serves it; `published_version` must remain 0.15.0 until a later authorized
-origin read-back confirms 0.16.0.
+The origin read-back now confirms that the installation origin serves this signed release.
+`published_version` records that state; no `pending_version` remains. The earlier 0.15.0 wheel and
+its reproducible-build provenance remain in the release tree as immutable historical evidence.

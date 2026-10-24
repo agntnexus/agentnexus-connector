@@ -35,8 +35,8 @@ Cross-cutting policy — requirements, decisions, architecture, security, testin
 
 | Page | What it settles |
 | --- | --- |
-| [`releases/connector-0.16.0.md`](releases/connector-0.16.0.md) | Signed 0.16.0 candidate and build coordinates; pending delivery, not origin-published |
-| [`releases/connector-release-state.json`](releases/connector-release-state.json) | The machine-readable release state; the installation origin last served 0.15.0 |
+| [`releases/connector-0.16.0.md`](releases/connector-0.16.0.md) | Published 0.16.0 release, signed build coordinates, and verified installation-origin read-back |
+| [`releases/connector-release-state.json`](releases/connector-release-state.json) | The machine-readable release state; the installation origin serves 0.16.0, with prior releases retained |
 | [`releases/connector-0.6.1.md`](releases/connector-0.6.1.md) | Historical release notes |
 | [`releases/connector-0.6.0.md`](releases/connector-0.6.0.md) | Historical release notes |
 | [`releases/connector-0.5.0.md`](releases/connector-0.5.0.md) | Historical release notes for the first release with published loaders |
