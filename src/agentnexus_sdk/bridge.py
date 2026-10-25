@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import datetime as dt
 import ipaddress
+import itertools
 import json
 import math
 import os
@@ -34,6 +35,7 @@ import re
 import sys
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final, TextIO
 from urllib.parse import urlsplit
@@ -288,8 +290,15 @@ _RECIPE_REQUIRED_FIELDS: Final = frozenset(
         "steps",
     }
 )
-_RECIPE_INGREDIENT_FIELDS: Final = frozenset({"position", "name", "note", "quantities"})
-_RECIPE_QUANTITY_FIELDS: Final = frozenset({"servings", "display_text"})
+_RECIPE_INGREDIENT_FIELDS: Final = frozenset({"position", "name", "note", "quantities", "food_ref"})
+_RECIPE_QUANTITY_FIELDS: Final = frozenset({"servings", "display_text", "amount"})
+_RECIPE_QUANTITY_REQUIRED_FIELDS: Final = frozenset({"servings", "display_text"})
+_RECIPE_AMOUNT_FIELDS: Final = frozenset({"value", "unit"})
+_RECIPE_AMOUNT_UNITS: Final = ("g", "ml")
+_RECIPE_AMOUNT_MAXIMUM: Final = 10_000
+_RECIPE_FOOD_REF_FIELDS: Final = frozenset({"source", "id"})
+_RECIPE_FOOD_SOURCES: Final = ("usda_fdc",)
+_RECIPE_FOOD_ID_MAXIMUM: Final = 99_999_999
 _RECIPE_STEP_FIELDS: Final = frozenset({"position", "name", "instruction"})
 _RECIPE_TIP_FIELDS: Final = frozenset({"position", "text"})
 _RECIPE_SOURCE_FIELDS: Final = frozenset({"position", "label", "url"})
@@ -645,23 +654,36 @@ def _validate_recipe(value: Any) -> None:
             ingredient["quantities"], name="ingredient quantities", minimum=4, maximum=4
         )
         servings: list[int] = []
+        amounts: list[tuple[int, float | int, str]] = []
         for quantity_index, raw_quantity in enumerate(quantities, start=1):
             quantity = _recipe_object(
                 raw_quantity,
                 name=f"ingredient quantity {quantity_index}",
                 allowed=_RECIPE_QUANTITY_FIELDS,
-                required=_RECIPE_QUANTITY_FIELDS,
+                required=_RECIPE_QUANTITY_REQUIRED_FIELDS,
             )
-            servings.append(
-                _recipe_integer(
-                    quantity["servings"], name="quantity servings", minimum=1, maximum=4
-                )
+            serving = _recipe_integer(
+                quantity["servings"], name="quantity servings", minimum=1, maximum=4
             )
+            servings.append(serving)
             _recipe_text(quantity["display_text"], name="quantity display", maximum=200)
+            if "amount" in quantity:
+                number, unit = _recipe_amount(
+                    quantity["amount"], name=f"ingredient quantity {quantity_index} amount"
+                )
+                amounts.append((serving, number, unit))
         if set(servings) != {1, 2, 3, 4}:
             raise BridgeInputError(
                 "Every Recipe ingredient needs one quantity for servings 1, 2, 3 and 4."
             )
+        if amounts:
+            _recipe_amount_rows(amounts)
+        if "food_ref" in ingredient:
+            if not amounts:
+                raise BridgeInputError(
+                    "A food_ref requires amounts on all four quantity rows of its ingredient."
+                )
+            _recipe_food_ref(ingredient["food_ref"], name=f"recipe.ingredients[{index}] food_ref")
 
     steps = _recipe_list(recipe["steps"], name="recipe.steps", minimum=1, maximum=100)
     _recipe_positions(steps, name="Recipe step")
@@ -698,6 +720,49 @@ def _validate_recipe(value: Any) -> None:
         )
         _recipe_text(source["label"], name="source label", maximum=200)
         _recipe_source_url(source["url"])
+
+
+def _recipe_amount(value: Any, *, name: str) -> tuple[float | int, str]:
+    """Return the number and unit of one structured amount, refusing what the API refuses."""
+    amount = _recipe_object(
+        value, name=name, allowed=_RECIPE_AMOUNT_FIELDS, required=_RECIPE_AMOUNT_FIELDS
+    )
+    number = amount["value"]
+    if isinstance(number, bool) or not isinstance(number, int | float):
+        raise BridgeInputError("Field 'amount value' must be a number.")
+    if not 0 < number <= _RECIPE_AMOUNT_MAXIMUM:
+        raise BridgeInputError("Field 'amount value' must be above 0 and at most 10000.")
+    exact = Decimal(repr(number))
+    if exact != exact.quantize(Decimal("0.01")):
+        raise BridgeInputError("Field 'amount value' has at most 2 decimal places.")
+    if amount["unit"] not in _RECIPE_AMOUNT_UNITS:
+        raise BridgeInputError("Field 'amount unit' must be g or ml.")
+    return number, amount["unit"]
+
+
+def _recipe_amount_rows(amounts: list[tuple[int, float | int, str]]) -> None:
+    """Refuse amounts that miss a row, mix units, or fall as the servings rise."""
+    if len(amounts) != 4:
+        raise BridgeInputError(
+            "Recipe amounts must be on all four quantity rows of an ingredient, or on none."
+        )
+    if len({unit for _, _, unit in amounts}) != 1:
+        raise BridgeInputError(
+            "All four quantity rows of one Recipe ingredient must use the same amount unit."
+        )
+    by_servings = [number for _, number, _ in sorted(amounts, key=lambda row: row[0])]
+    if any(later < earlier for earlier, later in itertools.pairwise(by_servings)):
+        raise BridgeInputError("Recipe amounts must not decrease as the serving count grows.")
+
+
+def _recipe_food_ref(value: Any, *, name: str) -> None:
+    """Refuse a food reference that is not a USDA FoodData Central source and a whole id."""
+    reference = _recipe_object(
+        value, name=name, allowed=_RECIPE_FOOD_REF_FIELDS, required=_RECIPE_FOOD_REF_FIELDS
+    )
+    if reference["source"] not in _RECIPE_FOOD_SOURCES:
+        raise BridgeInputError("Field 'food_ref source' must be usda_fdc.")
+    _recipe_integer(reference["id"], name="food_ref id", minimum=1, maximum=_RECIPE_FOOD_ID_MAXIMUM)
 
 
 def _recipe_object(

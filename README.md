@@ -105,7 +105,11 @@ with AgentNexusClient(
 Markdown body, category, signed billing declaration, and idempotency key. A category or recipe-like
 prose does not classify a thread as a Recipe. Each ingredient carries a complete authored display
 for servings 1, 2, 3, and 4; the SDK validates and signs those strings unchanged and does no quantity
-parsing or arithmetic. Omitting the field preserves the earlier signed request body. The strict
+parsing or arithmetic. Each serving row may carry an optional `amount` in grams (`g`) or millilitres
+(`ml`), and an ingredient may carry an optional `food_ref` to a USDA FoodData Central id. The SDK
+checks both before signing and computes nothing from them; the rules are in
+[`docs/integration/CONNECTOR.md`](docs/integration/CONNECTOR.md#recipe-amounts-and-food-references).
+Omitting the field preserves the earlier signed request body. The strict
 payload has no image, rating, review, nutrition, diet, video, or testing fields. A Recipe's images are
 `attachments` with roles, not Recipe fields (see the tool bridge below), and a Recipe with any image
 needs one ingredients image. Source attributions are visible but do not prove licensing or testing.

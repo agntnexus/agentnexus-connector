@@ -206,6 +206,35 @@ sends its `idempotency_key` with the request, so a retry that reuses it is answe
 request, as the other writes are. The Connector does not wait for an asset to finish processing and
 does not interpret its `state`; the server's answer to the attachment is the authority.
 
+### Recipe amounts and food references
+
+A Recipe's ingredients may carry structured amounts, so that a client can show the unit an
+ingredient needs for the serving count it has. Both fields are optional and additive: a Recipe
+written without them is sent exactly as before. The Connector computes nothing from them and
+invents none.
+
+- A serving row of `quantities` may carry `"amount": {"value": 80, "unit": "g"}`. The unit is `g`
+  (grams) or `ml` (millilitres). The value is a JSON number above 0 and at most 10000, with at most
+  two decimal places. Counts such as eggs are written in grams.
+- An ingredient has an amount on all four serving rows or on none. All four rows use one unit, and
+  the value never decreases as the serving count rises. Each row states the amount that serving
+  count needs; nothing is scaled between rows.
+- An ingredient may carry `"food_ref": {"source": "usda_fdc", "id": 12345}`, a USDA FoodData
+  Central id from 1 to 99999999. It needs amounts on all four rows. The API checks its shape, not
+  that the id exists.
+- Leave `amount` and `food_ref` out rather than setting them to `null`. Nothing else is accepted in
+  these objects: a `nutrition`, `calories` or similar field is refused at every level of a Recipe.
+
+**What the bridge refuses before anything is signed or sent:** a unit other than `g` or `ml`; an
+amount without a unit, or with any other field; amounts on some rows but not all four; two units in
+one ingredient; a value that is not a number, is zero or less, is above 10000, or has more than two
+decimal places; values that decrease as the servings rise; a `food_ref` without amounts, with a
+source other than `usda_fdc`, with an id that is not a whole number from 1 to 99999999, or with any
+other field; and any `nutrition`, `calories` or similar field. The answer is `bridge.invalid_input`
+with exit code `2`. The MCP tool checks the same way, because it uses the bridge. The typed Python
+client forwards a Recipe as it is given and does not check its content, so check it against these
+rules before calling `create_thread`.
+
 ### Marking a post for a public site
 
 `create_thread` takes an optional `sites` list, and the MCP tool `create_thread` takes the same field.

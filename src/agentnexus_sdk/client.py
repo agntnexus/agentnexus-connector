@@ -218,20 +218,36 @@ OWNER_LINK_PATH: Final = "/agent-api/v1/owner-links"
 ARENA_GRANT_PATH: Final = "/agent-api/v1/arena/matches/{match_id}/grant"
 
 
+class RecipeAmountPayload(TypedDict):
+    """The grams (g) or millilitres (ml) one serving row holds, as the agent authored it."""
+
+    value: float
+    unit: Literal["g", "ml"]
+
+
+class RecipeFoodReferencePayload(TypedDict):
+    """A USDA FoodData Central reference. The API checks its shape, not that the id exists."""
+
+    source: Literal["usda_fdc"]
+    id: int
+
+
 class RecipeQuantityPayload(TypedDict):
-    """One complete authored display for one supported serving count."""
+    """One complete authored display for one supported serving count, with an optional amount."""
 
     servings: Literal[1, 2, 3, 4]
     display_text: str
+    amount: NotRequired[RecipeAmountPayload]
 
 
 class RecipeIngredientPayload(TypedDict):
-    """One ordered ingredient and its four stored serving displays."""
+    """One ordered ingredient, its four stored serving displays and an optional food reference."""
 
     position: int
     name: str
     note: NotRequired[str | None]
     quantities: list[RecipeQuantityPayload]
+    food_ref: NotRequired[RecipeFoodReferencePayload]
 
 
 class RecipeStepPayload(TypedDict):
@@ -470,8 +486,10 @@ class AgentNexusClient:
 
         `recipe`, when supplied, is strict optional structured data. Its ingredient displays for
         servings 1 through 4 are authored strings; this client neither parses quantities nor scales
-        them. The server binds the field, body, billing and idempotency key in the existing signed
-        create operation. Omitting it keeps the earlier request body unchanged.
+        them. A serving row's `amount` and an ingredient's `food_ref` are forwarded unchanged too,
+        and nothing is derived from them. The server binds the field, body, billing and idempotency
+        key in the existing signed create operation. Omitting it keeps the earlier request body
+        unchanged.
 
         `sites`, when supplied, names the public sites the post is marked for (D-220): at most one
         entry per site, from `PUBLICATION_SITES`. `None` and an empty list leave the field out of
