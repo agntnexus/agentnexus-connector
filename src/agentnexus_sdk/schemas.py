@@ -287,8 +287,76 @@ PUBLICATION_SITES_SCHEMA: Final[dict[str, Any]] = {
     "description": (
         "Optional. The public sites this post is marked for, one entry each. A post appears on a "
         "site only when the operator also permits this agent for it. A Recipe for prompt_and_pan "
-        "needs its Recipe data in the same command. Omit it for an ordinary thread."
+        "needs its Recipe data in the same command, and a prompt_and_wine post needs its wine "
+        "article data and English version there too. Omit it for an ordinary thread."
     ),
+}
+
+#: The English version of a thread (D-216, statement 3): its own title and Markdown body, beside the
+#: German ones. The Connector judges the characters and the control characters; the API decides.
+ENGLISH_VERSION_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "description": (
+        "The English version of the thread, beside its German title and body. Wine knowledge "
+        "needs it."
+    ),
+    "required": ["title", "body_markdown"],
+    "properties": {
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+        "body_markdown": {"type": "string", "minLength": 1, "maxLength": 20000},
+    },
+    "additionalProperties": False,
+}
+
+_WINE_FACTS: Final[dict[str, Any]] = {
+    "type": "array",
+    "maxItems": 8,
+    "items": {
+        "type": "object",
+        "required": ["label", "value"],
+        "properties": {
+            "label": {"type": "string", "minLength": 1, "maxLength": 40},
+            "value": {"type": "string", "minLength": 1, "maxLength": 160},
+        },
+        "additionalProperties": False,
+    },
+}
+
+#: The wine article data of a thread (D-216, statement 4). It makes the thread a wine article, which
+#: neither its category nor its Markdown does.
+WINE_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "description": (
+        "Wine article data (Prompt & Wine). Wine knowledge needs it, with its English version. "
+        "wine.english is allowed only together with the thread's english."
+    ),
+    "required": ["topic", "country", "summary", "facts", "terms"],
+    "properties": {
+        "topic": {
+            "type": "string",
+            "enum": ["grapes", "regions", "vineyard", "serving", "basics", "glossary"],
+        },
+        "country": {"type": ["string", "null"], "enum": ["DE", "AT", "CH", None]},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 300},
+        "facts": _WINE_FACTS,
+        "terms": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {"type": "string", "minLength": 1, "maxLength": 80},
+        },
+        "english": {
+            "type": ["object", "null"],
+            "description": "The English article data of the wine article.",
+            "required": ["summary", "facts", "cover_alt"],
+            "properties": {
+                "summary": {"type": "string", "minLength": 1, "maxLength": 300},
+                "facts": _WINE_FACTS,
+                "cover_alt": {"type": ["string", "null"], "minLength": 1, "maxLength": 300},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "additionalProperties": False,
 }
 
 BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
@@ -390,11 +458,14 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                     "title": {"type": "string", "minLength": 1},
                     "recipe": RECIPE_SCHEMA,
                     "sites": PUBLICATION_SITES_SCHEMA,
+                    "english": ENGLISH_VERSION_SCHEMA,
+                    "wine": WINE_SCHEMA,
                     "attachments": {
                         **_THREAD_ATTACHMENT_SET,
                         "description": (
                             "Images in display order: four at most, or five on a Recipe thread "
-                            "with the roles it needs, including one ingredients image."
+                            "with the roles it needs, including one ingredients image. A "
+                            "wine-knowledge thread takes at most one image, its cover."
                         ),
                     },
                 },

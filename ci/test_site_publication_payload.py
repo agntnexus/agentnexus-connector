@@ -10,8 +10,8 @@ pin, against the client, the one-shot bridge and the MCP tool:
   and the MCP tool carry it on to the client;
 * **the local refusals.** Each value the API would refuse is refused before anything is signed or
   sent: an unknown site, a repeat, more than two, a value that is not a list of strings,
-  `prompt_and_pan` without Recipe data, and `prompt_and_wine`, which this build cannot send until
-  its wine article data exists (agntnexus/agentnexus#394);
+  `prompt_and_pan` without Recipe data, and `prompt_and_wine` without its wine article data and
+  its English version in the same command (agntnexus/agentnexus#394, D-216);
 * **the answers.** The API's `publication.not_permitted` (403) and `publication.data_required` (400)
   surface through the existing error path as other problems do, and are never retried.
 
@@ -76,8 +76,8 @@ LOCAL_REFUSALS: tuple[tuple[Any, bool, str], ...] = (
     (["prompt_and_pan", "prompt_and_pan"], True, "at most once"),
     (["prompt_and_pan", "prompt_and_wine", "prompt_and_pan"], True, "at most two"),
     (["prompt_and_pan"], False, "needs Recipe data"),
-    (["prompt_and_wine"], True, "cannot send wine article data"),
-    (["prompt_and_wine"], False, "cannot send wine article data"),
+    (["prompt_and_wine"], True, "needs wine article data and its English version"),
+    (["prompt_and_wine"], False, "needs wine article data and its English version"),
 )
 
 #: The same refusals as the bridge sees them. A JSON null is refused there, where the client
@@ -302,6 +302,83 @@ def test_a_marked_recipe_sends_sites_inside_the_signed_body() -> None:
     (request,) = transport.requests
     assert json.loads(request.content)["sites"] == ["prompt_and_pan"]
     assert signature_verifies(request, public_key)
+
+
+def english_version() -> dict[str, str]:
+    """Return one English version of a thread, as the API's English block takes it."""
+    return {"title": "Riesling for a weeknight", "body_markdown": "An English introduction."}
+
+
+def wine_article() -> dict[str, Any]:
+    """Return one wine article's data, without English article data, as the API takes it."""
+    return {
+        "topic": "grapes",
+        "country": "DE",
+        "summary": "Riesling is a white grape with pronounced acidity.",
+        "facts": [],
+        "terms": [],
+        "english": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("with_english", "with_wine"), [(True, False), (False, True), (False, False)]
+)
+def test_a_prompt_and_wine_marking_needs_its_wine_article_data_and_english(
+    with_english: bool, with_wine: bool
+) -> None:
+    """The API refuses a prompt_and_wine marking without both parts; so does the client."""
+    transport = RecordingTransport()
+    client, _ = signed_client(transport)
+    fields: dict[str, Any] = {}
+    if with_english:
+        fields["english"] = english_version()
+    if with_wine:
+        fields["wine"] = wine_article()
+    with client, pytest.raises(ProtocolError, match="needs wine article data and its English"):
+        post_thread(client, sites=["prompt_and_wine"], **fields)
+
+    assert transport.requests == []
+
+
+def test_a_marked_wine_article_sends_its_site_and_data_inside_the_signed_body() -> None:
+    """With its wine article data and English version, the marking is part of the signed body."""
+    transport = RecordingTransport()
+    client, public_key = signed_client(transport)
+    with client:
+        post_thread(
+            client,
+            sites=["prompt_and_wine"],
+            english=english_version(),
+            wine=wine_article(),
+        )
+
+    (request,) = transport.requests
+    body = json.loads(request.content)
+    assert body["sites"] == ["prompt_and_wine"]
+    assert body["english"] == english_version()
+    assert body["wine"] == wine_article()
+    assert signature_verifies(request, public_key)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{}, {"english": english_version()}, {"wine": wine_article()}],
+    ids=["neither", "english-only", "wine-only"],
+)
+def test_the_bridge_refuses_a_prompt_and_wine_marking_without_both_parts(
+    fields: dict[str, Any],
+) -> None:
+    """The one-shot bridge refuses the same marking before anything is signed or sent."""
+    with pytest.raises(bridge.BridgeInputError, match="needs wine article data and its English"):
+        bridge.parse_command(json.dumps(create(sites=["prompt_and_wine"], **fields)).encode())
+
+
+def test_the_bridge_accepts_a_prompt_and_wine_marking_that_carries_its_data() -> None:
+    """Through the bridge the marking passes when its wine article data and English ride along."""
+    command = create(sites=["prompt_and_wine"], english=english_version(), wine=wine_article())
+    parsed = bridge.parse_command(json.dumps(command).encode())
+    assert parsed["sites"] == ["prompt_and_wine"]
 
 
 @pytest.mark.parametrize(("sites", "has_recipe", "words"), LOCAL_REFUSALS)

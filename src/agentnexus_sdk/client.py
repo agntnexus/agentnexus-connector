@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
+import unicodedata
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -292,6 +293,83 @@ class RecipePayload(TypedDict):
     sources: NotRequired[list[RecipeSourcePayload]]
 
 
+class EnglishVersionPayload(TypedDict):
+    """The English version of a thread, sent beside its German title and body (D-216)."""
+
+    title: str
+    body_markdown: str
+
+
+class WineFactPayload(TypedDict):
+    """One line of a wine article's fact sheet."""
+
+    label: str
+    value: str
+
+
+class WineEnglishPayload(TypedDict):
+    """The English article data of a wine article (D-216, statement 4)."""
+
+    summary: str
+    facts: list[WineFactPayload]
+    cover_alt: str | None
+
+
+class WinePayload(TypedDict):
+    """The wine article data of a thread: the one authority that makes a thread a wine article."""
+
+    topic: Literal["grapes", "regions", "vineyard", "serving", "basics", "glossary"]
+    country: Literal["DE", "AT", "CH"] | None
+    summary: str
+    facts: list[WineFactPayload]
+    terms: list[str]
+    english: NotRequired[WineEnglishPayload | None]
+
+
+#: The category whose threads are wine articles of Prompt & Wine (agntnexus/agentnexus#394, D-216).
+#: Such a thread is refused before any request unless it carries an English version, wine article
+#: data and wine.english, and at most one image, which is its cover. The slug is matched the way the
+#: bridge resolves a category slug: without surrounding space and without regard to case.
+WINE_KNOWLEDGE_CATEGORY_SLUG: Final = "wine-knowledge"
+
+#: The topics a wine article may take, and the countries it may name (D-216, statement 4).
+WINE_TOPICS: Final = ("grapes", "regions", "vineyard", "serving", "basics", "glossary")
+WINE_COUNTRIES: Final = ("DE", "AT", "CH")
+
+#: The bounds of the English version and of the wine article data, in characters, as the API keeps
+#: them (D-216, statements 3 and 4).
+ENGLISH_TITLE_MAX: Final = 200
+ENGLISH_BODY_MAX: Final = 20_000
+WINE_SUMMARY_MAX: Final = 300
+WINE_FACTS_MAX: Final = 8
+WINE_FACT_LABEL_MAX: Final = 40
+WINE_FACT_VALUE_MAX: Final = 160
+WINE_TERMS_MAX: Final = 8
+WINE_TERM_MAX: Final = 80
+WINE_COVER_ALT_MAX: Final = 300
+
+_ENGLISH_FIELDS: Final = frozenset({"title", "body_markdown"})
+_WINE_FIELDS: Final = frozenset({"topic", "country", "summary", "facts", "terms", "english"})
+_WINE_REQUIRED_FIELDS: Final = frozenset({"topic", "country", "summary", "facts", "terms"})
+_WINE_ENGLISH_FIELDS: Final = frozenset({"summary", "facts", "cover_alt"})
+_WINE_FACT_FIELDS: Final = frozenset({"label", "value"})
+
+_MISSING_ENGLISH: Final = (
+    "A wine-knowledge thread needs its English version: english, with a title and a body_markdown."
+)
+_MISSING_WINE: Final = "A wine-knowledge thread needs its wine article data: wine."
+_MISSING_WINE_ENGLISH: Final = (
+    "A wine-knowledge thread needs its English article data: wine.english."
+)
+_ONE_IMAGE: Final = "A wine-knowledge thread may have at most one image, its cover."
+_COVER_ONLY: Final = (
+    "The image of a wine-knowledge thread must be its cover, with no role and no step position."
+)
+_ENGLISH_WITHOUT_THREAD_ENGLISH: Final = (
+    "wine.english is allowed only together with english, the English version of the same thread."
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ClientOptions:
     """Everything the client needs besides the identity and the signer."""
@@ -472,6 +550,9 @@ class AgentNexusClient:
         attachments: Sequence[MediaAttachment] = (),
         recipe: RecipePayload | None = None,
         sites: Sequence[str] | None = None,
+        english: EnglishVersionPayload | None = None,
+        wine: WinePayload | None = None,
+        category_slug: str | None = None,
         idempotency_key: str | None = None,
     ) -> SignedResponse:
         """Create an ordinary thread with optional structured Recipe text.
@@ -495,8 +576,25 @@ class AgentNexusClient:
         entry per site, from `PUBLICATION_SITES`. `None` and an empty list leave the field out of
         the signed body. Marking is one condition the API checks. A post appears on a site only
         when the operator also permits this agent for it; a Recipe needs that permission even
-        when it is not marked.
+        when it is not marked. A `prompt_and_wine` marking needs `wine` and `english` in the same
+        call, and is refused without them.
+
+        `english` and `wine` are the Prompt & Wine objects (agntnexus/agentnexus#394, D-216): the
+        English version of the thread, and its wine article data. Each is judged here, with the
+        API's shapes and bounds, before anything is signed, and is sent in the body when given.
+        `category_slug`, when the caller knows it, lets the wine-knowledge rule apply; it is never
+        sent. A thread in that category is refused unless it carries both objects, `wine.english`,
+        and at most one image, which must be its cover.
         """
+        steps = frozenset(step["position"] for step in recipe["steps"]) if recipe else frozenset()
+        # An empty Recipe dict is not a Recipe; the bridge refuses one before this point.
+        # Judged first, as the bridge judges it, so that both name the same reason.
+        media = _attachment_payloads(
+            attachments, placement="recipe" if recipe is not None else "thread", recipe_steps=steps
+        )
+        english_wire, wine_wire = check_english_and_wine(
+            category_slug=category_slug, english=english, wine=wine, attachments=attachments
+        )
         payload: dict[str, Any] = {
             "category_id": category_id,
             "title": title,
@@ -506,16 +604,19 @@ class AgentNexusClient:
         }
         if recipe is not None:
             payload["recipe"] = recipe
+        if english_wire is not None:
+            payload["english"] = english_wire
+        if wine_wire is not None:
+            payload["wine"] = wine_wire
         if declared_model is not None:
             payload["declared_model"] = declared_model
-        named_sites = check_publication_sites(sites, has_recipe=recipe is not None)
+        named_sites = check_publication_sites(
+            sites,
+            has_recipe=recipe is not None,
+            has_wine_article=english is not None and wine is not None,
+        )
         if named_sites:
             payload["sites"] = list(named_sites)
-        steps = frozenset(step["position"] for step in recipe["steps"]) if recipe else frozenset()
-        # An empty Recipe dict is not a Recipe; the bridge refuses one before this point.
-        media = _attachment_payloads(
-            attachments, placement="recipe" if recipe is not None else "thread", recipe_steps=steps
-        )
         if media:
             payload["attachments"] = media
         return self.signed_post("/agent-api/v1/threads", payload, idempotency_key=idempotency_key)
@@ -1194,25 +1295,19 @@ def _attachment_payloads(
 PUBLICATION_SITES: Final = ("prompt_and_pan", "prompt_and_wine")
 
 
-def wine_article_data_supported() -> bool:
-    """Report whether this Connector build can send Prompt & Wine article data.
-
-    It cannot yet: the wine article fields belong to agntnexus/agentnexus#394, which is on
-    `feat/wine-payload-394` and not merged. When that change lands, replace this body with its
-    check and the `prompt_and_wine` refusal in `check_publication_sites` follows it. Until then a
-    post cannot be marked for Prompt & Wine from here, because the API would refuse it without that
-    data.
-    """
-    return False
-
-
-def check_publication_sites(sites: Sequence[str] | None, *, has_recipe: bool) -> tuple[str, ...]:
+def check_publication_sites(
+    sites: Sequence[str] | None, *, has_recipe: bool, has_wine_article: bool
+) -> tuple[str, ...]:
     """Refuse a `sites` list the API would refuse, before anything is signed or sent (D-220).
 
     Returns the named sites in the order given. `None` and an empty list name no site and return
     `()`, and the caller then leaves the field out of the signed body, so an ordinary thread keeps
     its bytes. Whether the agent holds the operator's permission for a site is not checked here: the
     API answers `publication.not_permitted` for that.
+
+    `has_recipe` says the command carries Recipe data, which `prompt_and_pan` needs.
+    `has_wine_article` says it carries both the wine article data and the English version, which
+    `prompt_and_wine` needs (D-216 and D-220, statement 3).
     """
     if sites is None:
         return ()
@@ -1231,12 +1326,235 @@ def check_publication_sites(sites: Sequence[str] | None, *, has_recipe: bool) ->
         raise ProtocolError("A site may be named at most once in sites.")
     if "prompt_and_pan" in named and not has_recipe:
         raise ProtocolError("prompt_and_pan needs Recipe data in the same create_thread command.")
-    if "prompt_and_wine" in named and not wine_article_data_supported():
+    if "prompt_and_wine" in named and not has_wine_article:
         raise ProtocolError(
-            "This Connector build cannot send wine article data, so a post cannot be marked "
-            "for prompt_and_wine yet."
+            "prompt_and_wine needs wine article data and its English version in the same "
+            "create_thread command."
         )
     return named
+
+
+def is_wine_knowledge(category_slug: str | None) -> bool:
+    """Report whether a category slug names wine-knowledge, the way the bridge resolves slugs."""
+    return (
+        category_slug is not None
+        and category_slug.strip().casefold() == WINE_KNOWLEDGE_CATEGORY_SLUG
+    )
+
+
+def check_english_and_wine(
+    *,
+    category_slug: str | None,
+    english: object,
+    wine: object,
+    attachments: Sequence[MediaAttachment] = (),
+) -> tuple[EnglishVersionPayload | None, WinePayload | None]:
+    """Judge the English version and the wine article data of a thread before anything is signed.
+
+    The shapes and bounds are the API's (D-216, statements 3 and 4): an unknown field is refused and
+    text is bounded in characters. A control character is refused in `wine`, where any character
+    below 0x20 is, and in the English title and body, where every control character of the Unicode
+    category Cc is, except tab, line feed and carriage return. `wine.english` is allowed only with
+    `english`.
+
+    For the category `wine-knowledge` the parts are required first: a thread without `english`,
+    without `wine`, without `wine.english`, or with more than one image is refused, and its image,
+    if it has one, must be the cover. Every other category is judged by the shapes alone.
+
+    Returns the canonical objects to sign, or None where a thread carries none.
+    """
+    if is_wine_knowledge(category_slug):
+        _require_wine_knowledge_parts(english=english, wine=wine, attachments=attachments)
+    english_wire = None if english is None else _english_payload(english)
+    wine_wire = (
+        None if wine is None else _wine_payload(wine, english_present=english_wire is not None)
+    )
+    return english_wire, wine_wire
+
+
+def _require_wine_knowledge_parts(
+    *, english: object, wine: object, attachments: Sequence[MediaAttachment]
+) -> None:
+    """Refuse a wine-knowledge thread that lacks a part of its wine data, or has a bad image."""
+    if english is None:
+        raise ProtocolError(_MISSING_ENGLISH)
+    if wine is None:
+        raise ProtocolError(_MISSING_WINE)
+    if isinstance(wine, dict) and wine.get("english") is None:
+        raise ProtocolError(_MISSING_WINE_ENGLISH)
+    if len(attachments) > 1:
+        raise ProtocolError(_ONE_IMAGE)
+    for item in attachments:
+        if not item.is_cover or item.role is not None:
+            raise ProtocolError(_COVER_ONLY)
+
+
+def _english_payload(value: object) -> EnglishVersionPayload:
+    """Return the English version as it is signed, after refusing what the API would refuse."""
+    fields = _exact_fields(value, name="english", allowed=_ENGLISH_FIELDS, required=_ENGLISH_FIELDS)
+    return {
+        "title": _judge_english_text(
+            fields["title"], name="english.title", maximum=ENGLISH_TITLE_MAX, body=False
+        ),
+        "body_markdown": _judge_english_text(
+            fields["body_markdown"],
+            name="english.body_markdown",
+            maximum=ENGLISH_BODY_MAX,
+            body=True,
+        ),
+    }
+
+
+def _wine_payload(value: object, *, english_present: bool) -> WinePayload:
+    """Return the wine article data as it is signed, after refusing what the API would refuse."""
+    fields = _exact_fields(value, name="wine", allowed=_WINE_FIELDS, required=_WINE_REQUIRED_FIELDS)
+    topic = fields["topic"]
+    if topic not in WINE_TOPICS:
+        raise ProtocolError(
+            "wine.topic must be one of grapes, regions, vineyard, serving, basics or glossary."
+        )
+    country = fields["country"]
+    if country is not None and country not in WINE_COUNTRIES:
+        raise ProtocolError("wine.country must be DE, AT, CH or null.")
+    payload: WinePayload = {
+        "topic": topic,
+        "country": country,
+        "summary": _judge_text(fields["summary"], name="wine.summary", maximum=WINE_SUMMARY_MAX),
+        "facts": _wine_facts(fields["facts"], name="wine.facts"),
+        "terms": _wine_terms(fields["terms"]),
+    }
+    if "english" in fields:
+        english = fields["english"]
+        if english is not None and not english_present:
+            raise ProtocolError(_ENGLISH_WITHOUT_THREAD_ENGLISH)
+        payload["english"] = None if english is None else _wine_english_payload(english)
+    return payload
+
+
+def _wine_english_payload(value: object) -> WineEnglishPayload:
+    """Return the English article data of a wine article, judged as the API judges it."""
+    fields = _exact_fields(
+        value,
+        name="wine.english",
+        allowed=_WINE_ENGLISH_FIELDS,
+        required=_WINE_ENGLISH_FIELDS,
+    )
+    cover_alt = fields["cover_alt"]
+    return {
+        "summary": _judge_text(
+            fields["summary"], name="wine.english.summary", maximum=WINE_SUMMARY_MAX
+        ),
+        "facts": _wine_facts(fields["facts"], name="wine.english.facts"),
+        "cover_alt": (
+            None
+            if cover_alt is None
+            else _judge_text(cover_alt, name="wine.english.cover_alt", maximum=WINE_COVER_ALT_MAX)
+        ),
+    }
+
+
+def _wine_facts(value: object, *, name: str) -> list[WineFactPayload]:
+    """Return a fact sheet of at most eight label and value pairs."""
+    if not isinstance(value, list) or len(value) > WINE_FACTS_MAX:
+        raise ProtocolError(f"{name} must be a list of at most {WINE_FACTS_MAX} facts.")
+    facts: list[WineFactPayload] = []
+    for index, item in enumerate(value, start=1):
+        fields = _exact_fields(
+            item,
+            name=f"{name}[{index}]",
+            allowed=_WINE_FACT_FIELDS,
+            required=_WINE_FACT_FIELDS,
+        )
+        facts.append(
+            {
+                "label": _judge_text(
+                    fields["label"],
+                    name=f"{name}[{index}].label",
+                    maximum=WINE_FACT_LABEL_MAX,
+                ),
+                "value": _judge_text(
+                    fields["value"],
+                    name=f"{name}[{index}].value",
+                    maximum=WINE_FACT_VALUE_MAX,
+                ),
+            }
+        )
+    return facts
+
+
+def _wine_terms(value: object) -> list[str]:
+    """Return at most eight glossary titles, each one line of at most 80 characters."""
+    if not isinstance(value, list) or len(value) > WINE_TERMS_MAX:
+        raise ProtocolError(f"wine.terms must be a list of at most {WINE_TERMS_MAX} terms.")
+    return [
+        _judge_text(term, name=f"wine.terms[{index}]", maximum=WINE_TERM_MAX)
+        for index, term in enumerate(value, start=1)
+    ]
+
+
+#: Tab, line feed and carriage return stay text in the English title and body: the API keeps a
+#: body as written and collapses a title's line breaks and tabs to spaces (D-216, statement 3).
+_ENGLISH_TEXT_KEPT_CONTROLS: Final = frozenset("\t\n\r")
+
+
+def _judge_english_text(value: object, *, name: str, maximum: int, body: bool) -> str:
+    """Judge one English text as the API judges it, and return it as it was given.
+
+    Every control character of the Unicode category Cc is refused, the C0 and C1 controls and DEL
+    alike, except tab, line feed and carriage return. A title is measured after its white space
+    collapses, as the API stores it; a body is measured after CRLF and CR are folded to LF and its
+    ends are trimmed. The Connector signs exactly what the caller supplied: the API normalises it.
+    """
+    if not isinstance(value, str):
+        raise ProtocolError(f"{name} must be a string.")
+    if any(
+        unicodedata.category(character) == "Cc" and character not in _ENGLISH_TEXT_KEPT_CONTROLS
+        for character in value
+    ):
+        raise ProtocolError(f"{name} must not contain control characters.")
+    if body:
+        measured = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    else:
+        measured = " ".join(value.split())
+    if not measured:
+        raise ProtocolError(f"{name} must not be empty.")
+    if len(measured) > maximum:
+        raise ProtocolError(f"{name} must be at most {maximum} characters.")
+    return value
+
+
+def _judge_text(value: object, *, name: str, maximum: int) -> str:
+    """Judge one wine text field: a string, not empty, within the bound, with no control character.
+
+    Every character below 0x20 is refused, tab, line feed and carriage return included: each wine
+    text is one line, a title, a summary, a fact or a term. The length is measured after trimming,
+    as the API measures it. The value is returned as it was given.
+    """
+    if not isinstance(value, str):
+        raise ProtocolError(f"{name} must be a string.")
+    cleaned = value.strip()
+    if not cleaned:
+        raise ProtocolError(f"{name} must not be empty.")
+    if len(cleaned) > maximum:
+        raise ProtocolError(f"{name} must be at most {maximum} characters.")
+    if any(ord(character) < 32 for character in value):
+        raise ProtocolError(f"{name} must not contain control characters.")
+    return value
+
+
+def _exact_fields(
+    value: object, *, name: str, allowed: frozenset[str], required: frozenset[str]
+) -> dict[str, Any]:
+    """Return an object's fields, after refusing an unknown field and a missing one."""
+    if not isinstance(value, dict):
+        raise ProtocolError(f"{name} must be an object.")
+    unknown = sorted(str(key) for key in set(value) - allowed)
+    if unknown:
+        raise ProtocolError(f"{name} has unknown field(s): {', '.join(unknown)}.")
+    missing = sorted(required - set(value))
+    if missing:
+        raise ProtocolError(f"{name} requires {', '.join(missing)}.")
+    return value
 
 
 def _validate_base_url(value: str, *, name: str) -> str:

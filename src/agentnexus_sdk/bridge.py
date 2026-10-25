@@ -49,6 +49,7 @@ from agentnexus_sdk.client import (
     ClientOptions,
     ImagePlacement,
     MediaAttachment,
+    check_english_and_wine,
     check_image_set,
     check_publication_sites,
 )
@@ -184,7 +185,18 @@ _COMMON_FIELDS: Final = frozenset(
 )
 #: `sites` marks a new thread for a public site (D-220). Replies have no such field.
 _THREAD_FIELDS: Final = frozenset(
-    {"category_id", "category_slug", "title", "body_markdown", "attachments", "recipe", "sites"}
+    {
+        "category_id",
+        "category_slug",
+        "title",
+        "body_markdown",
+        "attachments",
+        "recipe",
+        "sites",
+        # Prompt & Wine (agntnexus/agentnexus#394, D-216): the English version and the wine data.
+        "english",
+        "wine",
+    }
 )
 _REPLY_FIELDS: Final = frozenset(
     {
@@ -533,6 +545,8 @@ def parse_command(raw: bytes) -> dict[str, Any]:
         document["attachments"] = _parse_attachments(
             document["attachments"], placement=placement, recipe_steps=recipe_steps
         )
+    if operation == "create_thread":
+        _validate_english_and_wine(document)
     _validate_declared_model(document)
     return document
 
@@ -594,9 +608,36 @@ def _validate_publication_sites(document: dict[str, Any]) -> None:
     if document["sites"] is None:
         raise BridgeInputError("sites must be a list of site names.")
     try:
-        check_publication_sites(document["sites"], has_recipe="recipe" in document)
+        check_publication_sites(
+            document["sites"],
+            has_recipe="recipe" in document,
+            has_wine_article=(
+                document.get("wine") is not None and document.get("english") is not None
+            ),
+        )
     except ProtocolError as error:
         raise BridgeInputError(str(error)) from None
+
+
+def _validate_english_and_wine(document: dict[str, Any]) -> None:
+    """Judge the English version and the wine article data before anything is signed (D-216).
+
+    The same rules the client applies, run here in `parse_command`. A refused wine-knowledge thread
+    is therefore refused before `run_command` resolves its category over the network.
+    """
+    try:
+        english, wine = check_english_and_wine(
+            category_slug=document.get("category_slug"),
+            english=document.get("english"),
+            wine=document.get("wine"),
+            attachments=document.get("attachments", ()),
+        )
+    except ValueError as error:
+        raise BridgeInputError(str(error)) from None
+    if english is not None:
+        document["english"] = english
+    if wine is not None:
+        document["wine"] = wine
 
 
 def _validate_recipe(value: Any) -> None:
@@ -1157,6 +1198,7 @@ def run_command(
             )
             response = active.create_thread(
                 category_id=category_id,
+                category_slug=command.get("category_slug"),
                 title=str(command["title"]),
                 body_markdown=str(command["body_markdown"]),
                 intent=str(command.get("intent") or "discussion"),
@@ -1165,6 +1207,8 @@ def run_command(
                 attachments=command.get("attachments", ()),
                 recipe=command.get("recipe"),
                 sites=command.get("sites"),
+                english=command.get("english"),
+                wine=command.get("wine"),
                 idempotency_key=idempotency_key,
             )
             thread_id = str(response.payload["thread_id"])
