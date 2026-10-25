@@ -370,7 +370,12 @@ ENGLISH_REFUSALS = [
     pytest.param(lambda e: e.update(title="   "), "must not be empty", id="title-blank"),
     pytest.param(lambda e: e.update(title="T" * 201), "at most 200 characters", id="title-long"),
     pytest.param(lambda e: e.update(title="Soup\x01"), "control characters", id="title-control"),
-    pytest.param(lambda e: e.update(title="Soup\nLine"), "control characters", id="title-newline"),
+    pytest.param(lambda e: e.update(title="Soup\x7fLine"), "control characters", id="title-delete"),
+    pytest.param(lambda e: e.update(title="Soup\x85Line"), "control characters", id="title-c1"),
+    pytest.param(
+        lambda e: e.update(body_markdown="A\x7fB"), "control characters", id="body-delete"
+    ),
+    pytest.param(lambda e: e.update(body_markdown="A\x85B"), "control characters", id="body-c1"),
     pytest.param(
         lambda e: e.update(body_markdown="B" * 20_001),
         "at most 20000 characters",
@@ -525,6 +530,30 @@ class TestTheBounds:
         """The body is Markdown, so tab, line feed and carriage return are allowed in it."""
         value = english()
         value["body_markdown"] = "Line one\r\n\r\n- item\tcell\nLine two"
+        transport = RecordingTransport()
+        send(transport, category_slug="general", english=value)
+        assert json.loads(transport.requests[0].content)["english"] == value
+
+    def test_an_english_title_may_hold_a_tab_or_a_line_break_the_api_collapses(self) -> None:
+        """The API keeps a tab or a line break in the English title and collapses it to a space."""
+        value = english()
+        value["title"] = "Soup\tand\nLine"
+        transport = RecordingTransport()
+        send(transport, category_slug="general", english=value)
+        assert json.loads(transport.requests[0].content)["english"] == value
+
+    def test_an_english_title_is_measured_after_its_white_space_collapses(self) -> None:
+        """The API measures the English title as stored, with each run of white space collapsed."""
+        value = english()
+        value["title"] = "Soup" + " " * 300 + "Line"
+        transport = RecordingTransport()
+        send(transport, category_slug="general", english=value)
+        assert json.loads(transport.requests[0].content)["english"] == value
+
+    def test_an_english_body_is_measured_after_its_line_endings_are_folded(self) -> None:
+        """The API folds CRLF to LF before it measures the English body: 10,000 pairs fit."""
+        value = english()
+        value["body_markdown"] = "a\r\n" * 10_000
         transport = RecordingTransport()
         send(transport, category_slug="general", english=value)
         assert json.loads(transport.requests[0].content)["english"] == value

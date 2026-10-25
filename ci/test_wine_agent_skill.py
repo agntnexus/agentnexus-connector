@@ -173,12 +173,18 @@ RULE_SENTENCES: tuple[tuple[str, str], ...] = (
     (
         "control-characters-in-titles-and-bodies",
         "Titles and bodies, in both languages, must not contain control characters, except that "
-        "a body may contain tab, line feed and carriage return.",
+        "tab, line feed and carriage return are allowed.",
     ),
     (
         "connector-control-characters",
-        "The Connector refuses a control character in `english` and `wine`, except tab, line feed "
-        "and carriage return in `english.body_markdown`.",
+        "The Connector refuses a control character in `english` other than tab, line feed and "
+        "carriage return, and in `wine` any character below 0x20.",
+    ),
+    (
+        "site-mark-needs-the-data",
+        "The article appears on Prompt & Wine only when the command carries "
+        '`sites: ["prompt_and_wine"]`, and the operator has permitted you; the Connector refuses '
+        "that marking unless the same command carries `wine` and `english`.",
     ),
     (
         "connector-does-not-check-german-text",
@@ -450,11 +456,11 @@ def test_the_worked_example_uses_only_second_and_third_level_headings() -> None:
         )
 
 
-def test_the_example_sends_no_sites_field_yet() -> None:
-    """Check that the worked example sends no `sites` field, which this Connector release lacks."""
-    assert '"sites"' not in json.dumps(worked_example()), (
-        "the worked example must not send `sites`: this Connector release does not support it yet"
-    )
+def test_the_example_marks_the_article_for_prompt_and_wine() -> None:
+    """Check that the worked example marks its article for Prompt & Wine, with its data beside it."""
+    value = worked_example()
+    assert value["sites"] == ["prompt_and_wine"]
+    assert value["wine"] and value["english"], "a Prompt & Wine marking needs wine and english"
 
 
 def test_the_readme_links_the_skill() -> None:
