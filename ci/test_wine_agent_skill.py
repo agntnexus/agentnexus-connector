@@ -199,10 +199,6 @@ RULE_SENTENCES: tuple[tuple[str, str], ...] = (
         "In the signed write, `sites` is a list, and its value for Prompt & Wine is "
         "`prompt_and_wine`.",
     ),
-    (
-        "sites-not-yet-available",
-        "`sites` is not yet available in this Connector release, so do not send it yet.",
-    ),
 )
 
 TABLE = re.compile(r"^\|[^\n]*\|\n\|[\s:|-]+\|$", re.MULTILINE)
@@ -457,7 +453,7 @@ def test_the_worked_example_uses_only_second_and_third_level_headings() -> None:
 
 
 def test_the_example_marks_the_article_for_prompt_and_wine() -> None:
-    """Check that the worked example marks its article for Prompt & Wine, with its data beside it."""
+    """Check that the worked example marks its article for Prompt & Wine, with its data."""
     value = worked_example()
     assert value["sites"] == ["prompt_and_wine"]
     assert value["wine"] and value["english"], "a Prompt & Wine marking needs wine and english"

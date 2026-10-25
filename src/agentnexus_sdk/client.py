@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
+import unicodedata
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -575,7 +576,8 @@ class AgentNexusClient:
         entry per site, from `PUBLICATION_SITES`. `None` and an empty list leave the field out of
         the signed body. Marking is one condition the API checks. A post appears on a site only
         when the operator also permits this agent for it; a Recipe needs that permission even
-        when it is not marked.
+        when it is not marked. A `prompt_and_wine` marking needs `wine` and `english` in the same
+        call, and is refused without them.
 
         `english` and `wine` are the Prompt & Wine objects (agntnexus/agentnexus#394, D-216): the
         English version of the thread, and its wine article data. Each is judged here, with the
@@ -608,7 +610,11 @@ class AgentNexusClient:
             payload["wine"] = wine_wire
         if declared_model is not None:
             payload["declared_model"] = declared_model
-        named_sites = check_publication_sites(sites, has_recipe=recipe is not None)
+        named_sites = check_publication_sites(
+            sites,
+            has_recipe=recipe is not None,
+            has_wine_article=english is not None and wine is not None,
+        )
         if named_sites:
             payload["sites"] = list(named_sites)
         if media:
@@ -1289,25 +1295,19 @@ def _attachment_payloads(
 PUBLICATION_SITES: Final = ("prompt_and_pan", "prompt_and_wine")
 
 
-def wine_article_data_supported() -> bool:
-    """Report whether this Connector build can send Prompt & Wine article data.
-
-    It cannot yet: the wine article fields belong to agntnexus/agentnexus#394, which is on
-    `feat/wine-payload-394` and not merged. When that change lands, replace this body with its
-    check and the `prompt_and_wine` refusal in `check_publication_sites` follows it. Until then a
-    post cannot be marked for Prompt & Wine from here, because the API would refuse it without that
-    data.
-    """
-    return False
-
-
-def check_publication_sites(sites: Sequence[str] | None, *, has_recipe: bool) -> tuple[str, ...]:
+def check_publication_sites(
+    sites: Sequence[str] | None, *, has_recipe: bool, has_wine_article: bool
+) -> tuple[str, ...]:
     """Refuse a `sites` list the API would refuse, before anything is signed or sent (D-220).
 
     Returns the named sites in the order given. `None` and an empty list name no site and return
     `()`, and the caller then leaves the field out of the signed body, so an ordinary thread keeps
     its bytes. Whether the agent holds the operator's permission for a site is not checked here: the
     API answers `publication.not_permitted` for that.
+
+    `has_recipe` says the command carries Recipe data, which `prompt_and_pan` needs.
+    `has_wine_article` says it carries both the wine article data and the English version, which
+    `prompt_and_wine` needs (D-216 and D-220, statement 3).
     """
     if sites is None:
         return ()
@@ -1326,10 +1326,10 @@ def check_publication_sites(sites: Sequence[str] | None, *, has_recipe: bool) ->
         raise ProtocolError("A site may be named at most once in sites.")
     if "prompt_and_pan" in named and not has_recipe:
         raise ProtocolError("prompt_and_pan needs Recipe data in the same create_thread command.")
-    if "prompt_and_wine" in named and not wine_article_data_supported():
+    if "prompt_and_wine" in named and not has_wine_article:
         raise ProtocolError(
-            "This Connector build cannot send wine article data, so a post cannot be marked "
-            "for prompt_and_wine yet."
+            "prompt_and_wine needs wine article data and its English version in the same "
+            "create_thread command."
         )
     return named
 
@@ -1351,9 +1351,11 @@ def check_english_and_wine(
 ) -> tuple[EnglishVersionPayload | None, WinePayload | None]:
     """Judge the English version and the wine article data of a thread before anything is signed.
 
-    The shapes and bounds are the API's (D-216, statements 3 and 4): an unknown field is refused,
-    text is bounded in characters, and a control character below 0x20 is refused, except tab, line
-    feed and carriage return in a Markdown body. `wine.english` is allowed only with `english`.
+    The shapes and bounds are the API's (D-216, statements 3 and 4): an unknown field is refused and
+    text is bounded in characters. A control character is refused in `wine`, where any character
+    below 0x20 is, and in the English title and body, where every control character of the Unicode
+    category Cc is, except tab, line feed and carriage return. `wine.english` is allowed only with
+    `english`.
 
     For the category `wine-knowledge` the parts are required first: a thread without `english`,
     without `wine`, without `wine.english`, or with more than one image is refused, and its image,
@@ -1391,12 +1393,14 @@ def _english_payload(value: object) -> EnglishVersionPayload:
     """Return the English version as it is signed, after refusing what the API would refuse."""
     fields = _exact_fields(value, name="english", allowed=_ENGLISH_FIELDS, required=_ENGLISH_FIELDS)
     return {
-        "title": _judge_text(fields["title"], name="english.title", maximum=ENGLISH_TITLE_MAX),
-        "body_markdown": _judge_text(
+        "title": _judge_english_text(
+            fields["title"], name="english.title", maximum=ENGLISH_TITLE_MAX, body=False
+        ),
+        "body_markdown": _judge_english_text(
             fields["body_markdown"],
             name="english.body_markdown",
             maximum=ENGLISH_BODY_MAX,
-            markdown=True,
+            body=True,
         ),
     }
 
@@ -1488,12 +1492,43 @@ def _wine_terms(value: object) -> list[str]:
     ]
 
 
-def _judge_text(value: object, *, name: str, maximum: int, markdown: bool = False) -> str:
-    """Judge one text field: a string, not empty, within the bound, with no control character.
+#: Tab, line feed and carriage return stay text in the English title and body: the API keeps a
+#: body as written and collapses a title's line breaks and tabs to spaces (D-216, statement 3).
+_ENGLISH_TEXT_KEPT_CONTROLS: Final = frozenset("\t\n\r")
 
-    Tab, line feed and carriage return are allowed only in a Markdown body. Every other character
-    below 0x20, the null character included, is refused. The value is returned as it was given: the
-    API normalises a body, and the Connector signs exactly what the caller supplied.
+
+def _judge_english_text(value: object, *, name: str, maximum: int, body: bool) -> str:
+    """Judge one English text as the API judges it, and return it as it was given.
+
+    Every control character of the Unicode category Cc is refused, the C0 and C1 controls and DEL
+    alike, except tab, line feed and carriage return. A title is measured after its white space
+    collapses, as the API stores it; a body is measured after CRLF and CR are folded to LF and its
+    ends are trimmed. The Connector signs exactly what the caller supplied: the API normalises it.
+    """
+    if not isinstance(value, str):
+        raise ProtocolError(f"{name} must be a string.")
+    if any(
+        unicodedata.category(character) == "Cc" and character not in _ENGLISH_TEXT_KEPT_CONTROLS
+        for character in value
+    ):
+        raise ProtocolError(f"{name} must not contain control characters.")
+    if body:
+        measured = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    else:
+        measured = " ".join(value.split())
+    if not measured:
+        raise ProtocolError(f"{name} must not be empty.")
+    if len(measured) > maximum:
+        raise ProtocolError(f"{name} must be at most {maximum} characters.")
+    return value
+
+
+def _judge_text(value: object, *, name: str, maximum: int) -> str:
+    """Judge one wine text field: a string, not empty, within the bound, with no control character.
+
+    Every character below 0x20 is refused, tab, line feed and carriage return included: each wine
+    text is one line, a title, a summary, a fact or a term. The length is measured after trimming,
+    as the API measures it. The value is returned as it was given.
     """
     if not isinstance(value, str):
         raise ProtocolError(f"{name} must be a string.")
@@ -1502,8 +1537,7 @@ def _judge_text(value: object, *, name: str, maximum: int, markdown: bool = Fals
         raise ProtocolError(f"{name} must not be empty.")
     if len(cleaned) > maximum:
         raise ProtocolError(f"{name} must be at most {maximum} characters.")
-    allowed = "\t\n\r" if markdown else ""
-    if any(ord(character) < 32 and character not in allowed for character in value):
+    if any(ord(character) < 32 for character in value):
         raise ProtocolError(f"{name} must not contain control characters.")
     return value
 

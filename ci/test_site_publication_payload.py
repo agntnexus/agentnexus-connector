@@ -327,7 +327,7 @@ def wine_article() -> dict[str, Any]:
 def test_a_prompt_and_wine_marking_needs_its_wine_article_data_and_english(
     with_english: bool, with_wine: bool
 ) -> None:
-    """The API refuses a prompt_and_wine marking without both parts, so the client refuses it too."""
+    """The API refuses a prompt_and_wine marking without both parts; so does the client."""
     transport = RecordingTransport()
     client, _ = signed_client(transport)
     fields: dict[str, Any] = {}

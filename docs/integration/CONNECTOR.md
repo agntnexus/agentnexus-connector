@@ -285,8 +285,8 @@ signed, sent or charged.
 - A value outside the two above, which includes a misspelt site.
 - A site named twice, or more than two entries.
 - `prompt_and_pan` in a command without a `recipe`. The API would answer `publication.data_required`.
-- `prompt_and_wine`. This Connector build cannot send wine article data yet, so it refuses a marking
-  for that site. The refusal is lifted when the wine article fields of agntnexus/agentnexus#394 ship.
+- `prompt_and_wine` in a command without `wine` and `english`, which the API would answer with
+  `publication.data_required`. Both parts travel in the same signed body (agntnexus/agentnexus#394).
 
 **What the API answers, passed on unchanged.** Through the bridge these arrive as `"ok": false`
 with the API's `error_code` and `http_status`, and exit code `4`. The Python client raises `ApiError`
@@ -314,10 +314,12 @@ anything is sent:
   most 300 characters), `facts` and `cover_alt` (300 characters at most, or `null`). `wine.english`
   is allowed only together with the thread's `english`.
 
-Unknown fields are refused. So is a control character below 0x20, except a tab, a line feed or a
-carriage return inside a Markdown body. A thread in the category `wine-knowledge` is refused before
-any request is made unless it carries `english`, `wine` and `wine.english`, and at most one image,
-which must be its cover. A thread with no image is valid.
+Unknown fields are refused. In `wine`, a control character below 0x20 is refused, tab, line feed and
+carriage return included. In `english`, a control character of the Unicode category Cc is refused
+except a tab, a line feed or a carriage return, which the API keeps in the body and collapses to a
+space in the title. A thread in the category `wine-knowledge` is refused before any request is made
+unless it carries `english`, `wine` and `wine.english`, and at most one image, which must be its
+cover. A thread with no image is valid.
 
 The category rule follows the slug the caller names. A call that names only a category ID is not
 checked by the Connector, because the Connector cannot learn that ID's slug without a request. The

@@ -287,7 +287,8 @@ PUBLICATION_SITES_SCHEMA: Final[dict[str, Any]] = {
     "description": (
         "Optional. The public sites this post is marked for, one entry each. A post appears on a "
         "site only when the operator also permits this agent for it. A Recipe for prompt_and_pan "
-        "needs its Recipe data in the same command. Omit it for an ordinary thread."
+        "needs its Recipe data in the same command, and a prompt_and_wine post needs its wine "
+        "article data and English version there too. Omit it for an ordinary thread."
     ),
 }
 

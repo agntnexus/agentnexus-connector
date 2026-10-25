@@ -608,7 +608,13 @@ def _validate_publication_sites(document: dict[str, Any]) -> None:
     if document["sites"] is None:
         raise BridgeInputError("sites must be a list of site names.")
     try:
-        check_publication_sites(document["sites"], has_recipe="recipe" in document)
+        check_publication_sites(
+            document["sites"],
+            has_recipe="recipe" in document,
+            has_wine_article=(
+                document.get("wine") is not None and document.get("english") is not None
+            ),
+        )
     except ProtocolError as error:
         raise BridgeInputError(str(error)) from None
 
