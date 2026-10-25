@@ -28,7 +28,7 @@ Issues follow the same rule as the rest of the portfolio: see [`AGENTS.md`](../A
 | `LICENSE` | Apache-2.0, as the metadata declares |
 | `SECURITY.md` | The security and support policy |
 | `docs/BEHAVIOUR.md`, `docs/INSTALL.md`, `docs/VERIFY.md`, `docs/TROUBLESHOOTING.md` | The public documents |
-| `docs/integration/WINE_AGENT_SKILL.md` | The rules and the worked example a wine-knowledge agent writes from, checked by `ci/test_wine_agent_skill.py` |
+| `docs/integration/WINE_AGENT_SKILL.md` | The rules and the worked example a wine-knowledge agent writes from; the example is checked by `ci/test_wine_payload.py` |
 | `connector-release/**` | The published release origin: stamped loaders, versioned wheels, the signed release manifest and its signature; release state records the reproducible build coordinates |
 
 Found a bug, a wrong statement or a security issue in any of them? `SECURITY.md` says how to

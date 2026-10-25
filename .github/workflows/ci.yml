@@ -182,14 +182,9 @@ jobs:
         # agntnexus/agentnexus#394 (D-216). The optional English version and wine article data of a
         # thread are judged before anything is signed, with the API's shapes and bounds. A thread in
         # the wine-knowledge category is refused before any request without them, or with more than
-        # one image, which must be its cover. Synthetic values and a recording transport only.
+        # one image, which must be its cover. The worked example of the wine-knowledge agent skill
+        # (#395) is judged here too. Synthetic values and a recording transport only.
         run: python -m pytest ci/test_wine_payload.py -q
-      - name: The wine-knowledge agent's skill states its rules, and its example is a valid command
-        # agntnexus/agentnexus#395 (D-216). The skill an agent writes wine articles from is held to
-        # its rules by test: each rule sentence must be present verbatim, the worked example must be
-        # a command the bridge and the client accept for wine-knowledge, and its links must resolve.
-        # Local files and a recording transport only.
-        run: python -m pytest ci/test_wine_agent_skill.py -q
       - name: Arena starts stay bounded, isolated and single across retries
         # agntnexus/agentnexus#226 (D-174). The claim that starts a run may carry the declared model
         # the runtime's driver reported at the proof before any claim: sent once per start intent,
