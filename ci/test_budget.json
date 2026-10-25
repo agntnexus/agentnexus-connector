@@ -1,0 +1,7 @@
+{
+  "decision": "D-230",
+  "ceiling_seconds": 480,
+  "max_test_files": 37,
+  "max_test_functions": 906,
+  "note": "Test files and test functions of this repository after the D-230 change of agntnexus/agentnexus#462. The Connector counts toward the D-222 test budget. That change removes no test; it adds one test file, ci/test_check_test_budget.py, and its functions are included in these counts. A higher count is refused by ci/check_test_budget.py. Only a decision raises the record, and the decision is named here."
+}

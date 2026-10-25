@@ -49,7 +49,7 @@ jobs:
   verify:
     name: Build, type-check and audit
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 8
 
     steps:
       - name: Check out this repository
@@ -85,6 +85,7 @@ jobs:
       # credential, no other repository -- so it runs before anything is built
       # (agntnexus/agentnexus#46).
       - name: The governance this repository states about itself
+        timeout-minutes: 1
         run: python -m pytest ci/test_governance.py -q
 
       - name: What this repository owns, and where a fix to it belongs
@@ -94,6 +95,7 @@ jobs:
         # Ownership was settled by owner decision under agntnexus/agentnexus#5; this refuses the
         # sentence coming back, and refuses losing the release-integrity rules while correcting it.
         # Local files only, so it runs before anything is built.
+        timeout-minutes: 1
         run: python -m pytest ci/test_source_ownership.py -q
 
       - name: Build the distribution
@@ -116,26 +118,37 @@ jobs:
           print(f"{len(names)} modules imported from the built wheel")
           PY
 
+      - name: The test-budget guard and the pytest retention settings are tested
+        # agntnexus/agentnexus#462 (D-230): the guard's own tests, and the pyproject.toml settings
+        # that keep the Windows temporary directory from filling (agntnexus/agentnexus#332). The
+        # second file was run by no step before this slice; a guard nobody executes does not exist.
+        timeout-minutes: 1
+        run: python -m pytest ci/test_check_test_budget.py ci/test_pytest_temp_retention.py -q
+
       - name: Agent-led setup plans stay bounded, resumable and secret-free
         # agntnexus/agentnexus#230. Exercise the built wheel after its declared dependencies are
         # installed: no invitation, credential, post, match, inference or service is created, and
         # #228's runtime-driver work is not duplicated.
+        timeout-minutes: 1
         run: python -m pytest ci/test_agent_led_setup.py -q
 
       - name: Rejected invitations resume and uncertain redemptions stay blocked
         # agntnexus/agentnexus#200. Synthetic transports and throwaway profiles only; no
         # invitation, runtime or server.
+        timeout-minutes: 1
         run: python -m pytest ci/test_onboarding_retry.py -q
 
       - name: A failed signed connection test names the read origin
         # agntnexus/agentnexus#247. Synthetic transports and throwaway profiles only; no host,
         # key, invitation or server. Also proves a resume can correct the read origin.
+        timeout-minutes: 1
         run: python -m pytest ci/test_read_origin_diagnostics.py -q
 
       - name: One profile's install or update leaves the other profile's key alone
         # agntnexus/agentnexus#195. Calls the installer and the profile updater on throwaway
         # profiles. A rejected download and an unrecognised directory are removed only when this
         # connector created the attempt. No device, no network, no credential and no listener.
+        timeout-minutes: 1
         run: python -m pytest ci/test_installer_profile_isolation.py -q
 
       - name: Termux/Android support, and a release chain that still refuses
@@ -149,6 +162,7 @@ jobs:
         # The second is the other half of agntnexus/agentnexus#5 -- the fix must not have cost the
         # release chain anything, so the signature, the manifest, the artifact, the key and the
         # origin are each mutated in memory and a refusal is required for every one.
+        timeout-minutes: 1
         run: python -m pytest ci/test_termux_support.py ci/test_release_verification.py -q
 
       - name: Signed reads reach the read address, through the bridge too
@@ -158,23 +172,27 @@ jobs:
         # write host and read host, for a public, a Tailnet and a read-address-less profile, and
         # check the runtime entry and every re-registration carry the read address. Loopback only:
         # no network, no credential, no real key.
+        timeout-minutes: 2
         run: >-
           python -m pytest ci/test_read_endpoint_routing.py ci/test_write_admission_bridge.py
           ci/test_owner_link_bridge.py ci/test_games_direct_play.py -q
       - name: An MCP tool forwards its own operation, whatever its arguments say
         # agntnexus/agentnexus#266. An argument named `operation` used to replace the operation the
         # tool stands for, so a read-only tool could forward a write.
+        timeout-minutes: 1
         run: python -m pytest ci/test_mcp_tool_forwarding.py -q
       - name: An image is uploaded, attached and detached through the bridge and MCP tools
         # agntnexus/agentnexus#266. Loopback only: a stand-in API, a real bridge subprocess and no
         # network or credential. The file is judged before any key is read; the symbolic link and
         # named-pipe refusals run here, where the platform allows them. Also runs the multipart
         # replay vector, which was not previously part of this workflow.
+        timeout-minutes: 2
         run: python -m pytest ci/test_image_upload_bridge.py ci/test_media_upload.py -q
       - name: Recipe payload stays bounded and text-only, and its images carry the required roles
         # agntnexus/agentnexus#285 (D-193). A Recipe's images are judged by role and step position
         # before anything is signed, and a Recipe with any image needs its ingredients image.
         # agntnexus/agentnexus#401 (D-220): a thread's site marks are judged in the same run.
+        timeout-minutes: 1
         run: >-
           python -m pytest ci/test_recipe_payload.py ci/test_recipe_image_roles.py
           ci/test_site_publication_payload.py -q
@@ -184,63 +202,8 @@ jobs:
         # the wine-knowledge category is refused before any request without them, or with more than
         # one image, which must be its cover. The worked example of the wine-knowledge agent skill
         # (#395) is judged here too. Synthetic values and a recording transport only.
+        timeout-minutes: 1
         run: python -m pytest ci/test_wine_payload.py -q
-      - name: Arena starts stay bounded, isolated and single across retries
-        # agntnexus/agentnexus#226 (D-174). The claim that starts a run may carry the declared model
-        # the runtime's driver reported at the proof before any claim: sent once per start intent,
-        # frozen for its retries, left out whenever it is unknown or unusable, never logged and never
-        # asked of a runtime again. The second file runs the real supervisor against a scripted
-        # driver and a stand-in API: no real runtime, no network, no model call and no profile file.
-        run: python -m pytest ci/test_arena_runner.py ci/test_arena_declared_model.py -q
-
-      - name: An Arena decision ends inside the provider's turn, and an accepted move ends it
-        # agntnexus/agentnexus#223. A model decision has 45 of the provider's 60 seconds, and a move
-        # the provider accepts ends its decision at once. The first file runs the match process
-        # with a fake clock and fake workers, and the supervisor against scripted streams. The
-        # second runs a real supervisor, a real match process and a real decision worker, with a
-        # stand-in for Hermes whose model blocks, is slow or is fast, whose closing request never
-        # answers and whose cleanup hangs or raises: no late move, no match lost to a tail, no
-        # process left. No network, no model, no credential and no real match.
-        run: >-
-          python -m pytest ci/test_arena_turn_budget.py ci/test_arena_decision_worker.py
-          ci/test_arena_budget_gate.py -q
-
-      - name: An Arena runtime is accepted for what it proves, never for a model or a provider
-        # agntnexus/agentnexus#228. The Connector is model-agnostic: a runtime driver proves the
-        # three-operation contract, a killable worker, a bounded cleanup and a deadline the
-        # supervisor keeps, and the runtime-neutral code names no model, provider or runtime. A
-        # second, fake runtime runs through the same state machine, and the discussion forum's model
-        # declaration stays what it was. The runtime in effect is proven before a seat is claimed
-        # and a match stays on the generation it began with; a refused generation claims nothing and
-        # is not retried by itself. No network and no credential.
-        run: python -m pytest ci/test_arena_driver.py ci/test_forum_declared_model.py ci/test_arena_generation.py -q
-
-      - name: Hermes plays on its profile's own provider and credential, a subscription included
-        # agntnexus/agentnexus#228. A stand-in Hermes with a resolver, a home override, a secret
-        # scope and an authentication error shaped like the reviewed ones, and a fake subscription
-        # backend on loopback, show that a profile with no API key plays: the credential is resolved
-        # by Hermes in the narrowest window, reaches only the transport, is never copied or logged,
-        # one request makes one move, a hanging backend is ended at the cutoff, and a match keeps the
-        # model it started with. Each guard is then broken on purpose and must be noticed. No
-        # network beyond loopback, no real credential, account or model, and no paid call.
-        run: python -m pytest ci/test_arena_hermes_subscription.py ci/test_arena_hermes_generation.py -q
-
-      - name: OpenClaw takes part through the same driver contract
-        # agntnexus/agentnexus#228. A stand-in OpenClaw with the real process topology (launcher,
-        # child, a runtime in a session of its own, the MCP bridge below it) and a loopback chat
-        # model show that a decision is offered exactly the three operations, makes one request and
-        # one move, is ended at the accepted move so no closing request follows, and leaves no
-        # process and no file behind - also when the model never answers, when the runtime ignores
-        # termination and when the worker is killed. The preflight's canary refuses a fourth tool.
-        # The auth-state proofs use only an empty/synthetic store to check profile ownership, path
-        # containment, disposable sessions and pre-claim refusal. Each guard is then broken on
-        # purpose and must be noticed. No real OpenClaw, profile, credential, account or model, and
-        # no network beyond loopback.
-        run: >-
-          python -m pytest ci/test_arena_openclaw.py ci/test_arena_openclaw_driver.py
-          ci/test_arena_openclaw_auth.py ci/test_arena_openclaw_review.py
-          ci/test_check_windows_security_run.py -q
-
       - name: The release builder refuses what it must
         # `scripts/build_release.py` is the one file here that can hold a private signing key, so
         # its refusals are worth more than its output: a key inside a work tree, an unstamped
@@ -248,6 +211,7 @@ jobs:
         # differ, a damaged release tree and any private material in the output. The end-to-end
         # cases build a real release in a throwaway clone with a throwaway key generated by the
         # test, then reproduce it with no key at all. No release key exists in this job.
+        timeout-minutes: 2
         run: python -m pytest ci/test_build_release.py -q
 
       - name: The published release reproduces independently of unreleased source
@@ -346,6 +310,151 @@ jobs:
           fi
           echo "Every tracked file is either mirrored or declared repository-local."
 
+      - name: The test budget holds its time ceilings, its coverage and its recorded counts
+        # agntnexus/agentnexus#462 (D-222, D-230): every job that runs pytest, and every pytest
+        # step, declares a timeout inside the 480-second ceiling; every ci/test_*.py file is run by
+        # a pytest step; and the test files and functions stay within the counts recorded in
+        # ci/test_budget.json. It reads local files only, so a loaded runner gives the same answer.
+        # See ci/check_test_budget.py.
+        run: python ci/check_test_budget.py
+
+  arena-decisions:
+    # agntnexus/agentnexus#462 (D-222, D-230). Part of the Arena suite runs here, beside `verify`,
+    # so that the serial chain of test steps of this repository stays inside its 480-second
+    # ceiling. Like every job in this file it runs on a GitHub-hosted runner and holds no credential.
+    name: Arena decision bounds (turn budget, decision worker, driver)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+
+      - name: Check out this repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # `requires-python = ">=3.13,<3.14"`. Building on anything else would not produce the
+          # distribution operators are served.
+          python-version: '3.13'
+
+      - name: Install the pinned toolchain
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r constraints-ci.txt
+
+      - name: Build the distribution
+        run: python -m build
+
+      - name: Install the built wheel
+        # The Arena tests import the package as an operator installs it: from the built wheel.
+        run: |
+          set -euo pipefail
+          wheel="$(ls dist/*.whl)"
+          python -m pip install "${wheel}"
+
+      - name: Arena starts stay bounded, isolated and single across retries
+        # agntnexus/agentnexus#226 (D-174). The claim that starts a run may carry the declared model
+        # the runtime's driver reported at the proof before any claim: sent once per start intent,
+        # frozen for its retries, left out whenever it is unknown or unusable, never logged and never
+        # asked of a runtime again. The second file runs the real supervisor against a scripted
+        # driver and a stand-in API: no real runtime, no network, no model call and no profile file.
+        timeout-minutes: 1
+        run: python -m pytest ci/test_arena_runner.py ci/test_arena_declared_model.py -q
+
+      - name: An Arena decision ends inside the provider's turn, and an accepted move ends it
+        # agntnexus/agentnexus#223. A model decision has 45 of the provider's 60 seconds, and a move
+        # the provider accepts ends its decision at once. The first file runs the match process
+        # with a fake clock and fake workers, and the supervisor against scripted streams. The
+        # second runs a real supervisor, a real match process and a real decision worker, with a
+        # stand-in for Hermes whose model blocks, is slow or is fast, whose closing request never
+        # answers and whose cleanup hangs or raises: no late move, no match lost to a tail, no
+        # process left. No network, no model, no credential and no real match.
+        timeout-minutes: 4
+        run: >-
+          python -m pytest ci/test_arena_turn_budget.py ci/test_arena_decision_worker.py
+          ci/test_arena_budget_gate.py -q
+
+      - name: An Arena runtime is accepted for what it proves, never for a model or a provider
+        # agntnexus/agentnexus#228. The Connector is model-agnostic: a runtime driver proves the
+        # three-operation contract, a killable worker, a bounded cleanup and a deadline the
+        # supervisor keeps, and the runtime-neutral code names no model, provider or runtime. A
+        # second, fake runtime runs through the same state machine, and the discussion forum's model
+        # declaration stays what it was. The runtime in effect is proven before a seat is claimed
+        # and a match stays on the generation it began with; a refused generation claims nothing and
+        # is not retried by itself. No network and no credential.
+        timeout-minutes: 1
+        run: python -m pytest ci/test_arena_driver.py ci/test_forum_declared_model.py ci/test_arena_generation.py -q
+
+  arena-runtimes:
+    # agntnexus/agentnexus#462 (D-222, D-230). The Hermes and OpenClaw suites run here, beside
+    # `verify` and `arena-decisions`, so that the serial chain of test steps stays inside 480
+    # seconds. GitHub-hosted runner only, as every job in this file, and no credential.
+    name: Arena runtimes (Hermes and OpenClaw)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+
+      - name: Check out this repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # `requires-python = ">=3.13,<3.14"`. Building on anything else would not produce the
+          # distribution operators are served.
+          python-version: '3.13'
+
+      - name: Install the pinned toolchain
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r constraints-ci.txt
+
+      - name: Build the distribution
+        run: python -m build
+
+      - name: Install the built wheel
+        # The Arena tests import the package as an operator installs it: from the built wheel.
+        run: |
+          set -euo pipefail
+          wheel="$(ls dist/*.whl)"
+          python -m pip install "${wheel}"
+
+      - name: Hermes plays on its profile's own provider and credential, a subscription included
+        # agntnexus/agentnexus#228. A stand-in Hermes with a resolver, a home override, a secret
+        # scope and an authentication error shaped like the reviewed ones, and a fake subscription
+        # backend on loopback, show that a profile with no API key plays: the credential is resolved
+        # by Hermes in the narrowest window, reaches only the transport, is never copied or logged,
+        # one request makes one move, a hanging backend is ended at the cutoff, and a match keeps the
+        # model it started with. Each guard is then broken on purpose and must be noticed. No
+        # network beyond loopback, no real credential, account or model, and no paid call.
+        timeout-minutes: 3
+        run: python -m pytest ci/test_arena_hermes_subscription.py ci/test_arena_hermes_generation.py -q
+
+      - name: OpenClaw takes part through the same driver contract
+        # agntnexus/agentnexus#228. A stand-in OpenClaw with the real process topology (launcher,
+        # child, a runtime in a session of its own, the MCP bridge below it) and a loopback chat
+        # model show that a decision is offered exactly the three operations, makes one request and
+        # one move, is ended at the accepted move so no closing request follows, and leaves no
+        # process and no file behind - also when the model never answers, when the runtime ignores
+        # termination and when the worker is killed. The preflight's canary refuses a fourth tool.
+        # The auth-state proofs use only an empty/synthetic store to check profile ownership, path
+        # containment, disposable sessions and pre-claim refusal. Each guard is then broken on
+        # purpose and must be noticed. No real OpenClaw, profile, credential, account or model, and
+        # no network beyond loopback.
+        timeout-minutes: 4
+        run: >-
+          python -m pytest ci/test_arena_openclaw.py ci/test_arena_openclaw_driver.py
+          ci/test_arena_openclaw_auth.py ci/test_arena_openclaw_review.py
+          ci/test_check_windows_security_run.py -q
+
   windows-security:
     # agntnexus/agentnexus#228. The Windows boundaries cannot be shown on Linux: the owner and
     # access list that make a profile private, the job object a runtime starts in (suspended, put
@@ -356,7 +465,7 @@ jobs:
     # report is read, and only a skip that cannot apply on Windows is allowed.
     name: Windows boundaries (profile privacy, job object, pinned files)
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 8
 
     steps:
       - name: Check out this repository
@@ -404,6 +513,7 @@ jobs:
 
       - name: The Windows boundaries really run
         shell: bash
+        timeout-minutes: 4
         run: |
           set -euo pipefail
           python -m pytest ci/test_check_windows_security_run.py -q -p no:cacheprovider
