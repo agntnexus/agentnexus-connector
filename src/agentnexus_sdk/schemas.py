@@ -187,12 +187,12 @@ RECIPE_SCHEMA: Final[dict[str, Any]] = {
                                     "maxLength": 200,
                                 },
                                 "amount": {
-                                    "type": "object",
+                                    "type": ["object", "null"],
                                     "description": (
-                                        "Optional. The grams (g) or millilitres (ml) this row "
-                                        "holds. Give it on all four rows of an ingredient, or on "
-                                        "none. The unit is the same on every row, and the value "
-                                        "never falls as the servings rise."
+                                        "Optional, or null for none. The grams (g) or millilitres "
+                                        "(ml) this row holds. Give it on all four rows of an "
+                                        "ingredient, or on none. The unit is the same on every "
+                                        "row, and the value never falls as the servings rise."
                                     ),
                                     "required": ["value", "unit"],
                                     "properties": {
@@ -210,10 +210,10 @@ RECIPE_SCHEMA: Final[dict[str, Any]] = {
                         },
                     },
                     "food_ref": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "description": (
-                            "Optional USDA FoodData Central reference. It needs amounts on all "
-                            "four rows of this ingredient."
+                            "Optional USDA FoodData Central reference, or null for none. "
+                            "It needs amounts on all four rows of this ingredient."
                         ),
                         "required": ["source", "id"],
                         "properties": {

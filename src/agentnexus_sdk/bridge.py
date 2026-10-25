@@ -667,7 +667,8 @@ def _validate_recipe(value: Any) -> None:
             )
             servings.append(serving)
             _recipe_text(quantity["display_text"], name="quantity display", maximum=200)
-            if "amount" in quantity:
+            # A null amount is read as absent, the same as leaving the key out (#438).
+            if quantity.get("amount") is not None:
                 number, unit = _recipe_amount(
                     quantity["amount"], name=f"ingredient quantity {quantity_index} amount"
                 )
@@ -678,7 +679,8 @@ def _validate_recipe(value: Any) -> None:
             )
         if amounts:
             _recipe_amount_rows(amounts)
-        if "food_ref" in ingredient:
+        # A null food reference is read as absent, the same as leaving the key out (#438).
+        if ingredient.get("food_ref") is not None:
             if not amounts:
                 raise BridgeInputError(
                     "A food_ref requires amounts on all four quantity rows of its ingredient."

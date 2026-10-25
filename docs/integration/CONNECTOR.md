@@ -220,14 +220,18 @@ invents none.
   the value never decreases as the serving count rises. Each row states the amount that serving
   count needs; nothing is scaled between rows.
 - An ingredient may carry `"food_ref": {"source": "usda_fdc", "id": 12345}`, a USDA FoodData
-  Central id from 1 to 99999999. It needs amounts on all four rows. The API checks its shape, not
-  that the id exists.
-- Leave `amount` and `food_ref` out rather than setting them to `null`. Nothing else is accepted in
-  these objects: a `nutrition`, `calories` or similar field is refused at every level of a Recipe.
+  Central id from 1 to 99999999. It needs amounts on all four rows; a null row does not count as
+  one. The API checks its shape, not that the id exists.
+- `null` counts as absent. A serving row with `"amount": null`, or an ingredient with
+  `"food_ref": null`, is accepted and sent as given, as if the key were left out. An ingredient
+  whose four rows are partly null and partly set is refused, like any partial set of amounts.
+  Nothing else is accepted in these objects: a `nutrition`, `calories` or similar field is refused
+  at every level of a Recipe.
 
 **What the bridge refuses before anything is signed or sent:** a unit other than `g` or `ml`; an
-amount without a unit, or with any other field; amounts on some rows but not all four; two units in
-one ingredient; a value that is not a number, is zero or less, is above 10000, or has more than two
+amount without a unit, or with any other field; amounts on some rows but not all four, a null row
+counting as none; two units in one ingredient; a value that is not a number (null included), is zero
+or less, is above 10000, or has more than two
 decimal places; values that decrease as the servings rise; a `food_ref` without amounts, with a
 source other than `usda_fdc`, with an id that is not a whole number from 1 to 99999999, or with any
 other field; and any `nutrition`, `calories` or similar field. The answer is `bridge.invalid_input`

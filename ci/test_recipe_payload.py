@@ -192,14 +192,18 @@ def test_a_complete_recipe_is_forwarded_unchanged_and_covered_by_the_signature()
 
     The first body is an ordinary Recipe with no amount and no food reference, and it must stay
     byte-identical to what the 0.16.0 client signed. Each structured variant, with amounts, with a
-    food reference and at the amount bounds, is forwarded unchanged (agntnexus/agentnexus#438).
+    food reference, at the amount bounds and with null amounts, is forwarded unchanged, null keys
+    included (agntnexus/agentnexus#438).
     """
     plain = recipe()
     amounts = with_amounts(recipe())
     referenced = with_amounts(recipe())
     referenced["ingredients"][0]["food_ref"] = {"source": "usda_fdc", "id": 12345}
     bounds = with_amounts(recipe(), values=(0.01, 12.25, 12.25, 10000), unit="ml")
-    variants = (plain, amounts, referenced, bounds)
+    absent = with_amounts(recipe())
+    for row in absent["ingredients"][0]["quantities"]:
+        row["amount"] = None
+    variants = (plain, amounts, referenced, bounds, absent)
     client, transport, public_key = signed_client()
     with client:
         for index, variant in enumerate(variants):
@@ -252,17 +256,31 @@ class FakeClient:
         )
 
 
-def test_the_bridge_validates_and_forwards_the_recipe_without_calculation() -> None:
-    """Fractional and non-linear displays survive, and so do amounts at their bounds (#438)."""
+@pytest.mark.parametrize(
+    "shape",
+    ["displays-and-bounds", "null-amounts", "null-food-ref", "null-food-ref-with-amounts"],
+)
+def test_the_bridge_validates_and_forwards_the_recipe_without_calculation(shape: str) -> None:
+    """Displays and bounds survive; a null amount or food reference reads as absent (#438)."""
     structured = recipe()
-    structured["ingredients"][0]["quantities"] = [
-        {"servings": 1, "display_text": "salt to taste"},
-        {"servings": 2, "display_text": "1/2 onion"},
-        {"servings": 3, "display_text": "2 eggs"},
-        {"servings": 4, "display_text": "one generous handful"},
-    ]
-    with_amounts(structured, values=(0.01, 12.25, 12.25, 10000), unit="ml")
-    structured["ingredients"][0]["food_ref"] = {"source": "usda_fdc", "id": 12345}
+    if shape == "displays-and-bounds":
+        structured["ingredients"][0]["quantities"] = [
+            {"servings": 1, "display_text": "salt to taste"},
+            {"servings": 2, "display_text": "1/2 onion"},
+            {"servings": 3, "display_text": "2 eggs"},
+            {"servings": 4, "display_text": "one generous handful"},
+        ]
+        with_amounts(structured, values=(0.01, 12.25, 12.25, 10000), unit="ml")
+        structured["ingredients"][0]["food_ref"] = {"source": "usda_fdc", "id": 12345}
+    elif shape == "null-amounts":
+        with_amounts(structured)
+        for row in structured["ingredients"][0]["quantities"]:
+            row["amount"] = None
+    elif shape == "null-food-ref":
+        structured["ingredients"][0]["food_ref"] = None
+    else:
+        with_amounts(structured)
+        structured["ingredients"][0]["food_ref"] = None
     parsed = bridge.parse_command(json.dumps(command(structured=structured)).encode())
     client = FakeClient()
 
@@ -306,10 +324,13 @@ def test_the_bridge_validates_and_forwards_the_recipe_without_calculation() -> N
         ("amount-string", "must be a number"),
         ("amount-boolean", "must be a number"),
         ("amount-decreasing", "must not decrease"),
-        ("amount-null", "must be an object"),
+        ("amount-null-mixed", "all four quantity rows"),
+        ("amount-null-value", "must be a number"),
+        ("amount-null-unit", "g or ml"),
         ("amount-calories", "calories"),
         ("amount-on-ingredient", "amount"),
         ("food-ref-without-amounts", "food_ref requires amounts"),
+        ("food-ref-with-null-amounts", "food_ref requires amounts"),
         ("food-ref-bad-source", "usda_fdc"),
         ("food-ref-zero-id", "from 1 to 99999999"),
         ("food-ref-large-id", "from 1 to 99999999"),
@@ -365,9 +386,19 @@ def test_malformed_or_fabricated_recipe_data_is_refused_before_sending(
         with_amounts(structured, values=(True, 160, 240, 320))
     elif mutation == "amount-decreasing":
         with_amounts(structured, values=(80, 160, 120, 320))
-    elif mutation == "amount-null":
+    elif mutation == "amount-null-mixed":
         with_amounts(structured)
         structured["ingredients"][0]["quantities"][0]["amount"] = None
+    elif mutation == "amount-null-value":
+        with_amounts(structured)
+        structured["ingredients"][0]["quantities"][0]["amount"]["value"] = None
+    elif mutation == "amount-null-unit":
+        with_amounts(structured)
+        structured["ingredients"][0]["quantities"][2]["amount"]["unit"] = None
+    elif mutation == "food-ref-with-null-amounts":
+        for row in structured["ingredients"][0]["quantities"]:
+            row["amount"] = None
+        structured["ingredients"][0]["food_ref"] = {"source": "usda_fdc", "id": 12345}
     elif mutation == "amount-calories":
         with_amounts(structured)
         structured["ingredients"][0]["quantities"][0]["amount"]["calories"] = 150
@@ -448,6 +479,9 @@ def test_bridge_and_mcp_schemas_expose_only_the_strict_text_contract() -> None:
     assert reference["properties"]["source"]["enum"] == ["usda_fdc"]
     assert reference["properties"]["id"]["minimum"] == 1
     assert reference["properties"]["id"]["maximum"] == 99_999_999
+    # A null amount or food reference reads as absent, so both keep the null type (#438).
+    assert amount["type"] == ["object", "null"]
+    assert reference["type"] == ["object", "null"]
 
     (tool,) = [tool for tool in mcp_server.TOOLS if tool["name"] == "create_thread"]
     assert tool["inputSchema"]["properties"]["recipe"] == recipe_schema
