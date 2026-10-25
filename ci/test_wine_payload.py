@@ -8,6 +8,11 @@ article data, without `wine.english`, or with more than one image; that image, i
 be the cover. Every other category keeps its behaviour, and a thread with neither object keeps its
 body bytes.
 
+The worked example of the wine-knowledge agent skill (docs/integration/WINE_AGENT_SKILL.md, #395)
+is judged here as well: the bridge accepts it, the client signs it without a network, it carries
+one cover and no role, it marks its article for Prompt & Wine, and its tables and headings are
+within the limits the API sets for a wine article.
+
 Synthetic values only, over a recording transport and a throwaway key: no key is read from disk, no
 network is used and no asset is uploaded.
 """
@@ -45,6 +50,13 @@ WINE_SLUG = "wine-knowledge"
 TITLE = "Riesling for a weeknight"
 BODY = "Der deutsche Text der Seite."
 ROLE_ONLY_ON_RECIPE = "Image roles are allowed only on the images of a Recipe thread."
+SKILL_DOCUMENT = REPOSITORY_ROOT / "docs" / "integration" / "WINE_AGENT_SKILL.md"
+EXAMPLE_MARKER = "<!-- wine-skill-example: create_thread -->"
+#: The limits the API sets for a table of a wine article (domain/content.py, D-216 statement 16).
+TABLE_COLUMNS_MAX = 8
+TABLE_ROWS_MAX = 60
+#: The delimiter line under a table's header, such as `|---|:--:|`. It is not a row of the table.
+DELIMITER_ROW = re.compile(r"^\|[\s:|-]+\|$")
 
 #: The refusals of the wine-knowledge rule. Each names the part that is missing.
 ENGLISH_MISSING = "needs its English version"
@@ -229,6 +241,66 @@ def refuse_everywhere(
     assert transport.requests == []
 
 
+def worked_example() -> dict[str, Any]:
+    """Return the worked example of the wine skill: the one JSON block that follows its marker."""
+    text = SKILL_DOCUMENT.read_text(encoding="utf-8")
+    assert text.count(EXAMPLE_MARKER) == 1, "the skill must carry exactly one worked example"
+    block = re.search(r"```json\n(.*?)\n```", text.split(EXAMPLE_MARKER, 1)[1], re.DOTALL)
+    assert block is not None, "the worked example must be a fenced json block after its marker"
+    value: dict[str, Any] = json.loads(block.group(1))
+    return value
+
+
+def sign_worked_example(value: dict[str, Any]) -> tuple[dict[str, Any], httpx.Request, str]:
+    """Sign the worked example as the client signs a thread, over a recording transport.
+
+    Return the body that was sent, the request that carried it and the public key that verifies it.
+    """
+    pair = generate_key_pair()
+    transport = RecordingTransport()
+    agent = AgentNexusClient(
+        agent_id=AGENT_ID,
+        key_id=KEY_ID,
+        signer=pair.signer,
+        options=ClientOptions(base_url="https://api.example"),
+        transport=transport,
+    )
+    try:
+        agent.create_thread(
+            category_id=CATEGORY_ID,
+            title=value["title"],
+            body_markdown=value["body_markdown"],
+            billing=BillingDeclaration(
+                pricing_version=value["pricing_version"], max_credit_cost=value["max_credit_cost"]
+            ),
+            attachments=[as_media(item) for item in value["attachments"]],
+            english=value["english"],
+            wine=value["wine"],
+            category_slug=value["category_slug"],
+            sites=value.get("sites"),
+        )
+    finally:
+        agent.close()
+    (request,) = transport.requests
+    body: dict[str, Any] = json.loads(request.content)
+    return body, request, pair.public_key_base64
+
+
+def tables_of(body: str) -> list[list[str]]:
+    """Return each table of one Markdown body as its lines: a table is a run of pipe lines."""
+    found: list[list[str]] = []
+    run: list[str] = []
+    for line in body.split("\n"):
+        if line.startswith("|"):
+            run.append(line)
+        elif run:
+            found.append(run)
+            run = []
+    if run:
+        found.append(run)
+    return found
+
+
 class FakeClient:
     """Capture the bridge's typed client call, and resolve the wine category without a socket."""
 
@@ -350,6 +422,24 @@ class TestTheWireShape:
         body = json.loads(transport.requests[0].content)
         assert "english" not in body
         assert "wine" not in body
+
+    def test_the_worked_example_is_signed_as_the_client_sends_it(self) -> None:
+        """The client signs the worked example of the wine skill, over a recording transport."""
+        value = worked_example()
+        body, request, public_key = sign_worked_example(value)
+        assert body["title"] == value["title"]
+        assert body["body_markdown"] == value["body_markdown"]
+        assert body["english"] == value["english"]
+        assert body["wine"] == value["wine"]
+        assert [item["is_cover"] for item in body["attachments"]] == [True]
+        assert signature_covers(request, request.content, public_key)
+
+    def test_the_worked_example_marks_its_article_for_prompt_and_wine(self) -> None:
+        """The worked example marks its article for Prompt & Wine, in the bridge and the body."""
+        value = worked_example()
+        assert parse(value)["sites"] == ["prompt_and_wine"]
+        body, _, _ = sign_worked_example(value)
+        assert body["sites"] == ["prompt_and_wine"]
 
 
 class TestTheWireConsistency:
@@ -558,6 +648,32 @@ class TestTheBounds:
         send(transport, category_slug="general", english=value)
         assert json.loads(transport.requests[0].content)["english"] == value
 
+    def test_the_worked_example_tables_are_within_the_api_limits(self) -> None:
+        """Every table of the worked example, in both languages, is within the wine article limits.
+
+        The API counts a table's rows, the header row included, and the cells of each row.
+        """
+        value = worked_example()
+        bodies = (value["body_markdown"], value["english"]["body_markdown"])
+        tables = [table for body in bodies for table in tables_of(body)]
+        assert tables, "the worked example has no table, so its limits would be checked on nothing"
+        for table in tables:
+            rows = [line for line in table if not DELIMITER_ROW.match(line)]
+            assert len(rows) <= TABLE_ROWS_MAX, f"a table has {len(rows)} rows; 60 at most"
+            for row in rows:
+                cells = len(row.strip().strip("|").split("|"))
+                assert cells <= TABLE_COLUMNS_MAX, f"a table row has {cells} cells; 8 at most"
+
+    def test_the_worked_example_uses_only_second_and_third_level_headings(self) -> None:
+        """The wine article profile admits headings of level two and three, and no others."""
+        value = worked_example()
+        for body in (value["body_markdown"], value["english"]["body_markdown"]):
+            levels = [len(marker) for marker in re.findall(r"^(#+) ", body, re.MULTILINE)]
+            assert levels, "the worked example has no heading, so its heading levels check nothing"
+            assert all(level in (2, 3) for level in levels), (
+                f"the worked example's heading levels are {levels}; only ## and ### are allowed"
+            )
+
 
 class TestTheWineKnowledgeRule:
     """A wine-knowledge thread needs its English version, its wine data and at most one cover."""
@@ -637,6 +753,15 @@ class TestTheWineKnowledgeRule:
         transport = RecordingTransport()
         send(transport, category_slug=WINE_SLUG, english=english(), wine=wine())
         assert "attachments" not in json.loads(transport.requests[0].content)
+
+    def test_the_worked_example_carries_one_cover_and_no_role(self) -> None:
+        """The worked example carries one image, its cover, with no role and no step position."""
+        attachments = worked_example()["attachments"]
+        assert len(attachments) == 1, "a wine article carries at most one image, its cover"
+        (cover,) = attachments
+        assert cover["is_cover"] is True
+        assert "role" not in cover
+        assert "step_position" not in cover
 
     def test_the_cover_rule_holds_whatever_the_placement_of_the_image(self) -> None:
         """A step image is not the cover of a wine article, whatever placement judged it."""
@@ -720,6 +845,13 @@ class TestTheBridgeForwardsBothObjects:
         }
         with pytest.raises(bridge.BridgeInputError, match="Unknown field"):
             parse(value)
+
+    def test_the_worked_example_is_a_command_the_bridge_accepts_for_wine_knowledge(self) -> None:
+        """The worked example parses as a wine-knowledge create_thread, with both objects."""
+        parsed = parse(worked_example())
+        assert parsed["category_slug"] == WINE_SLUG
+        assert parsed["english"] is not None
+        assert parsed["wine"] is not None
 
 
 class TestTheMachineReadableContract:
