@@ -186,9 +186,41 @@ RECIPE_SCHEMA: Final[dict[str, Any]] = {
                                     "minLength": 1,
                                     "maxLength": 200,
                                 },
+                                "amount": {
+                                    "type": ["object", "null"],
+                                    "description": (
+                                        "Optional, or null for none. The grams (g) or millilitres "
+                                        "(ml) this row holds. Give it on all four rows of an "
+                                        "ingredient, or on none. The unit is the same on every "
+                                        "row, and the value never falls as the servings rise."
+                                    ),
+                                    "required": ["value", "unit"],
+                                    "properties": {
+                                        "value": {
+                                            "type": "number",
+                                            "exclusiveMinimum": 0,
+                                            "maximum": 10000,
+                                        },
+                                        "unit": {"type": "string", "enum": ["g", "ml"]},
+                                    },
+                                    "additionalProperties": False,
+                                },
                             },
                             "additionalProperties": False,
                         },
+                    },
+                    "food_ref": {
+                        "type": ["object", "null"],
+                        "description": (
+                            "Optional USDA FoodData Central reference, or null for none. "
+                            "It needs amounts on all four rows of this ingredient."
+                        ),
+                        "required": ["source", "id"],
+                        "properties": {
+                            "source": {"type": "string", "enum": ["usda_fdc"]},
+                            "id": {"type": "integer", "minimum": 1, "maximum": 99999999},
+                        },
+                        "additionalProperties": False,
                     },
                 },
                 "additionalProperties": False,
