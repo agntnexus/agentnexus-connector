@@ -908,6 +908,15 @@ def test_the_origin_serves_0160_and_the_state_says_so() -> None:
     assert len(manifest) == ORIGIN_READBACK_0160["manifest_bytes"]
     assert hashlib.sha256(manifest).hexdigest() == ORIGIN_READBACK_0160["manifest_sha256"]
     assert hashlib.sha256(manifest).hexdigest() != ORIGIN_READBACK_0150["manifest_sha256"]
+    (artifact,) = manifest_document["artifacts"]
+    wheel = connector / "0.16.0" / builder.wheel_name("0.16.0")
+    body = wheel.read_bytes()
+    assert artifact["filename"] == wheel.name
+    assert artifact["url"] == f"https://agntnexus.com/connector/0.16.0/{wheel.name}"
+    assert artifact["size"] == len(body) == SIGNED_0160["wheel_bytes"]
+    assert artifact["sha256"] == hashlib.sha256(body).hexdigest() == SIGNED_0160["wheel_sha256"]
+    tree = REPOSITORY_ROOT / "connector-release"
+    assert published_state_failures(state, tree=tree, installers=INSTALLERS) == []
     signature = (connector / builder.SIGNATURE_NAME).read_bytes()
     assert len(signature) == ORIGIN_READBACK_0160["signature_bytes"]
     assert hashlib.sha256(signature).hexdigest() == ORIGIN_READBACK_0160["signature_sha256"]
@@ -969,30 +978,17 @@ def test_a_state_the_signed_tree_cannot_support_is_refused(claimed: dict[str, ob
     assert published_state_failures(state, tree=tree, installers=INSTALLERS)
 
 
-def test_signed_0160_release_declares_0160_consistently() -> None:
-    """The signed #427 release and its published provenance agree on 0.16.0."""
-    assert builder.read_version(REPOSITORY_ROOT, expected="0.16.0") == "0.16.0"
+def test_unsigned_0170_candidate_declares_0170_and_moves_no_state() -> None:
+    """The 0.17.0 source candidate has its own version and leaves the served state alone."""
+    assert builder.read_version(REPOSITORY_ROOT, expected="0.17.0") == "0.17.0"
     state = _committed_state()
+    tree = REPOSITORY_ROOT / "connector-release"
     assert state["published_version"] == "0.16.0"
     assert not any(key.startswith("pending_") for key in state)
     releases = state["reproducible_releases"]
     assert isinstance(releases, dict)
-    assert releases["0.16.0"] == {
-        key: SIGNED_0160[key] for key in ("source_commit", "source_date_epoch", "build_backend")
-    }
-    tree = REPOSITORY_ROOT / "connector-release"
-    manifest = (tree / "connector" / builder.MANIFEST_NAME).read_bytes()
-    document = json.loads(manifest)
-    assert document["connector_version"] == "0.16.0"
-    assert document["released_at"] == SIGNED_0160["released_at"]
-    assert hashlib.sha256(manifest).hexdigest() == SIGNED_0160["manifest_sha256"]
-    (artifact,) = document["artifacts"]
-    wheel = tree / "connector" / "0.16.0" / builder.wheel_name("0.16.0")
-    body = wheel.read_bytes()
-    assert artifact["filename"] == wheel.name
-    assert artifact["url"] == f"https://agntnexus.com/connector/0.16.0/{wheel.name}"
-    assert artifact["size"] == len(body) == SIGNED_0160["wheel_bytes"]
-    assert artifact["sha256"] == hashlib.sha256(body).hexdigest() == SIGNED_0160["wheel_sha256"]
+    assert "0.17.0" not in releases
+    assert not (tree / "connector" / "0.17.0").exists()
     assert published_state_failures(state, tree=tree, installers=INSTALLERS) == []
 
 

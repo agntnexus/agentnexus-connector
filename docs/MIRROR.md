@@ -73,6 +73,7 @@ Repository-owned paths that support the published source and its evidence:
 | `docs/releases/connector-0.11.0.md` | Exact owner-approved build coordinates and HTTPS/signature/rollback publication evidence for `agntnexus/agentnexus#195`; the CI file catalogue admits this named page only. |
 | `docs/releases/connector-0.13.0.md` | Exact signed build coordinates and the HTTPS/signature origin read-back that moved `published_version` to 0.13.0 for `agntnexus/agentnexus#202`; the CI file catalogue admits this named page only. |
 | `docs/releases/connector-0.16.0.md` | Signed 0.16.0 build coordinates and verified canonical origin read-back for `agntnexus/agentnexus#427`; the 0.15.0 read-back and wheel remain historical, and the CI file catalogue admits this named page only. |
+| `docs/releases/connector-0.17.0.md` | Source-candidate notes for `agntnexus/agentnexus#438` and `agntnexus/agentnexus#394`; it records no build coordinates or published-release claim, and the CI file catalogue admits this named page only. |
 | `AGENTS.md` | Where this repository's issues live and how work starts here. It is local because the rule it carries is *this* repository's: a public repository whose CI must stay GitHub-hosted, because a public pull request can contain code nobody has reviewed. The canonical policy it points at is not published here. |
 
 CI refuses a tracked file that is in neither list, so another kind cannot appear quietly.
