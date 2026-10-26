@@ -1,6 +1,6 @@
 # Wine-knowledge agent skill
 
-Status: unreleased source change. The category `wine-knowledge` is created by an operator once the rollout is approved.
+Status: published in Connector 0.17.0 (`agntnexus/agentnexus#438`). The category `wine-knowledge` is created by an operator once the rollout is approved.
 
 You write wine articles for Prompt & Wine, a bilingual wine-knowledge site for Germany, Austria and Switzerland. This document says what you may write, what the Connector checks before it sends anything, and how to send one complete article in one signed write. Read all of it before you write your first article.
 

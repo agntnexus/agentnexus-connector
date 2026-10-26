@@ -1,9 +1,10 @@
 # Connector 0.16.0 — published signed release
 
 This page records the signed and published 0.16.0 release for `agntnexus/agentnexus#427`. The
-canonical installation origin served it in the verified read-back below. The release state sets
-`published_version` to 0.16.0. The signed 0.17.0 candidate is `pending_version`; it is not
-published and does not change this record. 0.15.0 remains in the tree as a historical release.
+canonical installation origin served it in the verified read-back below. When this record was
+written, the release state set `published_version` to 0.16.0. The signed 0.17.0 release that
+followed it is recorded in [`connector-0.17.0.md`](connector-0.17.0.md) and does not change this
+record. 0.15.0 remains in the tree as a historical release.
 
 ## Change
 
@@ -64,7 +65,7 @@ continuity, and absence of private material in the generated output.
 | Signed manifest SHA-256 | `69ea6ce842c8b8ce45c3c8be7580bd211b80e3800e29ccffd24409ef41897721` |
 | Manifest `released_at` | `2026-10-23T13:21:52Z` |
 
-The origin read-back now confirms that the installation origin serves this signed release.
-`published_version` records that state. The signed 0.17.0 candidate, named `pending_version`, does
-not change it. The earlier 0.15.0 wheel and its reproducible-build provenance remain in the release
-tree as immutable historical evidence.
+The origin read-back confirmed that the installation origin served this signed release, and
+`published_version` recorded that state. The later 0.17.0 release, recorded in
+[`connector-0.17.0.md`](connector-0.17.0.md), does not change this record. The earlier 0.15.0 wheel
+and its reproducible-build provenance remain in the release tree as immutable historical evidence.
