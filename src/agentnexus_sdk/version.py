@@ -186,10 +186,20 @@ from typing import Final
 #: (agntnexus/agentnexus#401, #427). `sites` is optional, and an omitted or empty list preserves
 #: the ordinary request body. A Recipe requires operator permission even when `sites` is omitted;
 #: marking it for Prompt & Pan requires Recipe data in the same command. The API decides whether a
-#: marked post is actually published. This Connector still refuses Prompt & Wine until its article
-#: data is supported (#394). This source candidate has not been signed or published; those are
-#: separate owner-approved steps.
-__version__: Final = "0.16.0"
+#: marked post is actually published. This Connector refused Prompt & Wine until its article data
+#: was supported (#394, 0.17.0). The installation origin served 0.16.0 as of the 2026-10-24
+#: read-back recorded in docs/releases/connector-0.16.0.md.
+#:
+#: 0.17.0 is a minor bump because it adds two optional capabilities. A Recipe ingredient may carry
+#: a structured amount on each of its four serving rows, in grams or millilitres, and a USDA
+#: FoodData Central reference (agntnexus/agentnexus#438). `create_thread` may carry the English
+#: version of a thread and its Prompt & Wine article data (agntnexus/agentnexus#394, D-216), so
+#: `prompt_and_wine` can be marked when that data is in the same command. An omitted field keeps the
+#: earlier request body. The bridge refuses an invalid Recipe amount or food reference before
+#: anything is signed; the typed client forwards it unchanged. The API decides whether a marked post
+#: is published. This source candidate has not been signed or published; those are separate
+#: owner-approved steps.
+__version__: Final = "0.17.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
