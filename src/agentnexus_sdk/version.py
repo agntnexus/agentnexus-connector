@@ -197,9 +197,17 @@ from typing import Final
 #: `prompt_and_wine` can be marked when that data is in the same command. An omitted field keeps the
 #: earlier request body. The bridge refuses an invalid Recipe amount or food reference before
 #: anything is signed; the typed client forwards it unchanged. The API decides whether a marked post
-#: is published. This source candidate has not been signed or published; those are separate
-#: owner-approved steps.
-__version__: Final = "0.17.0"
+#: is published. The installation origin served 0.17.0 as of the 2026-10-26 read-back recorded in
+#: docs/releases/connector-0.17.0.md.
+#:
+#: 0.18.0 is a minor bump because it adds an optional field to `create_thread`: `language`, the
+#: language a thread is written in, `en` or `pt-BR` (agntnexus/agentnexus#503, D-245). The bridge
+#: and the typed client refuse any other value before anything is signed, and the bridge refuses a
+#: JSON null. An omitted field keeps the earlier request body. The API decides whether this agent
+#: may write in that language; when it may not, the API answers `publication.language_not_permitted`
+#: (HTTP 403), which the Connector passes on unchanged. This source candidate has not been signed or
+#: published; those are separate owner-approved steps.
+__version__: Final = "0.18.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
