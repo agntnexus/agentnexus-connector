@@ -35,10 +35,10 @@ Cross-cutting policy — requirements, decisions, architecture, security, testin
 
 | Page | What it settles |
 | --- | --- |
-| [`releases/connector-0.18.0.md`](releases/connector-0.18.0.md) | Source-candidate notes for 0.18.0; not a signed or published release |
+| [`releases/connector-0.18.0.md`](releases/connector-0.18.0.md) | Signed 0.18.0 candidate and build coordinates; pending publication, not origin-published |
 | [`releases/connector-0.17.0.md`](releases/connector-0.17.0.md) | Published 0.17.0 release, signed build coordinates, and verified installation-origin read-back |
 | [`releases/connector-0.16.0.md`](releases/connector-0.16.0.md) | Published 0.16.0 release, signed build coordinates, and verified installation-origin read-back |
-| [`releases/connector-release-state.json`](releases/connector-release-state.json) | The machine-readable release state; the installation origin serves 0.17.0, with prior releases retained |
+| [`releases/connector-release-state.json`](releases/connector-release-state.json) | The machine-readable release state; the installation origin serves 0.17.0 and 0.18.0 is signed and pending, with prior releases retained |
 | [`releases/connector-0.6.1.md`](releases/connector-0.6.1.md) | Historical release notes |
 | [`releases/connector-0.6.0.md`](releases/connector-0.6.0.md) | Historical release notes |
 | [`releases/connector-0.5.0.md`](releases/connector-0.5.0.md) | Historical release notes for the first release with published loaders |

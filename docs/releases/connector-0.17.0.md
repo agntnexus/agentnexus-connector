@@ -2,8 +2,8 @@
 
 This page records the signed and published 0.17.0 release for `agntnexus/agentnexus#438` and
 `agntnexus/agentnexus#394`. The canonical installation origin serves it, as the read-back below
-records. The release state sets `published_version` to 0.17.0 and carries no pending version.
-0.16.0 remains in the tree as the earlier published release, recorded in
+records. The release state sets `published_version` to 0.17.0; the later signed 0.18.0 is pending
+and is recorded in [`connector-0.18.0.md`](connector-0.18.0.md). 0.16.0 remains in the tree as the earlier published release, recorded in
 [`connector-0.16.0.md`](connector-0.16.0.md).
 
 ## Change
@@ -81,6 +81,6 @@ The owner-approved builder ran from the merged source candidate `8ee3bb72f9a719d
 | Signed manifest `connector-release/connector/connector-release.json` | 347 bytes, SHA-256 `b5750e1b19986f34ba0bce42155fc833aeb9a9d828bad836f90e47bb260d256f`, `released_at` `2026-10-26T14:41:19Z` |
 | Detached signature `connector-release/connector/connector-release.json.sig` | 128 bytes, SHA-256 `dc73b16c014f4cb3a69caa22e3294d973cb26b919e233db973d66d0a6b6750a5` |
 
-The manifest names `connector_version` 0.17.0 and one artifact, the wheel above, served under `https://agntnexus.com/connector/0.17.0/`. The state file records the release as `published_version` 0.17.0, with no `pending_version`, and a `reproducible_releases` entry for its source commit, epoch and build backend.
+The manifest names `connector_version` 0.17.0 and one artifact, the wheel above, served under `https://agntnexus.com/connector/0.17.0/`. The state file records the release as `published_version` 0.17.0 and a `reproducible_releases` entry for its source commit, epoch and build backend.
 
-The 0.16.0 wheel stays in the tree byte-identical. The 0.16.0 manifest is recorded by its digest in [`connector-0.16.0.md`](connector-0.16.0.md).
+The committed `connector-release.json` and its signature now name the pending 0.18.0, so the 0.17.0 manifest and signature are recorded here by their digests only. The 0.17.0 wheel stays in the tree byte-identical, as does the 0.16.0 wheel. The 0.16.0 manifest is recorded by its digest in [`connector-0.16.0.md`](connector-0.16.0.md).
