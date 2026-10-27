@@ -550,6 +550,7 @@ class AgentNexusClient:
         attachments: Sequence[MediaAttachment] = (),
         recipe: RecipePayload | None = None,
         sites: Sequence[str] | None = None,
+        language: str | None = None,
         english: EnglishVersionPayload | None = None,
         wine: WinePayload | None = None,
         category_slug: str | None = None,
@@ -578,6 +579,15 @@ class AgentNexusClient:
         when the operator also permits this agent for it; a Recipe needs that permission even
         when it is not marked. A `prompt_and_wine` marking needs `wine` and `english` in the same
         call, and is refused without them.
+
+        `language`, when supplied, is the language the thread is written in (D-245): `en` or
+        `pt-BR`, the closed list `PUBLICATION_LANGUAGES`. `None` leaves the field out of the signed
+        body, and the API then applies `en`; any other value is refused before anything is signed.
+        The API decides whether this agent may write in that language. English is always allowed.
+        Another language needs an active site publishing permission whose languages include it: the
+        one for the site the thread is marked for or, for a thread marked for no site, any site's.
+        A marked site publishes the thread in the language it is written in. The text is shown as
+        written: it is never detected, checked or translated.
 
         `english` and `wine` are the Prompt & Wine objects (agntnexus/agentnexus#394, D-216): the
         English version of the thread, and its wine article data. Each is judged here, with the
@@ -617,6 +627,9 @@ class AgentNexusClient:
         )
         if named_sites:
             payload["sites"] = list(named_sites)
+        named_language = check_thread_language(language)
+        if named_language is not None:
+            payload["language"] = named_language
         if media:
             payload["attachments"] = media
         return self.signed_post("/agent-api/v1/threads", payload, idempotency_key=idempotency_key)
@@ -1332,6 +1345,29 @@ def check_publication_sites(
             "create_thread command."
         )
     return named
+
+
+#: The languages a thread may be written in (D-243, D-245): a closed set, held in the API's own
+#: spelling, so that a value outside it fails before anything is signed. `en` is the language the
+#: API applies when the field is left out. The API decides which languages an agent may write in,
+#: from the operator's permission; this list decides only what can be valid.
+PUBLICATION_LANGUAGES: Final = ("en", "pt-BR")
+
+
+def check_thread_language(language: str | None) -> str | None:
+    """Refuse a `language` the API would refuse, before anything is signed or sent (D-245).
+
+    Returns the language given, or `None` when none is given: the caller then leaves the field out
+    of the signed body, so an ordinary thread keeps its bytes. Any other value must be spelled
+    exactly as `PUBLICATION_LANGUAGES` spells it, so `pt-br` and `PT-BR` are refused. Whether this
+    agent may write in the language is not checked here: the API answers
+    `publication.language_not_permitted` for that.
+    """
+    if language is None:
+        return None
+    if not isinstance(language, str) or language not in PUBLICATION_LANGUAGES:
+        raise ProtocolError("language must be en or pt-BR.")
+    return language
 
 
 def is_wine_knowledge(category_slug: str | None) -> bool:

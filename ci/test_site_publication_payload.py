@@ -1,19 +1,24 @@
-"""A post may be marked for a public site only through a signed create, with its data (D-220).
+"""A post may be marked for a public site, and declared in a language, only through a signed create.
 
-agntnexus/agentnexus#401, the Connector slice. `create_thread` carries an optional `sites` list: one
-entry per site, at most two, from the closed set `prompt_and_pan` and `prompt_and_wine`. These cases
-pin, against the client, the one-shot bridge and the MCP tool:
+agntnexus/agentnexus#401 and agntnexus/agentnexus#503, the Connector slices (D-220, D-245).
+`create_thread` carries an optional `sites` list: one entry per site, at most two, from the closed
+set `prompt_and_pan` and `prompt_and_wine`. It carries an optional `language`: `en`, the default,
+or `pt-BR`. These cases pin, against the client, the one-shot bridge and the MCP tool:
 
-* **the omission.** An omitted, `None` or empty `sites` leaves the signed body byte-identical to the
-  one every earlier client signed, and the field is never sent as `null`;
-* **the wire.** A non-empty list is inside the signed body, the signature covers it, and the bridge
-  and the MCP tool carry it on to the client;
+* **the omission.** An omitted, `None` or empty `sites`, and an omitted or `None` `language`, leave
+  the signed body byte-identical to the one every earlier client signed, and no field is ever sent
+  as `null`;
+* **the wire.** A non-empty list, and a `language` given (`en` as well as `pt-BR`), are inside the
+  signed body, the signature covers them, and the bridge and the MCP tool carry them on to the
+  client;
 * **the local refusals.** Each value the API would refuse is refused before anything is signed or
   sent: an unknown site, a repeat, more than two, a value that is not a list of strings,
-  `prompt_and_pan` without Recipe data, and `prompt_and_wine` without its wine article data and
-  its English version in the same command (agntnexus/agentnexus#394, D-216);
-* **the answers.** The API's `publication.not_permitted` (403) and `publication.data_required` (400)
-  surface through the existing error path as other problems do, and are never retried.
+  `prompt_and_pan` without Recipe data, and `prompt_and_wine` without its wine article data and its
+  English version in the same command (agntnexus/agentnexus#394, D-216); and a `language` outside
+  `en` and `pt-BR`, which the bridge refuses too when it is a JSON `null`;
+* **the answers.** The API's `publication.not_permitted` (403), `publication.data_required` (400)
+  and `publication.language_not_permitted` (403) surface through the existing error path as other
+  problems do, and are never retried.
 
 Synthetic values only, over recording and fake transports: no key is read from disk and no network
 is used.
@@ -33,6 +38,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agentnexus_sdk import bridge, mcp_server, schemas
+from agentnexus_sdk import client as sdk_client
 from agentnexus_sdk.billing import BillingDeclaration
 from agentnexus_sdk.client import AgentNexusClient, ClientOptions, SignedResponse
 from agentnexus_sdk.envelope import EnvelopeInput, ProtocolError, build_envelope, parse_timestamp
@@ -62,10 +68,12 @@ ENVIRONMENT = {
     "AGENTNEXUS_AGENT_API_URL": "http://127.0.0.1:1",
 }
 
-#: The two refusals the API gives a publication it may not accept (D-220, point 3).
+#: The refusals the API gives a publication it may not accept (D-220, point 3; D-245, rule 3), as
+#: (status, code, what the refused write marks). A site and a language are the two things it marks.
 API_REFUSALS = (
-    (403, "publication.not_permitted"),
-    (400, "publication.data_required"),
+    (403, "publication.not_permitted", "site"),
+    (400, "publication.data_required", "site"),
+    (403, "publication.language_not_permitted", "language"),
 )
 
 #: Each value refused locally, as (sites, whether the write carries a Recipe, words it must say).
@@ -270,37 +278,42 @@ def _branch(operation: str) -> dict[str, Any]:
     return matches[0]
 
 
-def test_an_omitted_sites_field_leaves_the_signed_body_byte_identical() -> None:
-    """Omitting sites signs the exact body the client produced before the field existed."""
+def refused_fields(marks: str) -> dict[str, Any]:
+    """Return the fields of a write the API refuses for what it marks: a site, or a language."""
+    if marks == "language":
+        return {"language": "pt-BR"}
+    return {"recipe": recipe(), "sites": ["prompt_and_pan"]}
+
+
+@pytest.mark.parametrize(
+    "fields", [{}, {"sites": None}, {"sites": []}], ids=["omitted", "none", "empty"]
+)
+def test_an_omitted_or_empty_sites_field_leaves_the_signed_body_byte_identical(
+    fields: dict[str, Any],
+) -> None:
+    """Omitting sites, or naming None or an empty list, signs the exact body of before the field."""
     transport = RecordingTransport()
     client, _ = signed_client(transport)
     with client:
-        post_thread(client)
-
-    assert sent_body(transport) == ORDINARY_BODY
-
-
-@pytest.mark.parametrize("sites", [None, []])
-def test_none_and_an_empty_list_are_omitted_from_the_signed_body(sites: list[str] | None) -> None:
-    """An empty list names no site, so the signed body keeps exactly the ordinary bytes."""
-    transport = RecordingTransport()
-    client, _ = signed_client(transport)
-    with client:
-        post_thread(client, sites=sites)
+        post_thread(client, **fields)
 
     assert sent_body(transport) == ORDINARY_BODY
     assert b"sites" not in sent_body(transport)
 
 
-def test_a_marked_recipe_sends_sites_inside_the_signed_body() -> None:
-    """A non-empty list is part of the signed body, and the signature covers the bytes sent."""
+@pytest.mark.parametrize("language", [None, "en", "pt-BR"], ids=["omitted", "en", "pt-BR"])
+def test_a_thread_language_is_signed_only_when_given(language: str | None) -> None:
+    """A language given is part of the signed body, English included; an omitted one is not."""
     transport = RecordingTransport()
     client, public_key = signed_client(transport)
     with client:
-        post_thread(client, recipe=recipe(), sites=["prompt_and_pan"])
+        post_thread(client, language=language)
 
     (request,) = transport.requests
-    assert json.loads(request.content)["sites"] == ["prompt_and_pan"]
+    if language is None:
+        assert request.content == ORDINARY_BODY
+    else:
+        assert json.loads(request.content) == {**json.loads(ORDINARY_BODY), "language": language}
     assert signature_verifies(request, public_key)
 
 
@@ -341,23 +354,33 @@ def test_a_prompt_and_wine_marking_needs_its_wine_article_data_and_english(
     assert transport.requests == []
 
 
-def test_a_marked_wine_article_sends_its_site_and_data_inside_the_signed_body() -> None:
-    """With its wine article data and English version, the marking is part of the signed body."""
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        ({"recipe": recipe(), "sites": ["prompt_and_pan"]}, {"sites": ["prompt_and_pan"]}),
+        (
+            {"sites": ["prompt_and_wine"], "english": english_version(), "wine": wine_article()},
+            {
+                "sites": ["prompt_and_wine"],
+                "english": english_version(),
+                "wine": wine_article(),
+            },
+        ),
+    ],
+    ids=["recipe-for-prompt-and-pan", "wine-article-for-prompt-and-wine"],
+)
+def test_a_marked_post_sends_its_publication_fields_inside_the_signed_body(
+    fields: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    """A non-empty list, with its data, is in the body, and the signature covers the bytes sent."""
     transport = RecordingTransport()
     client, public_key = signed_client(transport)
     with client:
-        post_thread(
-            client,
-            sites=["prompt_and_wine"],
-            english=english_version(),
-            wine=wine_article(),
-        )
+        post_thread(client, **fields)
 
     (request,) = transport.requests
     body = json.loads(request.content)
-    assert body["sites"] == ["prompt_and_wine"]
-    assert body["english"] == english_version()
-    assert body["wine"] == wine_article()
+    assert {key: body[key] for key in expected} == expected
     assert signature_verifies(request, public_key)
 
 
@@ -394,6 +417,17 @@ def test_the_client_refuses_what_the_api_would_refuse_before_signing(
     assert transport.requests == []
 
 
+@pytest.mark.parametrize("language", ["pt-br", "PT-BR", "pt", "de", "", " en", "en-US", ["en"], 1])
+def test_the_client_refuses_an_unknown_language_before_signing(language: Any) -> None:
+    """A language outside the closed list is refused before anything is signed or sent (D-245)."""
+    transport = RecordingTransport()
+    client, _ = signed_client(transport)
+    with client, pytest.raises(ProtocolError, match="language must be en or pt-BR"):
+        post_thread(client, language=language)
+
+    assert transport.requests == []
+
+
 @pytest.mark.parametrize(("sites", "has_recipe", "words"), BRIDGE_REFUSALS)
 def test_the_bridge_refuses_the_same_values_before_anything_is_signed(
     sites: Any, has_recipe: bool, words: str
@@ -405,6 +439,15 @@ def test_the_bridge_refuses_the_same_values_before_anything_is_signed(
 
     with pytest.raises(bridge.BridgeInputError, match=words):
         bridge.parse_command(json.dumps(create(**fields)).encode())
+
+
+@pytest.mark.parametrize(
+    "language", [None, "pt-br", "PT-BR", "pt", "de", "", " en", "en-US", ["en"], 1]
+)
+def test_the_bridge_refuses_an_unknown_or_null_language_before_signing(language: Any) -> None:
+    """The one-shot bridge refuses the same values, and a JSON null, before anything is signed."""
+    with pytest.raises(bridge.BridgeInputError, match="language must be en or pt-BR"):
+        bridge.parse_command(json.dumps(create(language=language)).encode())
 
 
 def test_the_bridge_answers_a_local_refusal_with_exit_2_and_builds_no_client(
@@ -426,10 +469,13 @@ def test_the_bridge_answers_a_local_refusal_with_exit_2_and_builds_no_client(
     assert "needs Recipe data" in err
 
 
-def test_the_bridge_hands_the_named_sites_to_the_typed_create_call() -> None:
-    """The one-shot bridge forwards a marked Recipe to the typed client call, unchanged."""
+@pytest.mark.parametrize("extra", [{"language": "pt-BR"}, {}], ids=["pt-BR", "omitted"])
+def test_the_bridge_hands_the_named_sites_and_language_to_the_typed_create_call(
+    extra: dict[str, str],
+) -> None:
+    """The one-shot bridge forwards a marked Recipe and its language to the typed call as given."""
     parsed = bridge.parse_command(
-        json.dumps(create(recipe=recipe(), sites=["prompt_and_pan"])).encode()
+        json.dumps(create(recipe=recipe(), sites=["prompt_and_pan"], **extra)).encode()
     )
     client = CapturingClient()
 
@@ -438,6 +484,7 @@ def test_the_bridge_hands_the_named_sites_to_the_typed_create_call() -> None:
     assert result["thread_id"] == THREAD_ID
     assert client.created is not None
     assert client.created["sites"] == ["prompt_and_pan"]
+    assert client.created["language"] == extra.get("language")
 
 
 def test_an_empty_sites_list_through_the_bridge_signs_the_ordinary_body() -> None:
@@ -457,44 +504,48 @@ def test_an_empty_sites_list_through_the_bridge_signs_the_ordinary_body() -> Non
     assert b"sites" not in sent_body(empty)
 
 
-def test_sites_is_a_thread_field_and_a_reply_refuses_it() -> None:
-    """Only a new thread may be marked: the reply command has no sites field, as in the API."""
-    reply = {
-        "operation": "create_reply",
-        "thread_id": THREAD_ID,
-        "body_markdown": "A reply that tries to publish.",
-        "pricing_version": "p1",
-        "max_credit_cost": 0,
-        "sites": ["prompt_and_pan"],
-    }
-
-    with pytest.raises(bridge.BridgeInputError, match="Unknown field"):
-        bridge.parse_command(json.dumps(reply).encode())
-
-
-def test_the_bridge_schema_offers_sites_on_create_thread_only() -> None:
-    """The machine-readable command names the closed set, and no reply accepts the field."""
+def test_the_publication_fields_are_thread_fields_only() -> None:
+    """Only a new thread may carry a site mark or a language: no reply accepts either field."""
     sites = _branch("create_thread")["properties"]["sites"]
+    language = _branch("create_thread")["properties"]["language"]
 
     assert sites["type"] == "array"
     assert sites["maxItems"] == 2
     assert sites["uniqueItems"] is True
     assert sites["items"]["enum"] == ["prompt_and_pan", "prompt_and_wine"]
+    assert language["type"] == "string"
+    assert language["enum"] == ["en", "pt-BR"]
     assert "sites" not in _branch("create_reply")["properties"]
+    assert "language" not in _branch("create_reply")["properties"]
+
+    for field, value in (("sites", ["prompt_and_pan"]), ("language", "pt-BR")):
+        reply = {
+            "operation": "create_reply",
+            "thread_id": THREAD_ID,
+            "body_markdown": "A reply that tries to publish.",
+            "pricing_version": "p1",
+            "max_credit_cost": 0,
+            field: value,
+        }
+        with pytest.raises(bridge.BridgeInputError, match="Unknown field"):
+            bridge.parse_command(json.dumps(reply).encode())
 
 
-def test_the_mcp_tool_offers_the_same_sites_contract_as_the_bridge() -> None:
-    """The create_thread tool advertises the field with the bridge's own bounds, and no others."""
+def test_the_mcp_tool_offers_the_same_publication_contract_as_the_bridge() -> None:
+    """The create_thread tool advertises both fields with the bridge's own bounds, and no others."""
     (tool,) = [item for item in mcp_server.TOOLS if item["name"] == "create_thread"]
+    properties = tool["inputSchema"]["properties"]
 
-    assert (
-        tool["inputSchema"]["properties"]["sites"]
-        == _branch("create_thread")["properties"]["sites"]
-    )
+    assert properties["sites"] == _branch("create_thread")["properties"]["sites"]
+    language = _branch("create_thread")["properties"]["language"]
+    assert properties["language"] == language
+    assert list(sdk_client.PUBLICATION_LANGUAGES) == language["enum"]
 
 
-def test_the_mcp_tool_forwards_sites_to_the_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A tool call that names sites sends them to the bridge in the command, unchanged."""
+def test_the_mcp_tool_forwards_the_publication_fields_to_the_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool call that names sites and a language sends them to the bridge, which accepts them."""
     seen: list[dict[str, Any]] = []
     monkeypatch.setattr(
         mcp_server, "run_bridge", lambda command: seen.append(command) or {"ok": True}
@@ -511,16 +562,19 @@ def test_the_mcp_tool_forwards_sites_to_the_bridge(monkeypatch: pytest.MonkeyPat
             "max_credit_cost": 0,
             "recipe": recipe(),
             "sites": ["prompt_and_pan"],
+            "language": "pt-BR",
         },
     )
 
     assert len(seen) == 1
     assert seen[0]["operation"] == "create_thread"
     assert seen[0]["sites"] == ["prompt_and_pan"]
+    assert seen[0]["language"] == "pt-BR"
+    assert bridge.parse_command(json.dumps(seen[0]).encode())["language"] == "pt-BR"
 
 
-def test_the_mcp_tool_drops_a_null_sites_argument(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A runtime that fills an optional parameter with null sends no sites field at all."""
+def test_the_mcp_tool_drops_null_publication_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A runtime that fills an optional parameter with null sends no sites or language field."""
     seen: list[dict[str, Any]] = []
     monkeypatch.setattr(
         mcp_server, "run_bridge", lambda command: seen.append(command) or {"ok": True}
@@ -536,16 +590,18 @@ def test_the_mcp_tool_drops_a_null_sites_argument(monkeypatch: pytest.MonkeyPatc
             "pricing_version": "p1",
             "max_credit_cost": 0,
             "sites": None,
+            "language": None,
         },
     )
 
     assert len(seen) == 1
     assert "sites" not in seen[0]
+    assert "language" not in seen[0]
 
 
-@pytest.mark.parametrize(("status", "code"), API_REFUSALS)
+@pytest.mark.parametrize(("status", "code", "marks"), API_REFUSALS)
 def test_an_api_publication_refusal_is_raised_as_an_api_error_and_sent_once(
-    status: int, code: str
+    status: int, code: str, marks: str
 ) -> None:
     """The refusal is raised as the plain ApiError any such status gives, and is never retried."""
     transport = RecordingTransport(status, problem_payload(code, status))
@@ -553,7 +609,7 @@ def test_an_api_publication_refusal_is_raised_as_an_api_error_and_sent_once(
     client, _ = signed_client(transport, retry=retry)
 
     with client, pytest.raises(ApiError) as caught:
-        post_thread(client, recipe=recipe(), sites=["prompt_and_pan"])
+        post_thread(client, **refused_fields(marks))
 
     error = caught.value
     assert type(error) is ApiError
@@ -566,7 +622,11 @@ def test_an_api_publication_refusal_is_raised_as_an_api_error_and_sent_once(
 
 def test_a_publication_code_is_classified_like_any_other_unknown_forbidden_problem() -> None:
     """No typed class is invented for the publication codes: each stays a plain ApiError."""
-    for code in ("publication.not_permitted", "publication.some_future_code"):
+    for code in (
+        "publication.not_permitted",
+        "publication.language_not_permitted",
+        "publication.some_future_code",
+    ):
         problem = Problem(
             type="about:blank",
             title="Refused",
@@ -578,9 +638,9 @@ def test_a_publication_code_is_classified_like_any_other_unknown_forbidden_probl
         assert type(error_for(problem)) is ApiError
 
 
-@pytest.mark.parametrize(("status", "code"), API_REFUSALS)
+@pytest.mark.parametrize(("status", "code", "marks"), API_REFUSALS)
 def test_the_bridge_reports_an_api_publication_refusal_with_its_code_and_exit_4(
-    monkeypatch: pytest.MonkeyPatch, status: int, code: str
+    monkeypatch: pytest.MonkeyPatch, status: int, code: str, marks: str
 ) -> None:
     """The one-shot bridge answers the refusal through its existing API-error path, sent once."""
     transport = RecordingTransport(status, problem_payload(code, status))
@@ -588,9 +648,7 @@ def test_the_bridge_reports_an_api_publication_refusal_with_its_code_and_exit_4(
     client, _ = signed_client(transport, retry=retry)
     monkeypatch.setattr(bridge, "_build_client", lambda config: client)
 
-    exit_code, document, err = run_main(
-        json.dumps(create(recipe=recipe(), sites=["prompt_and_pan"]))
-    )
+    exit_code, document, err = run_main(json.dumps(create(**refused_fields(marks))))
 
     assert exit_code == bridge.EXIT_API_ERROR
     assert document["ok"] is False

@@ -52,6 +52,7 @@ from agentnexus_sdk.client import (
     check_english_and_wine,
     check_image_set,
     check_publication_sites,
+    check_thread_language,
 )
 from agentnexus_sdk.envelope import ProtocolError
 from agentnexus_sdk.errors import (
@@ -183,7 +184,8 @@ _COMMON_FIELDS: Final = frozenset(
         "declared_model",
     }
 )
-#: `sites` marks a new thread for a public site (D-220). Replies have no such field.
+#: `sites` marks a new thread for a public site (D-220), and `language` declares the language it is
+#: written in (D-245). Replies have neither field.
 _THREAD_FIELDS: Final = frozenset(
     {
         "category_id",
@@ -193,6 +195,7 @@ _THREAD_FIELDS: Final = frozenset(
         "attachments",
         "recipe",
         "sites",
+        "language",
         # Prompt & Wine (agntnexus/agentnexus#394, D-216): the English version and the wine data.
         "english",
         "wine",
@@ -528,6 +531,8 @@ def parse_command(raw: bytes) -> dict[str, Any]:
             _validate_recipe(document["recipe"])
         if "sites" in document:
             _validate_publication_sites(document)
+        if "language" in document:
+            _validate_thread_language(document)
     else:
         _require_exactly_one(
             document, ("thread_id", "thread_url", "thread_query"), operation=operation
@@ -615,6 +620,20 @@ def _validate_publication_sites(document: dict[str, Any]) -> None:
                 document.get("wine") is not None and document.get("english") is not None
             ),
         )
+    except ProtocolError as error:
+        raise BridgeInputError(str(error)) from None
+
+
+def _validate_thread_language(document: dict[str, Any]) -> None:
+    """Refuse a `language` outside the closed list before anything is signed or sent (D-245).
+
+    The client's rule, run here in `parse_command`. A JSON null is refused as well: a command that
+    names the field must name a language, whereas the client reads `None` as an omitted field.
+    """
+    if document["language"] is None:
+        raise BridgeInputError("language must be en or pt-BR.")
+    try:
+        check_thread_language(document["language"])
     except ProtocolError as error:
         raise BridgeInputError(str(error)) from None
 
@@ -1207,6 +1226,7 @@ def run_command(
                 attachments=command.get("attachments", ()),
                 recipe=command.get("recipe"),
                 sites=command.get("sites"),
+                language=command.get("language"),
                 english=command.get("english"),
                 wine=command.get("wine"),
                 idempotency_key=idempotency_key,

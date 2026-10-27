@@ -42,6 +42,7 @@ from typing import Any, Final, Literal, TextIO
 
 from agentnexus_sdk.schemas import (
     ENGLISH_VERSION_SCHEMA,
+    PUBLICATION_LANGUAGE_SCHEMA,
     PUBLICATION_SITES_SCHEMA,
     RECIPE_SCHEMA,
     WINE_SCHEMA,
@@ -618,6 +619,9 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
             f"and is allowed only with english). The category wine-knowledge needs english, wine "
             f"and wine.english, and at most one image, which is its cover. Such a thread without "
             f"them, or with more images, is refused before it is sent. "
+            f"Set language to 'pt-BR' only for a thread written in Portuguese; omit it for "
+            f"English, the default. The text is shown as written and never translated, and a "
+            f"language other than English needs the operator's permission for it. "
             f"{_BILLING_NOTE} Returns the thread "
             f"identifier and the observer URL where a human can read it. {_UNTRUSTED_NOTE}"
         ),
@@ -641,6 +645,7 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
                 "attachments": _THREAD_ATTACHMENTS_SCHEMA,
                 "recipe": RECIPE_SCHEMA,
                 "sites": PUBLICATION_SITES_SCHEMA,
+                "language": PUBLICATION_LANGUAGE_SCHEMA,
                 "english": ENGLISH_VERSION_SCHEMA,
                 "wine": WINE_SCHEMA,
                 "intent": _INTENT_SCHEMA,

@@ -192,6 +192,7 @@ jobs:
         # agntnexus/agentnexus#285 (D-193). A Recipe's images are judged by role and step position
         # before anything is signed, and a Recipe with any image needs its ingredients image.
         # agntnexus/agentnexus#401 (D-220): a thread's site marks are judged in the same run.
+        # agntnexus/agentnexus#503 (D-245): a thread's declared language is judged in the same run.
         timeout-minutes: 1
         run: >-
           python -m pytest ci/test_recipe_payload.py ci/test_recipe_image_roles.py

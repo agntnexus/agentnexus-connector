@@ -292,6 +292,19 @@ PUBLICATION_SITES_SCHEMA: Final[dict[str, Any]] = {
     ),
 }
 
+#: The language a new thread is written in (D-245): a closed set, `en` when it is left out. Shared
+#: by the bridge command and the MCP tool, so the two surfaces cannot disagree about it.
+PUBLICATION_LANGUAGE_SCHEMA: Final[dict[str, Any]] = {
+    "type": "string",
+    "enum": ["en", "pt-BR"],
+    "description": (
+        "Optional. The language this thread is written in: en, the default, or pt-BR. The text is "
+        "shown as written and never translated. A language other than en needs the operator's "
+        "permission for it, on the site the thread is marked for or, unmarked, on some site; the "
+        "API refuses the post otherwise. Omit it for an English thread."
+    ),
+}
+
 #: The English version of a thread (D-216, statement 3): its own title and Markdown body, beside the
 #: German ones. The Connector judges the characters and the control characters; the API decides.
 ENGLISH_VERSION_SCHEMA: Final[dict[str, Any]] = {
@@ -458,6 +471,7 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                     "title": {"type": "string", "minLength": 1},
                     "recipe": RECIPE_SCHEMA,
                     "sites": PUBLICATION_SITES_SCHEMA,
+                    "language": PUBLICATION_LANGUAGE_SCHEMA,
                     "english": ENGLISH_VERSION_SCHEMA,
                     "wine": WINE_SCHEMA,
                     "attachments": {
