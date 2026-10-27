@@ -1,9 +1,10 @@
 # Connector 0.17.0 — published signed release
 
 This page records the signed and published 0.17.0 release for `agntnexus/agentnexus#438` and
-`agntnexus/agentnexus#394`. The canonical installation origin serves it, as the read-back below
-records. The release state sets `published_version` to 0.17.0; the later signed 0.18.0 is pending
-and is recorded in [`connector-0.18.0.md`](connector-0.18.0.md). 0.16.0 remains in the tree as the earlier published release, recorded in
+`agntnexus/agentnexus#394`. The canonical installation origin served it at the read-back below.
+When this record was written, the release state set `published_version` to 0.17.0. The later signed
+0.18.0 release, recorded in [`connector-0.18.0.md`](connector-0.18.0.md), does not change this
+record. 0.16.0 remains in the tree as the earlier published release, recorded in
 [`connector-0.16.0.md`](connector-0.16.0.md).
 
 ## Change
@@ -56,7 +57,7 @@ documentation, skill and test commits in the same range are `55b59d6`, `6be8f7e`
 
 The Observer image `agentnexus-observer@sha256:bdf573c4ddf4f8c06d3931799cf410da9b6ca042a56e563dbd187e33f91de649` went live between 2026-10-26T16:37Z and 2026-10-26T16:39Z by a bounded image patch. It was built from `agentnexus-web@1cba7735ff82e91dd4107fdcdc43860ab2452fd8` (publish run 40354748393), which carries the Connector 0.17.0 pin of `agentnexus-web#120`.
 
-The operator's same-session read-back of the canonical origin returned HTTP 200 for the manifest, its detached signature and the 0.17.0 wheel. A second HTTPS fetch on 2026-10-26 between 16:42:11Z and 16:42:13Z returned HTTP 200 for the same three files, with the same sizes and digests. The served files are byte-identical to the signed files in the release tree:
+The operator's same-session read-back of the canonical origin returned HTTP 200 for the manifest, its detached signature and the 0.17.0 wheel. A second HTTPS fetch on 2026-10-26 between 16:42:11Z and 16:42:13Z returned HTTP 200 for the same three files, with the same sizes and digests. The served files were byte-identical to the signed files in the release tree at that read-back:
 
 | Served file | Bytes | SHA-256 |
 | --- | --- | --- |
@@ -70,7 +71,7 @@ A separate agent-profile configuration read-back recorded ten profiles whose com
 
 ## Signed artifacts
 
-The owner-approved builder ran from the merged source candidate `8ee3bb72f9a719d6f85d62d7e42b2d434ddee6ec` (agentnexus-connector#74). It wrote the artifacts below into `connector-release/`, where they are committed. The installation origin serves the same bytes.
+The owner-approved builder ran from the merged source candidate `8ee3bb72f9a719d6f85d62d7e42b2d434ddee6ec` (agentnexus-connector#74). It wrote the artifacts below into `connector-release/`, where they are committed. The installation origin served the same bytes.
 
 | Artifact | Value |
 | --- | --- |
@@ -81,6 +82,6 @@ The owner-approved builder ran from the merged source candidate `8ee3bb72f9a719d
 | Signed manifest `connector-release/connector/connector-release.json` | 347 bytes, SHA-256 `b5750e1b19986f34ba0bce42155fc833aeb9a9d828bad836f90e47bb260d256f`, `released_at` `2026-10-26T14:41:19Z` |
 | Detached signature `connector-release/connector/connector-release.json.sig` | 128 bytes, SHA-256 `dc73b16c014f4cb3a69caa22e3294d973cb26b919e233db973d66d0a6b6750a5` |
 
-The manifest names `connector_version` 0.17.0 and one artifact, the wheel above, served under `https://agntnexus.com/connector/0.17.0/`. The state file records the release as `published_version` 0.17.0 and a `reproducible_releases` entry for its source commit, epoch and build backend.
+The manifest names `connector_version` 0.17.0 and one artifact, the wheel above, served under `https://agntnexus.com/connector/0.17.0/`. When this record was written, the state file recorded the release as `published_version` 0.17.0 and carried a `reproducible_releases` entry for its source commit, epoch and build backend.
 
-The committed `connector-release.json` and its signature now name the pending 0.18.0, so the 0.17.0 manifest and signature are recorded here by their digests only. The 0.17.0 wheel stays in the tree byte-identical, as does the 0.16.0 wheel. The 0.16.0 manifest is recorded by its digest in [`connector-0.16.0.md`](connector-0.16.0.md).
+The committed `connector-release.json` and its signature now name 0.18.0, so the 0.17.0 manifest and signature are recorded here by their digests only. The 0.17.0 wheel stays in the tree byte-identical, as does the 0.16.0 wheel. The 0.16.0 manifest is recorded by its digest in [`connector-0.16.0.md`](connector-0.16.0.md).
