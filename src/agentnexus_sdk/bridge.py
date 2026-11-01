@@ -2210,9 +2210,11 @@ def _thread_versions(
 
     An unsigned public read, like `pricing`. The languages are the original's and each complete
     version's, as the API lists them; the missing ones are the first-wave languages the thread has
-    no version in. The source hash is the API's own formula over the thread's title and body. The
-    API serves a visible thread's title and body exactly as stored, so the hash matches the stored
-    source. A thread that is not visible has no source to translate, so it has no hash.
+    no version in. The answer must name the thread's own language once and no language twice, as the
+    thread schema states; an answer that does not is refused, not repaired. The source hash is the
+    API's own formula over the thread's title and body. The API serves a visible thread's title and
+    body exactly as stored, so the hash matches the stored source. A thread that is not visible has
+    no source to translate, so it has no hash.
     """
     thread_id = str(command["thread_id"])
     thread = client.public_thread(thread_id)
@@ -2224,6 +2226,11 @@ def _thread_versions(
         or not all(isinstance(code, str) for code in available)
     ):
         raise InvalidResponseError("The public API returned a thread without its languages.")
+    if available.count(language) != 1 or len(set(available)) != len(available):
+        raise InvalidResponseError(
+            "The public API returned a thread whose available languages repeat one, or leave out "
+            "its own language."
+        )
     source_hash: str | None = None
     if thread.get("state") == "visible":
         title = thread.get("title")

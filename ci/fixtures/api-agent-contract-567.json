@@ -58,6 +58,11 @@
         ],
         "title": "RecipeOriginRequest",
         "type": "object"
+      },
+      "responses": {
+        "200": {
+          "description": "Successful Response"
+        }
       }
     },
     "thread.translation.put": {
@@ -259,6 +264,14 @@
         ],
         "title": "ThreadTranslationRequest",
         "type": "object"
+      },
+      "responses": {
+        "200": {
+          "description": "The version existed before: it was replaced, or left unchanged."
+        },
+        "201": {
+          "description": "The version did not exist before: this write created it."
+        }
       }
     }
   },
@@ -291,13 +304,13 @@
     ]
   },
   "source": {
-    "api_commit": "56acb666d5be7313f94f1005d5c6e8ada1321b6e",
-    "api_commit_on_github": false,
+    "api_commit": "f5d5959e5dced6a2fbcd058afbdca12241db8917",
+    "api_commit_on_github": true,
     "files": {
       "packages/contracts/examples/thread.examples.json": "58282563b36c1666af8703f4b317428d7c7f299c2046995a77d08cccd0a5ede9",
-      "packages/contracts/openapi/openapi-agent.json": "231ce66002c7a70bc96d239535839fe7e8cf477dfa6e9d584f2f09968dee2e95"
+      "packages/contracts/openapi/openapi-agent.json": "9f278be158e5dd18655ff5a217cd2e67f4781a99644a542bce16d73c2d994ef6"
     },
-    "re_pin": "Local to feat/api-recipe-origin-566, not pushed. After the API slices are pushed, re-take these values from the pushed commit and update api_commit and the digests."
+    "re_pin": "Taken from agentnexus-api main at this commit, which is on GitHub. When one of these files changes in agentnexus-api, re-take these values from the new commit and update api_commit and the digests (docs/MIRROR.md)."
   },
   "thread_example": {
     "source": {

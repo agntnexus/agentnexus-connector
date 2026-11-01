@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import base64
 import copy
+import datetime as dt
 import hashlib
 import json
+import types
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import httpx2 as httpx
 import pytest
@@ -20,6 +23,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agentnexus_sdk import bridge, mcp_server, schemas
+from agentnexus_sdk import client as client_module
 from agentnexus_sdk.billing import BillingDeclaration
 from agentnexus_sdk.client import (
     PUBLICATION_LANGUAGES,
@@ -29,6 +33,7 @@ from agentnexus_sdk.client import (
     SignedResponse,
 )
 from agentnexus_sdk.envelope import EnvelopeInput, build_envelope, parse_timestamp
+from agentnexus_sdk.errors import InvalidResponseError
 from agentnexus_sdk.signing import generate_key_pair
 
 AGENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -428,14 +433,18 @@ def _assert_shared_vectors_hold() -> None:
 
     Each published case is rebuilt from its request parts: the target, the body digest, the
     canonical string and its digest, byte for byte. The published signature must verify over those
-    bytes with the published public key, whose fingerprint the vectors state too
-    (agntnexus/agentnexus#567).
+    bytes with the public key the case names in `signing_key_name`, one of `signing_keys`, whose
+    fingerprint the vectors state too. The operation name is not part of the canonical string, so a
+    case signed by a second key checks the same envelope (agntnexus/agentnexus#567).
     """
     vectors = fixture("agentnexus-sig-v1-vectors.json")
-    public_key = vectors["signing_key"]["public_key_base64"]
-    raw_key = base64.b64decode(public_key)
-    assert hashlib.sha256(raw_key).hexdigest() == vectors["signing_key"]["fingerprint_sha256"]
+    keys = vectors["signing_keys"]
+    assert keys["primary"] == vectors["signing_key"]
+    for key in keys.values():
+        raw_key = base64.b64decode(key["public_key_base64"])
+        assert hashlib.sha256(raw_key).hexdigest() == key["fingerprint_sha256"]
     for case in vectors["cases"]:
+        public_key = keys[case["signing_key_name"]]["public_key_base64"]
         request, headers, expected = case["request"], case["headers"], case["expected"]
         body = base64.b64decode(request["body_base64"])
         assert body == request["body_utf8"].encode("utf-8"), case["name"]
@@ -475,6 +484,10 @@ def _assert_contract_agreement() -> None:
         "POST",
         "/agent-api/v1/threads/{thread_id}/recipe/origin",
     )
+    # The route answers 201 for a version it created and 200 for one it replaced or kept, so the
+    # contract declares both (agntnexus/agentnexus#582), and the origin answers 200 only.
+    assert set(translation_op["responses"]) == {"200", "201"}
+    assert set(origin_op["responses"]) == {"200"}
     body = translation_op["request_body"]
     assert set(body["properties"]) == {"source_hash", "title", "body_markdown", "recipe", "billing"}
     assert set(body["required"]) == {"source_hash", "title", "body_markdown", "billing"}
@@ -525,13 +538,12 @@ class ContractReader:
         return f"https://observer.example.invalid/threads/{thread_id}"
 
 
-def _assert_thread_versions_reads_the_contract_example() -> None:
-    """Check that a thread's languages and its source hash come from the contract's example."""
-    example = fixture("api-agent-contract-567.json")["thread_example"]["value"]
+def _read_thread_languages(thread: dict[str, Any]) -> dict[str, Any]:
+    """Run the thread-versions read against one public thread, as the reader supplies it."""
     parsed = bridge.parse_command(
-        json.dumps({"operation": "thread_versions", "thread_id": example["id"]}).encode()
+        json.dumps({"operation": "thread_versions", "thread_id": thread["id"]}).encode()
     )
-    result = bridge.run_command(
+    return bridge.run_command(
         parsed,
         config=bridge.BridgeConfig(
             agent_id=AGENT_ID,
@@ -541,14 +553,28 @@ def _assert_thread_versions_reads_the_contract_example() -> None:
             public_api_url="http://127.0.0.1:2",
             observer_url=None,
         ),
-        client=ContractReader(example),  # type: ignore[arg-type]
+        client=ContractReader(thread),  # type: ignore[arg-type]
     )
+
+
+def _assert_thread_versions_reads_the_contract_example() -> None:
+    """Check that a thread's languages and its source hash come from the contract's example.
+
+    The read also refuses an answer the thread schema rules out: the thread's own language is listed
+    once, and no language twice. An answer that breaks the rule is refused, not repaired
+    (agntnexus/agentnexus#567).
+    """
+    example = fixture("api-agent-contract-567.json")["thread_example"]["value"]
+    result = _read_thread_languages(example)
     assert result["operation_status"] == "read"
     assert result["language"] == "en"
     assert result["available_languages"] == ["en"] == example["available_languages"]
     assert result["missing_languages"] == ["de", "es", "fr", "it", "pt-BR"]
     original = f"{example['title']}\n{example['body_markdown']}".encode()
     assert result["source_hash"] == hashlib.sha256(original).hexdigest()
+    for contradicting in ({"available_languages": ["de"]}, {"available_languages": ["en", "en"]}):
+        with pytest.raises(InvalidResponseError, match="its own language"):
+            _read_thread_languages(example | contradicting)
 
 
 def _assert_signed_write_matches_contract(write: str) -> None:
@@ -603,15 +629,213 @@ def _assert_signed_write_matches_contract(write: str) -> None:
     assert signature_verifies(request, public_key)
 
 
+class _RecordingSigner:
+    """Keep the exact bytes the client asks to sign, and sign nothing real.
+
+    The published vectors' private keys were discarded, so the Connector's own signature cannot be
+    compared with a published one. The signed message can: it must be the published canonical
+    string, byte for byte, and the published signature must verify over it.
+    """
+
+    public_key_base64 = ""
+
+    def __init__(self) -> None:
+        """Start with no message recorded."""
+        self.messages: list[bytes] = []
+
+    def sign(self, message: bytes) -> bytes:
+        """Record the message, and return a placeholder of the length of a signature."""
+        self.messages.append(message)
+        return bytes(64)
+
+
+class _AnsweringTransport(httpx.BaseTransport):
+    """Answer each write with one status, and the body of an accepted translation."""
+
+    def __init__(self, status: int, extra: dict[str, Any]) -> None:
+        """Keep the status, and the fields added to the accepted body."""
+        self.status = status
+        self.extra = extra
+        self.requests: list[httpx.Request] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        """Capture the write, and answer with the status and the body this transport holds."""
+        self.requests.append(request)
+        body = {
+            "thread_id": THREAD_ID,
+            "language": "de",
+            "source_hash": ORIGINAL_SOURCE_HASH,
+            "changed": True,
+            "billing": {
+                "charged_credits": 0,
+                "pricing_version": "p1",
+                "usage_event_id": "55555555-5555-4555-8555-555555555555",
+            },
+            **self.extra,
+        }
+        return httpx.Response(
+            self.status, json=body, headers={"x-request-id": "req_translation_567"}, request=request
+        )
+
+
+def _frozen_datetime(instant: dt.datetime) -> types.ModuleType:
+    """Return a stand-in for the datetime module whose clock reads `instant`, and nothing else."""
+
+    class FrozenDatetime(dt.datetime):
+        """A datetime whose `now()` is the instant it was built for."""
+
+        @classmethod
+        def now(cls, tz: dt.tzinfo | None = None) -> dt.datetime:
+            """Return the instant the signing clock is frozen at."""
+            return instant
+
+    stand_in = types.ModuleType("datetime")
+    for name in dir(dt):
+        if not name.startswith("_"):
+            setattr(stand_in, name, getattr(dt, name))
+    stand_in.datetime = FrozenDatetime
+    return stand_in
+
+
+def _assert_new_operations_sign_the_published_vectors() -> None:
+    """Check that the Connector signs the translation and origin vectors as the server verifies.
+
+    Each new published case is replayed through the typed client with the case's own inputs: its
+    body, its thread, its idempotency key, and its agent, key, timestamp and nonce. The body it
+    sends must be the published JSON document, and the bytes it signs must be the envelope built
+    from the bytes it sends under those identifiers. The published signature is verified over the
+    published canonical string, with the key each case names, in `_assert_shared_vectors_hold`
+    (agntnexus/agentnexus#567, D-262 items 5 and 10).
+    """
+    vectors = fixture("agentnexus-sig-v1-vectors.json")
+    checked = []
+    for case in vectors["cases"]:
+        path = case["request"]["path"]
+        is_translation = "/translations/" in path
+        if not is_translation and not path.endswith("/recipe/origin"):
+            continue
+        request, headers = case["request"], case["headers"]
+        body = json.loads(request["body_utf8"])
+        billing = BillingDeclaration(
+            pricing_version=body["billing"]["pricing_version"],
+            max_credit_cost=body["billing"]["max_credit_cost"],
+        )
+        thread_id = path.split("/")[4]
+        signer = _RecordingSigner()
+        transport = RecordingTransport()
+        client = AgentNexusClient(
+            agent_id=headers["X-Agent-ID"],
+            key_id=headers["X-Agent-Key-ID"],
+            signer=signer,
+            options=ClientOptions(base_url="http://127.0.0.1:1"),
+            transport=transport,
+        )
+        instant = parse_timestamp(headers["X-Agent-Timestamp"])
+        with (
+            mock.patch.object(client_module, "dt", _frozen_datetime(instant)),
+            mock.patch.object(client_module, "new_nonce", return_value=headers["X-Agent-Nonce"]),
+            client,
+        ):
+            if is_translation:
+                client.put_thread_translation(
+                    thread_id=thread_id,
+                    language=path.rsplit("/", 1)[1],
+                    source_hash=body["source_hash"],
+                    title=body["title"],
+                    body_markdown=body["body_markdown"],
+                    billing=billing,
+                    idempotency_key=headers["Idempotency-Key"],
+                )
+            else:
+                client.set_recipe_origin(
+                    thread_id=thread_id,
+                    origin_countries=body["origin_countries"],
+                    is_fusion=body["is_fusion"],
+                    billing=billing,
+                    idempotency_key=headers["Idempotency-Key"],
+                )
+        (sent,) = transport.requests
+        assert sent.url.path == path, case["name"]
+        # The published body is the same JSON document. The client writes its keys in the order it
+        # builds them: the server verifies the bytes it receives, so that order is not a rule.
+        document = json.dumps(json.loads(sent.content), sort_keys=True, separators=(",", ":"))
+        assert document == request["body_utf8"], case["name"]
+        # The client signs exactly the bytes it sends, under the identifiers, timestamp and nonce of
+        # the published case, so the envelope it signs is the one the server rebuilds from the wire.
+        (message,) = signer.messages
+        sent_envelope = build_envelope(
+            EnvelopeInput(
+                method=request["method"],
+                path=path,
+                query_string=request["query_string"],
+                agent_id=headers["X-Agent-ID"],
+                key_id=headers["X-Agent-Key-ID"],
+                timestamp=instant,
+                nonce=headers["X-Agent-Nonce"],
+                idempotency_key=headers["Idempotency-Key"],
+                body=sent.content,
+            )
+        )
+        assert message == sent_envelope.signing_bytes(), case["name"]
+        checked.append(case["name"])
+    assert checked == ["thread-translation-put", "recipe-origin-put"]
+
+
+def _assert_translation_statuses_are_reported() -> None:
+    """Check that each answer the contract declares for a translation is reported as its status.
+
+    The API answers 201 for a version it created and 200 for one it replaced or left unchanged,
+    and a replay repeats the answer it stored. The bridge reports the first as created, the second
+    as updated, and a replay as replayed (agntnexus/agentnexus#567).
+    """
+    declared = set(
+        fixture("api-agent-contract-567.json")["operations"]["thread.translation.put"]["responses"]
+    )
+    answers = (
+        ("201", {}, "created"),
+        ("200", {}, "updated"),
+        ("201", {"replayed": True}, "replayed"),
+        ("200", {"replayed": True}, "replayed"),
+    )
+    assert {code for code, _, _ in answers} == declared
+    config = bridge.BridgeConfig(
+        agent_id=AGENT_ID,
+        key_id=KEY_ID,
+        private_key_file=Path(__file__),  # unused: the client is supplied
+        agent_api_url="http://127.0.0.1:1",
+        public_api_url="http://127.0.0.1:2",
+        observer_url=None,
+    )
+    for code, extra, status in answers:
+        transport = _AnsweringTransport(int(code), extra)
+        client = AgentNexusClient(
+            agent_id=AGENT_ID,
+            key_id=KEY_ID,
+            signer=generate_key_pair().signer,
+            options=ClientOptions(base_url="http://127.0.0.1:1"),
+            transport=transport,
+        )
+        with client:
+            result = bridge.run_command(
+                bridge.parse_command(json.dumps(translation()).encode()),
+                config=config,
+                client=client,
+            )
+        assert result["operation_status"] == status, (code, extra)
+        assert len(transport.requests) == 1
+
+
 @pytest.mark.parametrize(
     "write",
     [
         "recipe-variants",
         "shared-vectors",
+        "shared-vectors-new-operations",
         "contract-agreement",
         "translation-plain",
         "translation-recipe",
         "translation-wine-article",
+        "translation-statuses",
         "origin",
         "thread-versions",
     ],
@@ -629,8 +853,12 @@ def test_the_recipe_writes_are_signed_as_sent_and_match_the_contract(write: str)
         _assert_recipe_variants_are_signed()
     elif write == "shared-vectors":
         _assert_shared_vectors_hold()
+    elif write == "shared-vectors-new-operations":
+        _assert_new_operations_sign_the_published_vectors()
     elif write == "contract-agreement":
         _assert_contract_agreement()
+    elif write == "translation-statuses":
+        _assert_translation_statuses_are_reported()
     elif write == "thread-versions":
         _assert_thread_versions_reads_the_contract_example()
     else:
