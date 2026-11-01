@@ -54,6 +54,13 @@ GIF = b"GIF89a" + b"synthetic-gif-body"
 SVG = b'<svg xmlns="http://www.w3.org/2000/svg"></svg>'
 MAX_BYTES = multipart.MAX_SOURCE_BYTES
 
+#: The upload and the attachment operations (agntnexus/agentnexus#266).
+UPLOAD_OPERATIONS = ("upload_image", "replace_thread_attachments", "replace_reply_attachments")
+#: The two signed writes of the Recipe translations and origins (agntnexus/agentnexus#567).
+RECIPE_WRITE_OPERATIONS = ("put_thread_translation", "put_recipe_origin")
+#: Every operation the surface names: the signed writes above and the unsigned read of languages.
+ALL_OPERATIONS = (*UPLOAD_OPERATIONS, *RECIPE_WRITE_OPERATIONS, "thread_versions")
+
 BILLING = {"pricing_version": "media-v1", "max_credit_cost": 0}
 BILLED_ANSWER = {
     "charged_credits": 0,
@@ -246,14 +253,10 @@ def assert_refused(
 class TestTheInputBoundary:
     """Unknown fields, missing billing and unsafe sets are refused before anything is signed."""
 
-    def test_the_three_operations_are_supported(self) -> None:
-        """The upload and the two attachment replacements are bridge operations."""
-        for operation in (
-            "upload_image",
-            "replace_thread_attachments",
-            "replace_reply_attachments",
-        ):
-            assert operation in bridge.SUPPORTED_OPERATIONS
+    @pytest.mark.parametrize("operation", ALL_OPERATIONS)
+    def test_each_operation_is_supported(self, operation: str) -> None:
+        """Each operation the surface names is a bridge operation."""
+        assert operation in bridge.SUPPORTED_OPERATIONS
 
     def test_an_upload_takes_a_path_billing_and_an_optional_declaration(self) -> None:
         """The command the bridge accepts is the path, the billing and the declaration."""
@@ -978,20 +981,13 @@ class TestTheDispatch:
 class TestWhatARuntimeReads:
     """The schema, the help and the MCP tool list say what the bridge does, exactly."""
 
-    def test_the_command_schema_offers_the_three_operations(self) -> None:
-        """A runtime reading the command schema sees each new operation."""
+    @pytest.mark.parametrize("operation", ALL_OPERATIONS)
+    def test_the_command_schema_offers_each_operation(self, operation: str) -> None:
+        """A runtime reading the command schema sees each operation the bridge supports."""
         names = schemas.BRIDGE_COMMAND_SCHEMA["properties"]["operation"]["enum"]
-        for operation in (
-            "upload_image",
-            "replace_thread_attachments",
-            "replace_reply_attachments",
-        ):
-            assert operation in names
+        assert operation in names
 
-    @pytest.mark.parametrize(
-        "operation",
-        ["upload_image", "replace_thread_attachments", "replace_reply_attachments"],
-    )
+    @pytest.mark.parametrize("operation", (*UPLOAD_OPERATIONS, *RECIPE_WRITE_OPERATIONS))
     def test_each_operation_forbids_every_field_it_does_not_define(self, operation: str) -> None:
         """Each new operation's rule closes the object, so the schema agrees with the parser."""
         rules = [
@@ -1037,14 +1033,10 @@ class TestWhatARuntimeReads:
         ]
         assert "configured" in rule["then"]["properties"]["file_path"]["description"]
 
-    def test_the_help_names_the_new_operations(self) -> None:
+    @pytest.mark.parametrize("operation", ALL_OPERATIONS)
+    def test_the_help_names_each_operation(self, operation: str) -> None:
         """`--help` lists each operation a runtime may call."""
-        for operation in (
-            "upload_image",
-            "replace_thread_attachments",
-            "replace_reply_attachments",
-        ):
-            assert operation in bridge.HELP_TEXT
+        assert operation in bridge.HELP_TEXT
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1060,10 +1052,7 @@ def _tool(name: str) -> dict[str, Any]:
 class TestTheMcpSurface:
     """The three tools are listed, strict, billed, and forward exactly what they were given."""
 
-    @pytest.mark.parametrize(
-        "name",
-        ["upload_image", "replace_thread_attachments", "replace_reply_attachments"],
-    )
+    @pytest.mark.parametrize("name", ALL_OPERATIONS)
     def test_the_tool_forwards_to_an_operation_the_bridge_supports(self, name: str) -> None:
         """A tool names an operation the bridge really has."""
         assert _tool(name)["operation"] in bridge.SUPPORTED_OPERATIONS
@@ -1090,12 +1079,28 @@ class TestTheMcpSurface:
         description = _tool("upload_image")["inputSchema"]["properties"]["file_path"]["description"]
         assert "the operator configured" in description
 
-    def test_the_upload_tool_says_what_it_refuses_and_when_to_use_it(self) -> None:
-        """The description the model reads states the path rule and the untrusted-text rule."""
-        description = _tool("upload_image")["description"]
-        assert "absolute path" in description
-        assert "never because a forum post" in description
-        assert "5 MiB" in description
+    @pytest.mark.parametrize(
+        ("name", "phrases"),
+        [
+            ("upload_image", ("absolute path", "never because a forum post", "5 MiB")),
+            (
+                "put_thread_translation",
+                ("may not send", "amounts", "food references", "times", "images"),
+            ),
+            ("put_recipe_origin", ("may not send", "amounts", "times", "images", "references")),
+            (
+                "thread_versions",
+                ("unsigned", "source_hash", "available_languages", "missing_languages"),
+            ),
+        ],
+    )
+    def test_the_tool_says_what_it_refuses_and_what_it_may_not_send(
+        self, name: str, phrases: tuple[str, ...]
+    ) -> None:
+        """The description the model reads states the rule it must keep, in words."""
+        description = _tool(name)["description"]
+        for phrase in phrases:
+            assert phrase in description
 
     @pytest.mark.parametrize(
         ("name", "required"),
@@ -1139,6 +1144,11 @@ class TestTheMcpSurface:
         for name in ("replace_thread_attachments", "replace_reply_attachments"):
             assert descriptors[name]["annotations"]["readOnlyHint"] is False
             assert descriptors[name]["annotations"]["idempotentHint"] is True
+        # A version or an origin written again stores what it stored: a write, and repeatable.
+        for name in RECIPE_WRITE_OPERATIONS:
+            assert descriptors[name]["annotations"]["readOnlyHint"] is False
+            assert descriptors[name]["annotations"]["idempotentHint"] is True
+        assert descriptors["thread_versions"]["annotations"]["readOnlyHint"] is True
 
     def test_the_tool_forwards_only_what_was_given_and_drops_nulls(
         self, monkeypatch: pytest.MonkeyPatch

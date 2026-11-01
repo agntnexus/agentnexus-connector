@@ -21,7 +21,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agentnexus_sdk import bridge, mcp_server, schemas
 from agentnexus_sdk.billing import BillingDeclaration
-from agentnexus_sdk.client import AgentNexusClient, ClientOptions, RecipePayload, SignedResponse
+from agentnexus_sdk.client import (
+    PUBLICATION_LANGUAGES,
+    AgentNexusClient,
+    ClientOptions,
+    RecipePayload,
+    SignedResponse,
+)
 from agentnexus_sdk.envelope import EnvelopeInput, build_envelope, parse_timestamp
 from agentnexus_sdk.signing import generate_key_pair
 
@@ -32,6 +38,39 @@ THREAD_ID = "44444444-4444-4444-8444-444444444444"
 #: SHA-256 of the signed create body for `recipe()` as the 0.16.0 client wrote it, before the
 #: structured amount and food reference fields existed (agntnexus/agentnexus#438).
 PLAIN_RECIPE_BODY_SHA256 = "968b238ae6e8e31c1dbc60f584d577c2d2deb1457e86f2e825edeb3db54c609b"
+#: The source hash of the thread `command()` posts: SHA-256 of its title and body, one line feed
+#: between them, as the API computes it for a translation (`D-262` item 5, #567).
+ORIGINAL_SOURCE_HASH = hashlib.sha256(
+    b"Weeknight lentil soup\nA useful visible introduction to the recipe."
+).hexdigest()
+#: The pinned contract data the Connector is checked against: byte-identical copies and the
+#: contract's own fixtures, each pinned to the API commit it came from (docs/MIRROR.md).
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+#: The stable codes of the refusals below, where the API names one (agntnexus/agentnexus#567).
+STABLE_CODES = {
+    "recipe-origin-invalid-code": "recipe.origin_countries_invalid",
+    "recipe-origin-lowercase": "recipe.origin_countries_invalid",
+    "recipe-origin-uk": "recipe.origin_countries_invalid",
+    "recipe-origin-too-many": "recipe.origin_countries_too_many",
+    "recipe-origin-duplicate": "recipe.origin_countries_duplicate",
+    "origin-put-invalid-code": "recipe.origin_countries_invalid",
+    "origin-put-too-many": "recipe.origin_countries_too_many",
+    "origin-put-duplicate": "recipe.origin_countries_duplicate",
+    "translation-language-nl": "translation.language_not_active",
+    "translation-language-regional": "translation.language_not_active",
+    "translation-language-case": "translation.language_not_active",
+    "translation-field-wine": "translation.field_not_allowed",
+    "translation-field-image": "translation.field_not_allowed",
+    "translation-field-note": "translation.field_not_allowed",
+    "translation-field-amount": "translation.field_not_allowed",
+    "translation-field-food-ref": "translation.field_not_allowed",
+    "translation-field-times": "translation.field_not_allowed",
+    "translation-field-sources": "translation.field_not_allowed",
+    "translation-markup-step": "translation.text_invalid",
+    "translation-empty-step": "translation.text_invalid",
+}
+#: The refusal mutations that name a translation or an origin write, not a create command.
+WRITE_MUTATION_PREFIXES = ("translation-", "origin-put-")
 
 
 def recipe() -> dict[str, Any]:
@@ -168,6 +207,164 @@ def signature_verifies(request: httpx.Request, public_key_base64: str) -> bool:
     return True
 
 
+def fixture(name: str) -> Any:
+    """Return one pinned contract fixture, read as JSON (agntnexus/agentnexus#567)."""
+    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def verifies(public_key_base64: str, signature_base64: str, message: bytes) -> bool:
+    """Report whether a published signature verifies over a message, with a published key."""
+    key = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_base64))
+    try:
+        key.verify(base64.b64decode(signature_base64), message)
+    except InvalidSignature:
+        return False
+    return True
+
+
+def tool_named(name: str) -> dict[str, Any]:
+    """Return the one MCP tool of this name, failing when it is not listed."""
+    (tool,) = [candidate for candidate in mcp_server.TOOLS if candidate["name"] == name]
+    return tool
+
+
+def translated_recipe() -> dict[str, Any]:
+    """Return the French words of `recipe()`: one name, its four serving displays, a step, a tip."""
+    return {
+        "ingredients": [
+            {
+                "position": 1,
+                "name": "oignon brun",
+                "quantities": [
+                    {"servings": 1, "display_text": "1/2 oignon brun"},
+                    {"servings": 2, "display_text": "1 oignon brun"},
+                    {"servings": 3, "display_text": "1 1/2 oignons bruns"},
+                    {"servings": 4, "display_text": "2 oignons bruns"},
+                ],
+            }
+        ],
+        "steps": [
+            {"position": 1, "instruction": "Faire revenir l'oignon à feu moyen, translucide."}
+        ],
+        "tips": [{"position": 1, "text": "Ajouter le citron hors du feu."}],
+    }
+
+
+def translation(**changes: Any) -> dict[str, Any]:
+    """Return one French version of the lentil soup, as a bridge command, with changes applied."""
+    document: dict[str, Any] = {
+        "operation": "put_thread_translation",
+        "thread_id": THREAD_ID,
+        "language": "fr",
+        "source_hash": ORIGINAL_SOURCE_HASH,
+        "title": "Soupe de lentilles de la semaine",
+        "body_markdown": "Une introduction utile et visible à la recette.",
+        "recipe": translated_recipe(),
+        "pricing_version": "p1",
+        "max_credit_cost": 0,
+        "idempotency_key": "translation-retry-567",
+    }
+    document.update(changes)
+    return document
+
+
+def origin(**changes: Any) -> dict[str, Any]:
+    """Return one origin write as a bridge command, with changes applied."""
+    document: dict[str, Any] = {
+        "operation": "put_recipe_origin",
+        "thread_id": THREAD_ID,
+        "origin_countries": ["IT", "CH"],
+        "is_fusion": True,
+        "pricing_version": "p1",
+        "max_credit_cost": 0,
+        "idempotency_key": "origin-retry-566",
+    }
+    document.update(changes)
+    return document
+
+
+def without(document: dict[str, Any], *keys: str) -> dict[str, Any]:
+    """Return a copy of a command with the named fields taken out."""
+    return {key: value for key, value in document.items() if key not in keys}
+
+
+def write_refusal_document(mutation: str) -> dict[str, Any]:
+    """Return the translation or origin command that one refusal mutation names, broken as named."""
+    if mutation == "translation-language-nl":
+        return translation(language="nl")
+    if mutation == "translation-language-regional":
+        return translation(language="de-CH")
+    if mutation == "translation-language-case":
+        return translation(language="PT-BR")
+    if mutation == "translation-language-missing":
+        return without(translation(), "language")
+    if mutation == "translation-field-wine":
+        return translation(wine={"topic": "grapes", "country": "DE"})
+    if mutation == "translation-field-image":
+        return translation(image_url="https://example.org/dish.jpg")
+    if mutation == "translation-missing-billing":
+        return without(translation(), "pricing_version")
+    if mutation == "translation-thread-id-upper":
+        # The first digit becomes a capital letter: a thread identifier is spelled in lower case.
+        return translation(thread_id=THREAD_ID.replace("4", "A", 1))
+    if mutation == "translation-source-hash-short":
+        return translation(source_hash="abc123")
+    if mutation == "translation-source-hash-upper":
+        return translation(source_hash=ORIGINAL_SOURCE_HASH.upper())
+    if mutation == "translation-empty-title":
+        return translation(title="")
+    if mutation == "translation-title-too-long":
+        return translation(title="t" * 201)
+    if mutation == "translation-body-too-long":
+        return translation(body_markdown="b" * 20_001)
+    if mutation.startswith("translation-"):
+        # The mutations below change the recipe words of an otherwise valid version.
+        document = translation()
+        words = document["recipe"]
+        if mutation == "translation-field-note":
+            words["ingredients"][0]["note"] = "finely diced"
+        elif mutation == "translation-field-amount":
+            words["ingredients"][0]["quantities"][0]["amount"] = {"value": 80, "unit": "g"}
+        elif mutation == "translation-field-food-ref":
+            words["ingredients"][0]["food_ref"] = {"source": "usda_fdc", "id": 12345}
+        elif mutation == "translation-field-times":
+            words["prep_time_minutes"] = 15
+        elif mutation == "translation-field-sources":
+            words["sources"] = [{"position": 1, "label": "Guide", "url": "https://example.org/a"}]
+        elif mutation == "translation-servings-five":
+            words["ingredients"][0]["quantities"][0]["servings"] = 5
+        elif mutation == "translation-markup-step":
+            words["steps"][0]["instruction"] = "<b>Chauffer</b> l'oignon."
+        elif mutation == "translation-empty-step":
+            words["steps"][0]["instruction"] = "   "
+        elif mutation == "translation-too-many-steps":
+            words["steps"] = [{"position": n, "instruction": "Mélanger."} for n in range(1, 102)]
+        else:
+            raise AssertionError(mutation)
+        return document
+    if mutation == "origin-put-invalid-code":
+        return origin(origin_countries=["XK"])
+    if mutation == "origin-put-too-many":
+        return origin(origin_countries=["DE", "AT", "CH", "IT", "FR", "ES"])
+    if mutation == "origin-put-duplicate":
+        return origin(origin_countries=["DE", "DE"])
+    if mutation == "origin-put-fusion-text":
+        return origin(is_fusion="true")
+    if mutation == "origin-put-missing-fusion":
+        return without(origin(), "is_fusion")
+    if mutation == "origin-put-missing-countries":
+        return without(origin(), "origin_countries")
+    if mutation == "origin-put-null-countries":
+        return origin(origin_countries=None)
+    if mutation == "origin-put-unknown-field":
+        return origin(image="https://example.org/dish.jpg")
+    if mutation == "origin-put-missing-billing":
+        return without(origin(), "pricing_version")
+    if mutation == "origin-put-thread-id-upper":
+        return origin(thread_id=THREAD_ID.replace("4", "A", 1))
+    raise AssertionError(f"no write document for {mutation!r}")
+
+
 def test_an_ordinary_create_thread_body_is_byte_identical() -> None:
     """Omitting Recipe emits the exact body the 0.13.1 client already signs."""
     client, transport, _ = signed_client()
@@ -187,13 +384,14 @@ def test_an_ordinary_create_thread_body_is_byte_identical() -> None:
     )
 
 
-def test_a_complete_recipe_is_forwarded_unchanged_and_covered_by_the_signature() -> None:
-    """The client adds only the caller's complete structured value and signs the sent bytes.
+def _assert_recipe_variants_are_signed() -> None:
+    """Check that the client adds only the caller's structured value and signs the sent bytes.
 
     The first body is an ordinary Recipe with no amount and no food reference, and it must stay
     byte-identical to what the 0.16.0 client signed. Each structured variant, with amounts, with a
     food reference, at the amount bounds and with null amounts, is forwarded unchanged, null keys
-    included (agntnexus/agentnexus#438).
+    included (agntnexus/agentnexus#438). A Recipe that names its origin is forwarded and signed the
+    same way (agntnexus/agentnexus#566, D-262 item 10).
     """
     plain = recipe()
     amounts = with_amounts(recipe())
@@ -203,7 +401,10 @@ def test_a_complete_recipe_is_forwarded_unchanged_and_covered_by_the_signature()
     absent = with_amounts(recipe())
     for row in absent["ingredients"][0]["quantities"]:
         row["amount"] = None
-    variants = (plain, amounts, referenced, bounds, absent)
+    with_origin = recipe()
+    with_origin["origin_countries"] = ["IT", "CH"]
+    with_origin["is_fusion"] = True
+    variants = (plain, amounts, referenced, bounds, absent, with_origin)
     client, transport, public_key = signed_client()
     with client:
         for index, variant in enumerate(variants):
@@ -220,6 +421,220 @@ def test_a_complete_recipe_is_forwarded_unchanged_and_covered_by_the_signature()
     for request, variant in zip(transport.requests, variants, strict=True):
         assert json.loads(request.content)["recipe"] == variant
         assert signature_verifies(request, public_key)
+
+
+def _assert_shared_vectors_hold() -> None:
+    """Check that the envelope the Connector builds is the one the shared vectors name.
+
+    Each published case is rebuilt from its request parts: the target, the body digest, the
+    canonical string and its digest, byte for byte. The published signature must verify over those
+    bytes with the published public key, whose fingerprint the vectors state too
+    (agntnexus/agentnexus#567).
+    """
+    vectors = fixture("agentnexus-sig-v1-vectors.json")
+    public_key = vectors["signing_key"]["public_key_base64"]
+    raw_key = base64.b64decode(public_key)
+    assert hashlib.sha256(raw_key).hexdigest() == vectors["signing_key"]["fingerprint_sha256"]
+    for case in vectors["cases"]:
+        request, headers, expected = case["request"], case["headers"], case["expected"]
+        body = base64.b64decode(request["body_base64"])
+        assert body == request["body_utf8"].encode("utf-8"), case["name"]
+        envelope = build_envelope(
+            EnvelopeInput(
+                method=request["method"],
+                path=request["path"],
+                query_string=request["query_string"],
+                agent_id=headers["X-Agent-ID"],
+                key_id=headers["X-Agent-Key-ID"],
+                timestamp=parse_timestamp(headers["X-Agent-Timestamp"]),
+                nonce=headers["X-Agent-Nonce"],
+                idempotency_key=headers["Idempotency-Key"],
+                body=body,
+            )
+        )
+        assert envelope.target == expected["target"], case["name"]
+        assert envelope.body_sha256 == expected["body_sha256"], case["name"]
+        assert envelope.canonical_string == expected["canonical_string"], case["name"]
+        digest = hashlib.sha256(envelope.canonical_string.encode("utf-8")).hexdigest()
+        assert digest == expected["canonical_string_sha256"], case["name"]
+        assert headers["X-Agent-Signature"] == expected["signature_base64"], case["name"]
+        published = expected["signature_base64"]
+        assert verifies(public_key, published, envelope.signing_bytes()), case["name"]
+
+
+def _assert_contract_agreement() -> None:
+    """Check that the Connector's copies of the contract and closed sets are the pinned ones."""
+    contract = fixture("api-agent-contract-567.json")
+    translation_op = contract["operations"]["thread.translation.put"]
+    origin_op = contract["operations"]["recipe.origin.put"]
+    assert (translation_op["method"], translation_op["path"]) == (
+        "POST",
+        "/agent-api/v1/threads/{thread_id}/translations/{language}",
+    )
+    assert (origin_op["method"], origin_op["path"]) == (
+        "POST",
+        "/agent-api/v1/threads/{thread_id}/recipe/origin",
+    )
+    body = translation_op["request_body"]
+    assert set(body["properties"]) == {"source_hash", "title", "body_markdown", "recipe", "billing"}
+    assert set(body["required"]) == {"source_hash", "title", "body_markdown", "billing"}
+    words = body["properties"]["recipe"]["anyOf"][0]["properties"]
+    assert set(words) == {"ingredients", "steps", "tips"}
+    ingredient = words["ingredients"]["items"]["properties"]
+    assert set(ingredient) == {"position", "name", "quantities"}
+    assert set(ingredient["quantities"]["items"]["properties"]) == {"servings", "display_text"}
+    assert set(words["steps"]["items"]["properties"]) == {"position", "instruction"}
+    assert set(words["tips"]["items"]["properties"]) == {"position", "text"}
+    origin_body = origin_op["request_body"]
+    assert set(origin_body["properties"]) == {"origin_countries", "is_fusion", "billing"}
+    assert set(origin_body["required"]) == {"origin_countries", "is_fusion", "billing"}
+    # The tools name every field the contract's bodies name. The contract's `billing` object is the
+    # tool's `pricing_version` and `max_credit_cost`, which the tool takes flat.
+    translation_tool = tool_named("put_thread_translation")["inputSchema"]
+    billed = set(body["properties"]) - {"billing"}
+    assert billed <= set(translation_tool["properties"])
+    assert {"pricing_version", "max_credit_cost"} <= set(translation_tool["properties"])
+    assert set(words) == set(translation_tool["properties"]["recipe"]["properties"])
+    origin_tool = tool_named("put_recipe_origin")["inputSchema"]
+    assert set(origin_body["properties"]) - {"billing"} <= set(origin_tool["properties"])
+    assert {"pricing_version", "max_credit_cost"} <= set(origin_tool["properties"])
+    # The languages and the countries are the pinned copies of the API's own lists.
+    languages = sorted(
+        fixture("api-first-wave-languages.json")["first_wave"],
+        key=lambda entry: entry["sort_order"],
+    )
+    assert list(PUBLICATION_LANGUAGES) == [entry["code"] for entry in languages]
+    countries = schemas.RECIPE_SCHEMA["properties"]["origin_countries"]["items"]["enum"]
+    assert list(countries) == fixture("api-iso-3166-1-alpha-2.json")["codes"]
+
+
+class ContractReader:
+    """Answer the public read of one thread with the contract's own example, and nothing else."""
+
+    def __init__(self, thread: dict[str, Any]) -> None:
+        """Keep the example as the only thread this reader knows."""
+        self._thread = thread
+
+    def public_thread(self, thread_id: str) -> dict[str, Any]:
+        """Return a copy of the example for its own identifier, and refuse any other."""
+        assert thread_id == self._thread["id"]
+        return copy.deepcopy(self._thread)
+
+    def observer_url(self, thread_id: str) -> str:
+        """Return the observer address of the thread, as the client builds it."""
+        return f"https://observer.example.invalid/threads/{thread_id}"
+
+
+def _assert_thread_versions_reads_the_contract_example() -> None:
+    """Check that a thread's languages and its source hash come from the contract's example."""
+    example = fixture("api-agent-contract-567.json")["thread_example"]["value"]
+    parsed = bridge.parse_command(
+        json.dumps({"operation": "thread_versions", "thread_id": example["id"]}).encode()
+    )
+    result = bridge.run_command(
+        parsed,
+        config=bridge.BridgeConfig(
+            agent_id=AGENT_ID,
+            key_id=KEY_ID,
+            private_key_file=Path(__file__),  # unused: the reader is supplied
+            agent_api_url="http://127.0.0.1:1",
+            public_api_url="http://127.0.0.1:2",
+            observer_url=None,
+        ),
+        client=ContractReader(example),  # type: ignore[arg-type]
+    )
+    assert result["operation_status"] == "read"
+    assert result["language"] == "en"
+    assert result["available_languages"] == ["en"] == example["available_languages"]
+    assert result["missing_languages"] == ["de", "es", "fr", "it", "pt-BR"]
+    original = f"{example['title']}\n{example['body_markdown']}".encode()
+    assert result["source_hash"] == hashlib.sha256(original).hexdigest()
+
+
+def _assert_signed_write_matches_contract(write: str) -> None:
+    """Check that a translation or an origin write is signed as sent, and matches the contract."""
+    client, transport, public_key = signed_client()
+    billing = BillingDeclaration(pricing_version="p1", max_credit_cost=0)
+    if write == "origin":
+        with client:
+            client.set_recipe_origin(
+                thread_id=THREAD_ID,
+                origin_countries=["IT", "CH"],
+                is_fusion=True,
+                billing=billing,
+                idempotency_key="origin-signed-566",
+            )
+        path, key, operation = (
+            f"/agent-api/v1/threads/{THREAD_ID}/recipe/origin",
+            "origin-signed-566",
+            "recipe.origin.put",
+        )
+        expected = {"origin_countries", "is_fusion", "billing"}
+    else:
+        english = write == "translation-wine-article"
+        language = "en" if english else "fr"
+        with client:
+            client.put_thread_translation(
+                thread_id=THREAD_ID,
+                language=language,
+                source_hash=ORIGINAL_SOURCE_HASH,
+                title="Riesling for a weeknight" if english else "Soupe de lentilles",
+                body_markdown=(
+                    "An English introduction to a German Riesling."
+                    if english
+                    else "Une introduction utile et visible."
+                ),
+                recipe=translated_recipe() if write == "translation-recipe" else None,
+                billing=billing,
+                idempotency_key="translation-signed-567",
+            )
+        path = f"/agent-api/v1/threads/{THREAD_ID}/translations/{language}"
+        key, operation = "translation-signed-567", "thread.translation.put"
+        expected = {"source_hash", "title", "body_markdown", "billing"}
+        if write == "translation-recipe":
+            expected.add("recipe")
+    (request,) = transport.requests
+    assert request.method == "POST"
+    assert request.url.path == path
+    assert request.headers["idempotency-key"] == key
+    assert set(json.loads(request.content)) == expected
+    contract_fields = fixture("api-agent-contract-567.json")["operations"][operation]
+    assert expected <= set(contract_fields["request_body"]["properties"])
+    assert signature_verifies(request, public_key)
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        "recipe-variants",
+        "shared-vectors",
+        "contract-agreement",
+        "translation-plain",
+        "translation-recipe",
+        "translation-wine-article",
+        "origin",
+        "thread-versions",
+    ],
+)
+def test_the_recipe_writes_are_signed_as_sent_and_match_the_contract(write: str) -> None:
+    """Every recipe write signs the bytes it sends, and what it sends is the API's contract.
+
+    The shared signing vectors are rebuilt byte for byte, and their published signatures verify. The
+    contract fixture names each new operation's method, path and body, and the Connector's closed
+    sets are the pinned ones. A translated version and an origin are signed through the typed client
+    and checked against the contract, and the read of a thread's languages is checked against the
+    contract's own thread example (agntnexus/agentnexus#567).
+    """
+    if write == "recipe-variants":
+        _assert_recipe_variants_are_signed()
+    elif write == "shared-vectors":
+        _assert_shared_vectors_hold()
+    elif write == "contract-agreement":
+        _assert_contract_agreement()
+    elif write == "thread-versions":
+        _assert_thread_versions_reads_the_contract_example()
+    else:
+        _assert_signed_write_matches_contract(write)
 
 
 def test_the_recipe_payload_is_part_of_the_public_typed_client_api() -> None:
@@ -258,7 +673,14 @@ class FakeClient:
 
 @pytest.mark.parametrize(
     "shape",
-    ["displays-and-bounds", "null-amounts", "null-food-ref", "null-food-ref-with-amounts"],
+    [
+        "displays-and-bounds",
+        "null-amounts",
+        "null-food-ref",
+        "null-food-ref-with-amounts",
+        "origin-and-fusion",
+        "origin-unclear",
+    ],
 )
 def test_the_bridge_validates_and_forwards_the_recipe_without_calculation(shape: str) -> None:
     """Displays and bounds survive; a null amount or food reference reads as absent (#438)."""
@@ -278,6 +700,11 @@ def test_the_bridge_validates_and_forwards_the_recipe_without_calculation(shape:
             row["amount"] = None
     elif shape == "null-food-ref":
         structured["ingredients"][0]["food_ref"] = None
+    elif shape == "origin-and-fusion":
+        structured["origin_countries"] = ["IT", "CH"]
+        structured["is_fusion"] = True
+    elif shape == "origin-unclear":
+        structured["origin_countries"] = []
     else:
         with_amounts(structured)
         structured["ingredients"][0]["food_ref"] = None
@@ -338,12 +765,63 @@ def test_the_bridge_validates_and_forwards_the_recipe_without_calculation(shape:
         ("food-ref-dataset", "dataset"),
         ("ingredient-nutrition", "nutrition"),
         ("display-row-calories", "calories"),
+        ("recipe-origin-invalid-code", "is not an ISO 3166-1 alpha-2 country code"),
+        ("recipe-origin-lowercase", "is not an ISO 3166-1 alpha-2 country code"),
+        ("recipe-origin-uk", "is not an ISO 3166-1 alpha-2 country code"),
+        ("recipe-origin-too-many", "at most five origin countries"),
+        ("recipe-origin-duplicate", "must be unique"),
+        ("recipe-origin-fusion-text", "is_fusion must be true or false"),
+        ("recipe-origin-null-list", "origin_countries must be a list"),
+        ("recipe-origin-unknown-field", "Unknown Recipe field"),
+        ("translation-language-nl", "not an active language"),
+        ("translation-language-regional", "not an active language"),
+        ("translation-language-case", "not an active language"),
+        ("translation-language-missing", "Field 'language' is required"),
+        ("translation-field-wine", "outside the allowed set"),
+        ("translation-field-image", "outside the allowed set"),
+        ("translation-field-note", "outside the allowed set"),
+        ("translation-field-amount", "outside the allowed set"),
+        ("translation-field-food-ref", "outside the allowed set"),
+        ("translation-field-times", "outside the allowed set"),
+        ("translation-field-sources", "outside the allowed set"),
+        ("translation-servings-five", "from 1 to 4"),
+        ("translation-markup-step", "without markup"),
+        ("translation-empty-step", "must not be empty"),
+        ("translation-too-many-steps", "0 to 100 items"),
+        ("translation-source-hash-short", "64 lower-case hexadecimal"),
+        ("translation-source-hash-upper", "64 lower-case hexadecimal"),
+        ("translation-empty-title", "1 to 200 characters"),
+        ("translation-title-too-long", "1 to 200 characters"),
+        ("translation-body-too-long", "1 to 20000 characters"),
+        ("translation-missing-billing", "pricing_version"),
+        ("translation-thread-id-upper", "canonical UUID"),
+        ("origin-put-invalid-code", "is not an ISO 3166-1 alpha-2 country code"),
+        ("origin-put-too-many", "at most five origin countries"),
+        ("origin-put-duplicate", "must be unique"),
+        ("origin-put-fusion-text", "is_fusion must be true or false"),
+        ("origin-put-missing-fusion", "Field 'is_fusion' is required"),
+        ("origin-put-missing-countries", "Field 'origin_countries' is required"),
+        ("origin-put-null-countries", "Field 'origin_countries' is required"),
+        ("origin-put-unknown-field", "Unknown field"),
+        ("origin-put-missing-billing", "pricing_version"),
+        ("origin-put-thread-id-upper", "canonical UUID"),
     ],
 )
 def test_malformed_or_fabricated_recipe_data_is_refused_before_sending(
     mutation: str, reason: str
 ) -> None:
-    """The bridge refuses a partial or expanded contract, for the stated reason, before signing."""
+    """Refuse a partial, fabricated or unknown value for the stated reason, before signing.
+
+    The same holds for the origin of a Recipe named in its create command, for a translated version
+    and for an origin write. Where the API names a stable code for a refusal, the bridge carries it
+    (agntnexus/agentnexus#567).
+    """
+    if mutation.startswith(WRITE_MUTATION_PREFIXES):
+        document = write_refusal_document(mutation)
+        with pytest.raises(bridge.BridgeInputError, match=reason) as refused:
+            bridge.parse_command(json.dumps(document).encode())
+        assert getattr(refused.value, "code", None) == STABLE_CODES.get(mutation)
+        return
     structured = recipe()
     if mutation == "missing-serving":
         structured["ingredients"][0]["quantities"].pop()
@@ -429,9 +907,26 @@ def test_malformed_or_fabricated_recipe_data_is_refused_before_sending(
         structured["ingredients"][0]["nutrition"] = {"calories": 100}
     elif mutation == "display-row-calories":
         structured["ingredients"][0]["quantities"][0]["calories"] = 100
+    elif mutation == "recipe-origin-invalid-code":
+        structured["origin_countries"] = ["XK"]
+    elif mutation == "recipe-origin-lowercase":
+        structured["origin_countries"] = ["de"]
+    elif mutation == "recipe-origin-uk":
+        structured["origin_countries"] = ["UK"]
+    elif mutation == "recipe-origin-too-many":
+        structured["origin_countries"] = ["DE", "AT", "CH", "IT", "FR", "ES"]
+    elif mutation == "recipe-origin-duplicate":
+        structured["origin_countries"] = ["DE", "DE"]
+    elif mutation == "recipe-origin-fusion-text":
+        structured["is_fusion"] = "true"
+    elif mutation == "recipe-origin-null-list":
+        structured["origin_countries"] = None
+    elif mutation == "recipe-origin-unknown-field":
+        structured["origin"] = {"countries": ["DE"]}
 
-    with pytest.raises(bridge.BridgeInputError, match=reason):
+    with pytest.raises(bridge.BridgeInputError, match=reason) as refused:
         bridge.parse_command(json.dumps(command(structured=structured)).encode())
+    assert getattr(refused.value, "code", None) == STABLE_CODES.get(mutation)
 
 
 def test_a_recipe_is_never_inferred_from_food_or_markdown() -> None:
@@ -492,6 +987,14 @@ def test_bridge_and_mcp_schemas_expose_only_the_strict_text_contract() -> None:
     # description must say that an ingredients image is required (D-193).
     assert "ingredients" in description and "step_position" in description
     assert "sources" in description and "actually" in description
+    # The origin of a Recipe is optional, at most five codes each once, and a JSON boolean (D-262).
+    origin = recipe_schema["properties"]["origin_countries"]
+    assert origin["type"] == "array"
+    assert origin["maxItems"] == 5
+    assert origin["uniqueItems"] is True
+    assert origin["items"]["type"] == "string"
+    assert recipe_schema["properties"]["is_fusion"]["type"] == "boolean"
+    assert {"origin_countries", "is_fusion"}.isdisjoint(recipe_schema["required"])
 
 
 def test_unknown_top_level_fields_remain_refused() -> None:

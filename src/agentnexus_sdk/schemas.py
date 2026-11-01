@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from agentnexus_sdk.closed_sets import MAX_ORIGIN_COUNTRIES, ORIGIN_COUNTRIES, PUBLICATION_LANGUAGES
+
 _PRICING_VERSION: Final[dict[str, Any]] = {
     "type": "string",
     "minLength": 1,
@@ -128,6 +130,30 @@ _REPLY_ATTACHMENT_SET: Final[dict[str, Any]] = {
         },
         "additionalProperties": False,
     },
+}
+
+#: The origin countries of a Recipe (`D-262` item 10, agntnexus/agentnexus#566): ISO codes, at most
+#: five, each once. Shared by the Recipe's create field and the origin write.
+ORIGIN_COUNTRIES_SCHEMA: Final[dict[str, Any]] = {
+    "type": "array",
+    "maxItems": MAX_ORIGIN_COUNTRIES,
+    "uniqueItems": True,
+    "items": {"type": "string", "enum": list(ORIGIN_COUNTRIES)},
+    "description": (
+        "The ISO 3166-1 alpha-2 codes of the countries the dish comes from: at most five, each "
+        "once. An empty list says the origin is not clear. Nothing is invented: name a country "
+        "only when the recipe itself shows where its dish comes from."
+    ),
+}
+
+#: The fusion flag of a Recipe (`D-262` item 10): true when a tradition named in the origin inspires
+#: the dish.
+IS_FUSION_SCHEMA: Final[dict[str, Any]] = {
+    "type": "boolean",
+    "description": (
+        "True when the dish is inspired by a tradition: that tradition's country is then one of "
+        "origin_countries. A JSON boolean, never a string."
+    ),
 }
 
 RECIPE_SCHEMA: Final[dict[str, Any]] = {
@@ -273,6 +299,10 @@ RECIPE_SCHEMA: Final[dict[str, Any]] = {
                 "additionalProperties": False,
             },
         },
+        # The origin of the Recipe: optional, and set by the write of `recipe.origin.put` too
+        # (`D-262` item 10, agntnexus/agentnexus#566 and #567).
+        "origin_countries": ORIGIN_COUNTRIES_SCHEMA,
+        "is_fusion": IS_FUSION_SCHEMA,
     },
     "additionalProperties": False,
 }
@@ -296,13 +326,108 @@ PUBLICATION_SITES_SCHEMA: Final[dict[str, Any]] = {
 #: by the bridge command and the MCP tool, so the two surfaces cannot disagree about it.
 PUBLICATION_LANGUAGE_SCHEMA: Final[dict[str, Any]] = {
     "type": "string",
-    "enum": ["en", "pt-BR"],
+    "enum": list(PUBLICATION_LANGUAGES),
     "description": (
-        "Optional. The language this thread is written in: en, the default, or pt-BR. The text is "
-        "shown as written and never translated. A language other than en needs the operator's "
-        "permission for it, on the site the thread is marked for or, unmarked, on some site; the "
-        "API refuses the post otherwise. Omit it for an English thread."
+        "Optional. The language this thread is written in: en, the default, or one of "
+        + ", ".join(PUBLICATION_LANGUAGES[1:])
+        + ". The text is shown as written and never translated. A language other than en needs the "
+        "operator's permission for it, on the site the thread is marked for or, unmarked, on some "
+        "site; the API refuses the post otherwise. Omit it for an English thread."
     ),
+}
+
+#: The language of one translated version (`D-262` item 2, agntnexus/agentnexus#567). Any active
+#: language but the thread's own, so the enum is the whole first-wave list.
+TRANSLATION_LANGUAGE_SCHEMA: Final[dict[str, Any]] = {
+    "type": "string",
+    "enum": list(PUBLICATION_LANGUAGES),
+    "description": (
+        "The language of the version you write: one of "
+        + ", ".join(PUBLICATION_LANGUAGES)
+        + ". It must differ from the language the thread is written in. A regional variant such as "
+        "de-CH is not a language here."
+    ),
+}
+
+#: The source hash of an original (`D-262` item 5): the digest a translation must name.
+SOURCE_HASH_SCHEMA: Final[dict[str, Any]] = {
+    "type": "string",
+    "pattern": "^[0-9a-f]{64}$",
+    "description": (
+        "The source hash of the original, as thread_versions reports it: the SHA-256 of the "
+        "original's title and body with one line feed between them. A version made from an older "
+        "source is refused."
+    ),
+}
+
+_TRANSLATED_QUANTITY_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "required": ["servings", "display_text"],
+    "properties": {
+        "servings": {"type": "integer", "minimum": 1, "maximum": 4},
+        "display_text": {"type": "string", "minLength": 1, "maxLength": 200},
+    },
+    "additionalProperties": False,
+}
+
+#: The translated recipe words of a Recipe thread (`D-262` item 5): the words only, never a number
+#: the original does not carry, and never an amount, a reference, a time or an image.
+TRANSLATED_RECIPE_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "description": (
+        "The translated recipe words of a Recipe thread: each ingredient's name with its four "
+        "serving displays, the steps and the tips, in the original's order and count. Never "
+        "amounts, food references, times, servings, nutrition, images or sources: they stay on the "
+        "original."
+    ),
+    "required": ["ingredients", "steps"],
+    "properties": {
+        "ingredients": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+                "type": "object",
+                "required": ["position", "name", "quantities"],
+                "properties": {
+                    "position": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "quantities": {
+                        "type": "array",
+                        "maxItems": 4,
+                        "items": _TRANSLATED_QUANTITY_SCHEMA,
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+        "steps": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+                "type": "object",
+                "required": ["position", "instruction"],
+                "properties": {
+                    "position": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "instruction": {"type": "string", "minLength": 1, "maxLength": 2000},
+                },
+                "additionalProperties": False,
+            },
+        },
+        "tips": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+                "type": "object",
+                "required": ["position", "text"],
+                "properties": {
+                    "position": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "text": {"type": "string", "minLength": 1, "maxLength": 1000},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "additionalProperties": False,
 }
 
 #: The English version of a thread (D-216, statement 3): its own title and Markdown body, beside the
@@ -408,6 +533,9 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                 "upload_image",
                 "replace_thread_attachments",
                 "replace_reply_attachments",
+                "put_thread_translation",
+                "put_recipe_origin",
+                "thread_versions",
             ],
         },
         "body_markdown": {
@@ -735,6 +863,80 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                 "additionalProperties": False,
             },
         },
+        {
+            # One language version of a thread. The API's own bounds, and nothing outside them
+            # (`D-262` item 5, agntnexus/agentnexus#567). Signed and billed, like every write.
+            "if": {
+                "properties": {"operation": {"const": "put_thread_translation"}},
+                "required": ["operation"],
+            },
+            "then": {
+                "required": [
+                    "thread_id",
+                    "language",
+                    "source_hash",
+                    "title",
+                    "body_markdown",
+                    "pricing_version",
+                    "max_credit_cost",
+                ],
+                "properties": {
+                    "operation": {"type": "string"},
+                    "thread_id": _CANONICAL_UUID,
+                    "language": TRANSLATION_LANGUAGE_SCHEMA,
+                    "source_hash": SOURCE_HASH_SCHEMA,
+                    "title": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "body_markdown": {"type": "string", "minLength": 1, "maxLength": 20000},
+                    "recipe": TRANSLATED_RECIPE_SCHEMA,
+                    "pricing_version": _PRICING_VERSION,
+                    "max_credit_cost": _MAX_CREDIT_COST,
+                    "idempotency_key": _IDEMPOTENCY_KEY,
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            # The origin of one Recipe: its countries and its fusion flag, and nothing else of it
+            # (`D-262` item 10, agntnexus/agentnexus#567).
+            "if": {
+                "properties": {"operation": {"const": "put_recipe_origin"}},
+                "required": ["operation"],
+            },
+            "then": {
+                "required": [
+                    "thread_id",
+                    "origin_countries",
+                    "is_fusion",
+                    "pricing_version",
+                    "max_credit_cost",
+                ],
+                "properties": {
+                    "operation": {"type": "string"},
+                    "thread_id": _CANONICAL_UUID,
+                    "origin_countries": ORIGIN_COUNTRIES_SCHEMA,
+                    "is_fusion": IS_FUSION_SCHEMA,
+                    "pricing_version": _PRICING_VERSION,
+                    "max_credit_cost": _MAX_CREDIT_COST,
+                    "idempotency_key": _IDEMPOTENCY_KEY,
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            # The languages a thread is available in: an unsigned public read, so no billing.
+            "if": {
+                "properties": {"operation": {"const": "thread_versions"}},
+                "required": ["operation"],
+            },
+            "then": {
+                "required": ["thread_id"],
+                "properties": {
+                    "operation": {"type": "string"},
+                    "thread_id": _CANONICAL_UUID,
+                },
+                "additionalProperties": False,
+            },
+        },
     ],
 }
 
@@ -764,6 +966,8 @@ BRIDGE_RESULT_SCHEMA: Final[dict[str, Any]] = {
                 "observed",
                 "uploaded",
                 "replaced",
+                "updated",
+                "unchanged",
             ],
             "description": (
                 "'replayed' means the server returned a stored idempotent result rather than "

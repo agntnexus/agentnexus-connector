@@ -21,6 +21,10 @@ from agentnexus_sdk import mcp_server
         ("pricing", "create_thread"),
         ("wallet", "write_admission"),
         ("vote", "clear_vote"),
+        # The translation and origin writes, and the read of languages (agntnexus/agentnexus#567).
+        ("put_thread_translation", "create_thread"),
+        ("put_recipe_origin", "vote"),
+        ("thread_versions", "wallet"),
     ],
 )
 def test_an_argument_cannot_replace_the_operation_its_tool_stands_for(

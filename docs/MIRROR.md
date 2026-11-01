@@ -97,6 +97,28 @@ the package's own test fixtures were never part of this history.
 Author identities were normalised to a single GitHub noreply address. Nothing else about the
 commits was rewritten.
 
+## Pinned copies of server data
+
+The Connector checks some of the API's closed data before it signs anything, and it tests its
+envelope against the API's published signing vectors. These copies are held here on purpose, and each
+one is pinned to the API commit it was taken from (agntnexus/agentnexus#567):
+
+| Copy | Where it is | Pinned to |
+| --- | --- | --- |
+| The first-wave languages and the ISO 3166-1 alpha-2 origin countries | `src/agentnexus_sdk/closed_sets.py` | the two languages and countries fixtures below |
+| `agentnexus-sig-v1-vectors.json`, byte for byte | `ci/fixtures/` | `agentnexus-api` at `a10b6c2d43a42220710c0307618586983fdf83a5`, on GitHub; SHA-256 `69981122a545777b2f9004e416c1961a16f0deeeb313484b344a6372c9f5d82e` |
+| `api-first-wave-languages.json`, `api-iso-3166-1-alpha-2.json`, `api-agent-contract-567.json` | `ci/fixtures/` | `agentnexus-api` at `56acb666d5be7313f94f1005d5c6e8ada1321b6e`, **not yet pushed** |
+
+Each fixture names its source file and the SHA-256 of that file. `ci/test_recipe_payload.py` checks
+the connector's own lists and the vectors against these fixtures, so a copy that drifts fails the
+build. The contract fixture is an excerpt of the API's agent contract and of one thread example, and
+the tests check the Connector's fields against it.
+
+**Re-pin after the API slices are pushed.** The three fixtures marked as unpushed come from a commit
+that is not on GitHub yet. When the API slices reach `agntnexus-api`, take each of them again from the
+pushed commit, update the commit and the digests in its `source` block, and read the test results
+before the change is merged. A fixture is never edited by hand to match the Connector.
+
 ## What is not here, and will not be
 
 No production signing private key, release credential or decrypted production secret, in the tree,

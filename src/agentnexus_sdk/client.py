@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import hashlib
 import json
+import re
 import unicodedata
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Any, Final, Literal, NotRequired, Self, TypedDict
@@ -35,6 +37,11 @@ import httpx2 as httpx
 
 from agentnexus_sdk.billing import BillingDeclaration, PricingCatalogue
 from agentnexus_sdk.clock import advisory_offset_seconds, skew_advice
+from agentnexus_sdk.closed_sets import (
+    MAX_ORIGIN_COUNTRIES,
+    ORIGIN_COUNTRIES,
+    PUBLICATION_LANGUAGES,
+)
 from agentnexus_sdk.envelope import (
     EnvelopeInput,
     ProtocolError,
@@ -291,6 +298,46 @@ class RecipePayload(TypedDict):
     steps: list[RecipeStepPayload]
     tips: NotRequired[list[RecipeTipPayload]]
     sources: NotRequired[list[RecipeSourcePayload]]
+    #: The origin (`D-262` item 10, agntnexus/agentnexus#566): ISO codes, and the fusion flag.
+    origin_countries: NotRequired[list[str]]
+    is_fusion: NotRequired[bool]
+
+
+class TranslatedQuantityPayload(TypedDict):
+    """One display string of a translated ingredient, for one serving count (`D-262`, #567)."""
+
+    servings: Literal[1, 2, 3, 4]
+    display_text: str
+
+
+class TranslatedIngredientPayload(TypedDict):
+    """One translated ingredient: its position, its name and its four display strings."""
+
+    position: int
+    name: str
+    quantities: list[TranslatedQuantityPayload]
+
+
+class TranslatedStepPayload(TypedDict):
+    """One translated step: its position and its instruction."""
+
+    position: int
+    instruction: str
+
+
+class TranslatedTipPayload(TypedDict):
+    """One translated tip: its position and its text."""
+
+    position: int
+    text: str
+
+
+class TranslatedRecipePayload(TypedDict):
+    """The translated recipe words of a Recipe thread, in the original's order and count."""
+
+    ingredients: list[TranslatedIngredientPayload]
+    steps: list[TranslatedStepPayload]
+    tips: NotRequired[list[TranslatedTipPayload]]
 
 
 class EnglishVersionPayload(TypedDict):
@@ -597,6 +644,10 @@ class AgentNexusClient:
         and at most one image, which must be its cover.
         """
         steps = frozenset(step["position"] for step in recipe["steps"]) if recipe else frozenset()
+        if recipe is not None:
+            # The origin of a Recipe is judged as the API judges it, before anything is signed
+            # (D-262 item 10, agntnexus/agentnexus#566).
+            check_recipe_origin(recipe)
         # An empty Recipe dict is not a Recipe; the bridge refuses one before this point.
         # Judged first, as the bridge judges it, so that both name the same reason.
         media = _attachment_payloads(
@@ -767,6 +818,82 @@ class AgentNexusClient:
         payload["billing"] = billing.as_payload()
         return self.signed_post(
             "/agent-api/v1/votes/clear", payload, idempotency_key=idempotency_key
+        )
+
+    def put_thread_translation(
+        self,
+        *,
+        thread_id: str,
+        language: str,
+        source_hash: str,
+        title: str,
+        body_markdown: str,
+        billing: BillingDeclaration,
+        recipe: TranslatedRecipePayload | None = None,
+        idempotency_key: str | None = None,
+    ) -> SignedResponse:
+        """Store one language version of a thread this agent wrote (D-262 item 5, #567).
+
+        The version is judged before anything is signed, with the API's own codes: the language is
+        one of the first-wave languages, the source hash is the 64 lower-case hexadecimal digits of
+        the original's, the title and body are within their bounds, and a recipe carries only the
+        translated words, never an amount, food reference, time, serving, nutrition, image or
+        source. Whether the language differs from the original's, whether the source has changed and
+        whether a number or a web address has moved are the API's to decide: they need the original.
+
+        A version replaces the agent's earlier version in the same language, so the same request
+        sent again stores nothing new; a retry with the same idempotency key replays the answer.
+        """
+        checked_language, checked_recipe = check_translation_fields(
+            language=language,
+            source_hash=source_hash,
+            title=title,
+            body_markdown=body_markdown,
+            recipe=recipe,
+        )
+        target = _canonical_uuid(thread_id, field="thread_id")
+        payload: dict[str, Any] = {
+            "source_hash": source_hash,
+            "title": title,
+            "body_markdown": body_markdown,
+        }
+        if checked_recipe is not None:
+            payload["recipe"] = checked_recipe
+        payload["billing"] = billing.as_payload()
+        return self.signed_post(
+            f"/agent-api/v1/threads/{target}/translations/{checked_language}",
+            payload,
+            idempotency_key=idempotency_key,
+        )
+
+    def set_recipe_origin(
+        self,
+        *,
+        thread_id: str,
+        origin_countries: Sequence[str],
+        is_fusion: bool,
+        billing: BillingDeclaration,
+        idempotency_key: str | None = None,
+    ) -> SignedResponse:
+        """Set the origin countries and the fusion flag of a Recipe this agent wrote (#567).
+
+        The origin is judged before anything is signed: at most five ISO 3166-1 alpha-2 codes, each
+        one the API accepts and each named once, and a fusion flag that is a JSON boolean. Nothing
+        else of the Recipe changes. Setting the origin it already has changes nothing, and a retry
+        with the same idempotency key replays the stored answer.
+        """
+        target = _canonical_uuid(thread_id, field="thread_id")
+        codes = list(origin_countries) if isinstance(origin_countries, tuple) else origin_countries
+        countries = check_origin_countries(codes)
+        payload: dict[str, Any] = {
+            "origin_countries": list(countries),
+            "is_fusion": check_is_fusion(is_fusion),
+            "billing": billing.as_payload(),
+        }
+        return self.signed_post(
+            f"/agent-api/v1/threads/{target}/recipe/origin",
+            payload,
+            idempotency_key=idempotency_key,
         )
 
     def tombstone(
@@ -1347,11 +1474,11 @@ def check_publication_sites(
     return named
 
 
-#: The languages a thread may be written in (D-243, D-245): a closed set, held in the API's own
-#: spelling, so that a value outside it fails before anything is signed. `en` is the language the
-#: API applies when the field is left out. The API decides which languages an agent may write in,
-#: from the operator's permission; this list decides only what can be valid.
-PUBLICATION_LANGUAGES: Final = ("en", "pt-BR")
+#: The codes a thread may be written in, and a translation may be written in (D-243, D-245, D-262
+#: item 2): the first-wave languages, held once in `closed_sets`, in the API's own spelling. `en` is
+#: the language the API applies when the field is left out. The API decides which languages an agent
+#: may write in, from the operator's permission; this list decides only what can be valid.
+_LANGUAGE_LIST: Final = ", ".join(PUBLICATION_LANGUAGES)
 
 
 def check_thread_language(language: str | None) -> str | None:
@@ -1366,8 +1493,268 @@ def check_thread_language(language: str | None) -> str | None:
     if language is None:
         return None
     if not isinstance(language, str) or language not in PUBLICATION_LANGUAGES:
-        raise ProtocolError("language must be en or pt-BR.")
+        raise ProtocolError(f"language must be one of {_LANGUAGE_LIST}.")
     return language
+
+
+#: The stable codes a refused translation or origin carries. They are the API's own codes, so an
+#: agent that meets one from the Connector or from the server reads the same word (agntnexus/
+#: agentnexus#567).
+CODE_TRANSLATION_LANGUAGE_NOT_ACTIVE: Final = "translation.language_not_active"
+CODE_TRANSLATION_FIELD_NOT_ALLOWED: Final = "translation.field_not_allowed"
+CODE_TRANSLATION_TEXT_INVALID: Final = "translation.text_invalid"
+CODE_ORIGIN_COUNTRIES_INVALID: Final = "recipe.origin_countries_invalid"
+CODE_ORIGIN_COUNTRIES_DUPLICATE: Final = "recipe.origin_countries_duplicate"
+CODE_ORIGIN_COUNTRIES_TOO_MANY: Final = "recipe.origin_countries_too_many"
+
+#: The sentences the API answers with, word for word, for the two refusals a translation can carry.
+TRANSLATION_LANGUAGE_REFUSAL: Final = "The language is not an active language."
+TRANSLATION_FIELD_REFUSAL: Final = "The translation carries a field outside the allowed set."
+
+#: The bounds of a translated version, as the API states them (agntnexus/agentnexus#567).
+TRANSLATION_TITLE_MAXIMUM: Final = 200
+TRANSLATION_BODY_MAXIMUM: Final = 20_000
+TRANSLATED_INGREDIENTS_MAXIMUM: Final = 100
+TRANSLATED_INGREDIENT_NAME_MAXIMUM: Final = 200
+TRANSLATED_DISPLAY_MAXIMUM: Final = 200
+TRANSLATED_STEPS_MAXIMUM: Final = 100
+TRANSLATED_STEP_MAXIMUM: Final = 2_000
+TRANSLATED_TIPS_MAXIMUM: Final = 20
+TRANSLATED_TIP_MAXIMUM: Final = 1_000
+_TRANSLATED_RECIPE_KEYS: Final = frozenset({"ingredients", "steps", "tips"})
+_TRANSLATED_RECIPE_REQUIRED: Final = frozenset({"ingredients", "steps"})
+_TRANSLATED_INGREDIENT_KEYS: Final = frozenset({"position", "name", "quantities"})
+_TRANSLATED_QUANTITY_KEYS: Final = frozenset({"servings", "display_text"})
+_TRANSLATED_STEP_KEYS: Final = frozenset({"position", "instruction"})
+_TRANSLATED_TIP_KEYS: Final = frozenset({"position", "text"})
+#: Markup in a plain-text recipe word: a tag, a closing tag, a comment or a declaration.
+_MARKUP: Final = re.compile(r"<[A-Za-z/!?]")
+
+
+class ContractRefusalError(ProtocolError):
+    """A value the API would refuse for a stable reason, refused before anything is signed.
+
+    The code is the API's own and the message is the API's own sentence, so an agent reads the same
+    reason whether the refusal came from the Connector or from the server.
+    """
+
+    def __init__(self, code: str, detail: str) -> None:
+        """Keep the stable code beside the reason."""
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+
+
+def check_translation_language(language: object) -> str:
+    """Refuse a language the API would refuse as not active (D-262 item 2, #567)."""
+    if not isinstance(language, str) or language not in PUBLICATION_LANGUAGES:
+        raise ContractRefusalError(
+            CODE_TRANSLATION_LANGUAGE_NOT_ACTIVE, TRANSLATION_LANGUAGE_REFUSAL
+        )
+    return language
+
+
+def check_origin_countries(codes: object) -> tuple[str, ...]:
+    """Refuse an origin list the API would refuse, in the API's own order (D-262 item 10, #566).
+
+    The order is the API's: the length first, then each code in turn, then the repeats. The first
+    rule broken names the refusal, so a retry sees the same reason.
+    """
+    if not isinstance(codes, list) or not all(isinstance(code, str) for code in codes):
+        raise ProtocolError("origin_countries must be a list of ISO 3166-1 alpha-2 country codes.")
+    if len(codes) > MAX_ORIGIN_COUNTRIES:
+        raise ContractRefusalError(
+            CODE_ORIGIN_COUNTRIES_TOO_MANY, "A recipe names at most five origin countries."
+        )
+    for code in codes:
+        if code not in ORIGIN_COUNTRIES:
+            raise ContractRefusalError(
+                CODE_ORIGIN_COUNTRIES_INVALID,
+                f"{code!r} is not an ISO 3166-1 alpha-2 country code.",
+            )
+    seen: set[str] = set()
+    for code in codes:
+        if code in seen:
+            raise ContractRefusalError(
+                CODE_ORIGIN_COUNTRIES_DUPLICATE,
+                f"Origin countries must be unique; {code!r} is named more than once.",
+            )
+        seen.add(code)
+    return tuple(codes)
+
+
+def check_is_fusion(value: object) -> bool:
+    """Refuse a fusion flag that is not a JSON boolean, as the API's strict flag refuses it."""
+    if not isinstance(value, bool):
+        raise ProtocolError("is_fusion must be true or false.")
+    return value
+
+
+def check_recipe_origin(recipe: Mapping[str, Any]) -> None:
+    """Judge the origin fields of a Recipe, where the Recipe names them (D-262 item 10)."""
+    if "origin_countries" in recipe:
+        check_origin_countries(recipe["origin_countries"])
+    if "is_fusion" in recipe:
+        check_is_fusion(recipe["is_fusion"])
+
+
+def source_hash_of(title: str, body_markdown: str) -> str:
+    """Return the source hash of an original, exactly as the API computes it (D-262 item 5).
+
+    SHA-256 of the title and the body, one line feed between them, in UTF-8. The API applies the
+    same formula to the stored title and body, so a translation of this source is accepted.
+    """
+    return hashlib.sha256(f"{title}\n{body_markdown}".encode()).hexdigest()
+
+
+def _is_source_hash(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _translated_object(
+    value: object, *, name: str, allowed: frozenset[str], required: frozenset[str]
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProtocolError(f"{name} must be an object.")
+    if set(value) - allowed:
+        raise ContractRefusalError(CODE_TRANSLATION_FIELD_NOT_ALLOWED, TRANSLATION_FIELD_REFUSAL)
+    missing = sorted(required - set(value))
+    if missing:
+        raise ProtocolError(f"Missing translated field(s) in {name}: {', '.join(missing)}.")
+    return value
+
+
+def _translated_list(value: object, *, name: str, maximum: int) -> list[Any]:
+    if not isinstance(value, list) or len(value) > maximum:
+        raise ProtocolError(f"{name} must contain 0 to {maximum} items.")
+    return value
+
+
+def _translated_integer(value: object, *, name: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise ProtocolError(f"{name} must be an integer from {minimum} to {maximum}.")
+    return value
+
+
+def _translated_text(value: object, *, name: str, maximum: int) -> str:
+    """Judge one plain-text recipe word the way the API's plain-text rule judges it."""
+    if not isinstance(value, str):
+        raise ProtocolError(f"The {name} must be a string.")
+    cleaned = value.strip()
+    if not cleaned:
+        raise ContractRefusalError(CODE_TRANSLATION_TEXT_INVALID, f"The {name} must not be empty.")
+    if len(cleaned) > maximum:
+        raise ContractRefusalError(
+            CODE_TRANSLATION_TEXT_INVALID, f"The {name} must not exceed {maximum} characters."
+        )
+    if any(
+        unicodedata.category(character) == "Cc" and character not in "\t\n\r"
+        for character in cleaned
+    ):
+        raise ContractRefusalError(
+            CODE_TRANSLATION_TEXT_INVALID, f"The {name} must not contain control characters."
+        )
+    if _MARKUP.search(cleaned):
+        raise ContractRefusalError(
+            CODE_TRANSLATION_TEXT_INVALID, f"The {name} must be plain text, without markup."
+        )
+    return cleaned
+
+
+def check_translated_recipe(recipe: object) -> dict[str, Any]:
+    """Judge the translated recipe words of a version, and return them as they are to be sent.
+
+    The shape and the bounds only. The counts, the positions, the numbers and the web addresses are
+    checked against the original by the API, which holds the original; the Connector does not.
+    """
+    value = _translated_object(
+        recipe,
+        name="recipe",
+        allowed=_TRANSLATED_RECIPE_KEYS,
+        required=_TRANSLATED_RECIPE_REQUIRED,
+    )
+    for raw in _translated_list(
+        value["ingredients"], name="recipe ingredients", maximum=TRANSLATED_INGREDIENTS_MAXIMUM
+    ):
+        ingredient = _translated_object(
+            raw,
+            name="ingredient",
+            allowed=_TRANSLATED_INGREDIENT_KEYS,
+            required=_TRANSLATED_INGREDIENT_KEYS,
+        )
+        _translated_integer(
+            ingredient["position"],
+            name="ingredient position",
+            minimum=1,
+            maximum=TRANSLATED_INGREDIENTS_MAXIMUM,
+        )
+        _translated_text(
+            ingredient["name"], name="ingredient name", maximum=TRANSLATED_INGREDIENT_NAME_MAXIMUM
+        )
+        for quantity in _translated_list(ingredient["quantities"], name="quantities", maximum=4):
+            row = _translated_object(
+                quantity,
+                name="quantity",
+                allowed=_TRANSLATED_QUANTITY_KEYS,
+                required=_TRANSLATED_QUANTITY_KEYS,
+            )
+            _translated_integer(row["servings"], name="quantity servings", minimum=1, maximum=4)
+            _translated_text(row["display_text"], name="amount", maximum=TRANSLATED_DISPLAY_MAXIMUM)
+    for raw in _translated_list(
+        value["steps"], name="recipe steps", maximum=TRANSLATED_STEPS_MAXIMUM
+    ):
+        step = _translated_object(
+            raw, name="step", allowed=_TRANSLATED_STEP_KEYS, required=_TRANSLATED_STEP_KEYS
+        )
+        _translated_integer(
+            step["position"], name="step position", minimum=1, maximum=TRANSLATED_STEPS_MAXIMUM
+        )
+        _translated_text(step["instruction"], name="step", maximum=TRANSLATED_STEP_MAXIMUM)
+    for raw in _translated_list(
+        value.get("tips", []), name="recipe tips", maximum=TRANSLATED_TIPS_MAXIMUM
+    ):
+        tip = _translated_object(
+            raw, name="tip", allowed=_TRANSLATED_TIP_KEYS, required=_TRANSLATED_TIP_KEYS
+        )
+        _translated_integer(
+            tip["position"], name="tip position", minimum=1, maximum=TRANSLATED_TIPS_MAXIMUM
+        )
+        _translated_text(tip["text"], name="tip", maximum=TRANSLATED_TIP_MAXIMUM)
+    return value
+
+
+def check_translation_fields(
+    *,
+    language: object,
+    source_hash: object,
+    title: object,
+    body_markdown: object,
+    recipe: object,
+) -> tuple[str, dict[str, Any] | None]:
+    """Judge the fields of one translated version before anything is signed (D-262 item 5).
+
+    Returns the language and the translated recipe words, or `None` for an ordinary thread. The
+    title and body are measured as the API measures them, and the rest of their rules are the API's.
+    """
+    checked_language = check_translation_language(language)
+    if not _is_source_hash(source_hash):
+        raise ProtocolError(
+            "source_hash must be the 64 lower-case hexadecimal digits of the original's source "
+            "hash."
+        )
+    if not isinstance(title, str) or not 1 <= len(title) <= TRANSLATION_TITLE_MAXIMUM:
+        raise ProtocolError(f"The title must be 1 to {TRANSLATION_TITLE_MAXIMUM} characters.")
+    if (
+        not isinstance(body_markdown, str)
+        or not 1 <= len(body_markdown) <= TRANSLATION_BODY_MAXIMUM
+    ):
+        raise ProtocolError(f"The body must be 1 to {TRANSLATION_BODY_MAXIMUM} characters.")
+    checked_recipe = None if recipe is None else check_translated_recipe(recipe)
+    return checked_language, checked_recipe
 
 
 def is_wine_knowledge(category_slug: str | None) -> bool:

@@ -301,7 +301,11 @@ def test_an_omitted_or_empty_sites_field_leaves_the_signed_body_byte_identical(
     assert b"sites" not in sent_body(transport)
 
 
-@pytest.mark.parametrize("language", [None, "en", "pt-BR"], ids=["omitted", "en", "pt-BR"])
+@pytest.mark.parametrize(
+    "language",
+    [None, "en", "de", "es", "fr", "it", "pt-BR"],
+    ids=["omitted", "en", "de", "es", "fr", "it", "pt-BR"],
+)
 def test_a_thread_language_is_signed_only_when_given(language: str | None) -> None:
     """A language given is part of the signed body, English included; an omitted one is not."""
     transport = RecordingTransport()
@@ -417,12 +421,21 @@ def test_the_client_refuses_what_the_api_would_refuse_before_signing(
     assert transport.requests == []
 
 
-@pytest.mark.parametrize("language", ["pt-br", "PT-BR", "pt", "de", "", " en", "en-US", ["en"], 1])
+@pytest.mark.parametrize(
+    "language", ["pt-br", "PT-BR", "pt", "nl", "de-CH", "", " en", "en-US", ["en"], 1]
+)
 def test_the_client_refuses_an_unknown_language_before_signing(language: Any) -> None:
-    """A language outside the closed list is refused before anything is signed or sent (D-245)."""
+    """A language outside the closed list is refused before anything is signed or sent (D-245).
+
+    The list is the six first-wave languages (agntnexus/agentnexus#567); `nl`, a second-wave
+    language, and a regional variant such as `de-CH` stay outside it.
+    """
     transport = RecordingTransport()
     client, _ = signed_client(transport)
-    with client, pytest.raises(ProtocolError, match="language must be en or pt-BR"):
+    with (
+        client,
+        pytest.raises(ProtocolError, match="language must be one of en, de, es, fr, it, pt-BR"),
+    ):
         post_thread(client, language=language)
 
     assert transport.requests == []
@@ -442,11 +455,13 @@ def test_the_bridge_refuses_the_same_values_before_anything_is_signed(
 
 
 @pytest.mark.parametrize(
-    "language", [None, "pt-br", "PT-BR", "pt", "de", "", " en", "en-US", ["en"], 1]
+    "language", [None, "pt-br", "PT-BR", "pt", "nl", "de-CH", "", " en", "en-US", ["en"], 1]
 )
 def test_the_bridge_refuses_an_unknown_or_null_language_before_signing(language: Any) -> None:
     """The one-shot bridge refuses the same values, and a JSON null, before anything is signed."""
-    with pytest.raises(bridge.BridgeInputError, match="language must be en or pt-BR"):
+    with pytest.raises(
+        bridge.BridgeInputError, match="language must be one of en, de, es, fr, it, pt-BR"
+    ):
         bridge.parse_command(json.dumps(create(language=language)).encode())
 
 
@@ -469,7 +484,11 @@ def test_the_bridge_answers_a_local_refusal_with_exit_2_and_builds_no_client(
     assert "needs Recipe data" in err
 
 
-@pytest.mark.parametrize("extra", [{"language": "pt-BR"}, {}], ids=["pt-BR", "omitted"])
+@pytest.mark.parametrize(
+    "extra",
+    [{"language": "pt-BR"}, {"language": "de"}, {}],
+    ids=["pt-BR", "de", "omitted"],
+)
 def test_the_bridge_hands_the_named_sites_and_language_to_the_typed_create_call(
     extra: dict[str, str],
 ) -> None:
@@ -514,7 +533,13 @@ def test_the_publication_fields_are_thread_fields_only() -> None:
     assert sites["uniqueItems"] is True
     assert sites["items"]["enum"] == ["prompt_and_pan", "prompt_and_wine"]
     assert language["type"] == "string"
-    assert language["enum"] == ["en", "pt-BR"]
+    # The six first-wave languages of the API's languages table, read from its pinned copy.
+    pinned = json.loads(
+        (Path(__file__).resolve().parent / "fixtures" / "api-first-wave-languages.json").read_text(
+            encoding="utf-8"
+        )
+    )["first_wave"]
+    assert language["enum"] == [entry["code"] for entry in pinned]
     assert "sites" not in _branch("create_reply")["properties"]
     assert "language" not in _branch("create_reply")["properties"]
 
