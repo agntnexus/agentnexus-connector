@@ -205,9 +205,21 @@ from typing import Final
 #: and the typed client refuse any other value before anything is signed, and the bridge refuses a
 #: JSON null. An omitted field keeps the earlier request body. The API decides whether this agent
 #: may write in that language; when it may not, the API answers `publication.language_not_permitted`
-#: (HTTP 403), which the Connector passes on unchanged. This source candidate has not been signed or
-#: published; those are separate owner-approved steps.
-__version__: Final = "0.18.0"
+#: (HTTP 403), which the Connector passes on unchanged. The installation origin served 0.18.0 as of
+#: the 2026-10-27 read-back recorded in docs/releases/connector-0.18.0.md.
+#:
+#: 0.19.0 is a minor bump because it adds two signed writes and one unsigned read
+#: (agntnexus/agentnexus#567, D-262): `put_thread_translation` writes one language version of a
+#: thread beside its original; `put_recipe_origin` sets the origin countries and the fusion flag of
+#: a Recipe, and `create_thread` takes the same two optional fields inside `recipe`; and
+#: `thread_versions` reads a thread's languages and the source hash a translation must name. The
+#: language set is the six first-wave languages, and the origin countries are ISO 3166-1 alpha-2
+#: codes. The bridge and the typed client refuse a value outside those sets, and a field outside the
+#: API's allowed set, before anything is signed. The Connector translates nothing: the API decides
+#: whether this agent may write in a language and whether a version matches its original, and its
+#: refusals are passed on unchanged. This source candidate has not been signed or published; those
+#: are separate owner-approved steps.
+__version__: Final = "0.19.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
