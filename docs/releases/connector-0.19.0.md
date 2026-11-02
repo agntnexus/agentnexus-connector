@@ -1,11 +1,13 @@
-# Connector 0.19.0 — signed pending release
+# Connector 0.19.0 — signed and superseded
 
 This page records the signed 0.19.0 build for `agntnexus/agentnexus#571`, which carries the
-translation and recipe-origin writes of `agntnexus/agentnexus#567` (`D-262`). It is signed and
-committed, and it is not published. The installation origin still serves 0.18.0, as recorded in
-[`connector-0.18.0.md`](connector-0.18.0.md), and no read-back of 0.19.0 is claimed here.
-[`connector-release-state.json`](connector-release-state.json) keeps `published_version` 0.18.0 and
-names 0.19.0 as `pending_version`.
+translation and recipe-origin writes of `agntnexus/agentnexus#567` (`D-262`). It was signed and
+committed, and then superseded by 0.20.0 before the installation origin served it. The installation
+origin never served 0.19.0, so no read-back of 0.19.0 exists and none is claimed here. The
+installation origin still serves 0.18.0, as recorded in [`connector-0.18.0.md`](connector-0.18.0.md).
+Installations go from 0.18.0 directly to 0.20.0, which contains everything 0.19.0 added (see
+[`connector-0.20.0.md`](connector-0.20.0.md)). [`connector-release-state.json`](connector-release-state.json)
+keeps `published_version` 0.18.0 and names 0.20.0, not 0.19.0, as `pending_version`.
 
 ## Change
 
@@ -98,12 +100,11 @@ material is in the tree or the wheel.
 | `SOURCE_DATE_EPOCH` | 1793616120 (2026-11-02T10:42:00Z), the committer time of the source commit |
 | Build backend | `setuptools==84.0.0` |
 | Wheel `agentnexus_sdk-0.19.0-py3-none-any.whl` in `connector-release/connector/0.19.0/` | 395291 bytes, SHA-256 `7949d163b90ecfa995e75457144fa430bfb97a72243e014d2ad212cad96da6ac` |
-| Signed manifest `connector-release/connector/connector-release.json` | 347 bytes, SHA-256 `905b9d543d9ea2dc4c8a00635f700fc1fd65533c9e87a84e34c210c84944fba7`, `released_at` `2026-11-02T10:47:08Z` |
-| Detached signature `connector-release/connector/connector-release.json.sig` | 128 bytes, SHA-256 `c3a058bdadc38cfb04fd7da3f984a7a33c0c9f259f008c035273a7411c20afa0` |
+| Signed manifest for 0.19.0, superseded in `connector-release/connector/connector-release.json` by 0.20.0 | 347 bytes, SHA-256 `905b9d543d9ea2dc4c8a00635f700fc1fd65533c9e87a84e34c210c84944fba7`, `released_at` `2026-11-02T10:47:08Z` |
+| Detached signature for 0.19.0, superseded by 0.20.0's `connector-release/connector/connector-release.json.sig` | 128 bytes, SHA-256 `c3a058bdadc38cfb04fd7da3f984a7a33c0c9f259f008c035273a7411c20afa0` |
 
-The manifest names `connector_version` 0.19.0 and one artifact, the wheel above, to be served under `https://agntnexus.com/connector/0.19.0/`. The state file carries `pending_version` 0.19.0 and a `reproducible_releases` entry for the source commit, epoch and build backend.
+The manifest named `connector_version` 0.19.0 and one artifact, the wheel above, to be served under `https://agntnexus.com/connector/0.19.0/`. Before the origin served it, 0.20.0 was signed and committed over it, as the state file's `_comment` allows: the committed `connector-release.json` and its signature now name 0.20.0, so the 0.19.0 manifest and signature are recorded here by their digests only. The state file keeps the `reproducible_releases` entry for the source commit, epoch and build backend, which is what keeps the 0.19.0 wheel reproducible. This is the supersession 0.8.0 made of 0.7.0 (agntnexus/agentnexus#79).
 
 Nothing is published, and no read-back of 0.19.0 is recorded here.
 
-`published_version` moves to 0.19.0 only after the installation origin serves that release and the
-read-back is recorded, as it did for 0.18.0.
+Nothing of 0.19.0 is pending. Its wheel stays in the tree as signed evidence, and `published_version` moves from 0.18.0 to 0.20.0 only after the installation origin serves 0.20.0 and the read-back is recorded, as it did for 0.18.0.
