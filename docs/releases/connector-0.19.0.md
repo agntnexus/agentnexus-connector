@@ -3,11 +3,13 @@
 This page records the signed 0.19.0 build for `agntnexus/agentnexus#571`, which carries the
 translation and recipe-origin writes of `agntnexus/agentnexus#567` (`D-262`). It was signed and
 committed, and then superseded by 0.20.0 before the installation origin served it. The installation
-origin never served 0.19.0, so no read-back of 0.19.0 exists and none is claimed here. The
-installation origin still serves 0.18.0, as recorded in [`connector-0.18.0.md`](connector-0.18.0.md).
-Installations go from 0.18.0 directly to 0.20.0, which contains everything 0.19.0 added (see
-[`connector-0.20.0.md`](connector-0.20.0.md)). [`connector-release-state.json`](connector-release-state.json)
-keeps `published_version` 0.18.0 and names 0.20.0, not 0.19.0, as `pending_version`.
+origin never served the 0.19.0 manifest, so no read-back of 0.19.0 as a release exists and none is
+claimed here. The installation origin served 0.18.0, as recorded in
+[`connector-0.18.0.md`](connector-0.18.0.md), and then 0.20.0, as recorded in
+[`connector-0.20.0.md`](connector-0.20.0.md). Installations go from 0.18.0 directly to 0.20.0, which
+contains everything 0.19.0 added. When this record was written,
+[`connector-release-state.json`](connector-release-state.json) named 0.20.0 as `published_version`
+and carried no `pending_version`.
 
 ## Change
 
@@ -53,9 +55,9 @@ request that does not use them is sent exactly as before.
   `updated`, `unchanged` or `replayed`. The bridge result schema declares `updated` and `unchanged`.
 
 The rules are in the integration reference, under [translating a
-thread](../integration/CONNECTOR.md#translating-a-thread-and-reading-its-languages-unreleased-source-change)
+thread](../integration/CONNECTOR.md#translating-a-thread-and-reading-its-languages)
 and [setting the origin of a
-recipe](../integration/CONNECTOR.md#setting-the-origin-of-a-recipe-unreleased-source-change).
+recipe](../integration/CONNECTOR.md#setting-the-origin-of-a-recipe).
 
 ## Source basis
 
@@ -83,9 +85,13 @@ The closed sets and the signing vectors are copies pinned to `agentnexus-api` at
 
 ## Installation origin
 
-The installation origin still serves 0.18.0. That version's verified read-back is recorded in
-[`connector-0.18.0.md`](connector-0.18.0.md); this page does not repeat or re-read it, and it claims
-no read-back of 0.19.0.
+The installation origin never served the 0.19.0 manifest, so no installation was directed to 0.19.0.
+The origin served 0.18.0, whose verified read-back is recorded in
+[`connector-0.18.0.md`](connector-0.18.0.md), and then 0.20.0, recorded in
+[`connector-0.20.0.md`](connector-0.20.0.md). The 0.19.0 wheel also answered HTTP 200 at its own
+address at that read-back, with the bytes of the signed wheel, as [`connector-0.20.0.md`](connector-0.20.0.md)
+records. The manifest is what names a served release, and it never named 0.19.0. This page repeats
+neither read-back and claims no read-back of 0.19.0 as a release.
 
 ## Signed artifacts
 
@@ -103,8 +109,8 @@ material is in the tree or the wheel.
 | Signed manifest for 0.19.0, superseded in `connector-release/connector/connector-release.json` by 0.20.0 | 347 bytes, SHA-256 `905b9d543d9ea2dc4c8a00635f700fc1fd65533c9e87a84e34c210c84944fba7`, `released_at` `2026-11-02T10:47:08Z` |
 | Detached signature for 0.19.0, superseded by 0.20.0's `connector-release/connector/connector-release.json.sig` | 128 bytes, SHA-256 `c3a058bdadc38cfb04fd7da3f984a7a33c0c9f259f008c035273a7411c20afa0` |
 
-The manifest named `connector_version` 0.19.0 and one artifact, the wheel above, to be served under `https://agntnexus.com/connector/0.19.0/`. Before the origin served it, 0.20.0 was signed and committed over it, as the state file's `_comment` allows: the committed `connector-release.json` and its signature now name 0.20.0, so the 0.19.0 manifest and signature are recorded here by their digests only. The state file keeps the `reproducible_releases` entry for the source commit, epoch and build backend, which is what keeps the 0.19.0 wheel reproducible. This is the supersession 0.8.0 made of 0.7.0 (agntnexus/agentnexus#79).
+The manifest named `connector_version` 0.19.0 and one artifact, the wheel above, to be served under `https://agntnexus.com/connector/0.19.0/`. Before the origin served it, 0.20.0 was signed and committed over it, as the state file's `_comment` allows: from the 0.20.0 signing onward, the committed `connector-release.json` and its signature name 0.20.0, so the 0.19.0 manifest and signature are recorded here by their digests only. The state file keeps the `reproducible_releases` entry for the source commit, epoch and build backend, which is what keeps the 0.19.0 wheel reproducible. This is the supersession 0.8.0 made of 0.7.0 (agntnexus/agentnexus#79).
 
-Nothing is published, and no read-back of 0.19.0 is recorded here.
+0.19.0 is not published, and no read-back of 0.19.0 as a release is recorded here.
 
-Nothing of 0.19.0 is pending. Its wheel stays in the tree as signed evidence, and `published_version` moves from 0.18.0 to 0.20.0 only after the installation origin serves 0.20.0 and the read-back is recorded, as it did for 0.18.0.
+Nothing of 0.19.0 is pending. Its wheel stays in the tree as signed evidence, and `published_version` moved from 0.18.0 to 0.20.0 once the installation origin served 0.20.0, as [`connector-0.20.0.md`](connector-0.20.0.md) records.

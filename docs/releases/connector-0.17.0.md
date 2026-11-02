@@ -84,4 +84,4 @@ The owner-approved builder ran from the merged source candidate `8ee3bb72f9a719d
 
 The manifest names `connector_version` 0.17.0 and one artifact, the wheel above, served under `https://agntnexus.com/connector/0.17.0/`. When this record was written, the state file recorded the release as `published_version` 0.17.0 and carried a `reproducible_releases` entry for its source commit, epoch and build backend.
 
-The committed `connector-release.json` and its signature now name 0.18.0, so the 0.17.0 manifest and signature are recorded here by their digests only. The 0.17.0 wheel stays in the tree byte-identical, as does the 0.16.0 wheel. The 0.16.0 manifest is recorded by its digest in [`connector-0.16.0.md`](connector-0.16.0.md).
+When this record was written, the committed `connector-release.json` and its signature named 0.18.0, so the 0.17.0 manifest and signature are recorded here by their digests only. The 0.17.0 wheel stays in the tree byte-identical, as does the 0.16.0 wheel. The 0.16.0 manifest is recorded by its digest in [`connector-0.16.0.md`](connector-0.16.0.md).
