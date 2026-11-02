@@ -1,11 +1,12 @@
 # Connector 0.18.0 — published signed release
 
 This page records the signed and published 0.18.0 release for `agntnexus/agentnexus#503` and
-`agntnexus/agentnexus#500`. The canonical installation origin serves it, as the read-back below
-records. The release state sets `published_version` to 0.18.0. The later signed 0.20.0 is pending and
-is recorded in [`connector-0.20.0.md`](connector-0.20.0.md). The 0.19.0 signed before it was
-superseded and never served, as [`connector-0.19.0.md`](connector-0.19.0.md) records. 0.17.0 remains in the tree as the
-earlier published release, recorded in [`connector-0.17.0.md`](connector-0.17.0.md).
+`agntnexus/agentnexus#500`. The canonical installation origin served it, as the read-back below
+records, and the release state set `published_version` to 0.18.0 when this record was written. The
+later 0.20.0 release, recorded in [`connector-0.20.0.md`](connector-0.20.0.md), does not change this
+record. The 0.19.0 signed before 0.20.0 was superseded before the origin served it, as
+[`connector-0.19.0.md`](connector-0.19.0.md) records. 0.17.0 remains in the tree as the earlier
+published release, recorded in [`connector-0.17.0.md`](connector-0.17.0.md).
 
 ## Change
 
@@ -51,7 +52,7 @@ The 0.17.0 wheel was still served at the same read-back, with HTTP 200, 383427 b
 
 ## Signed artifacts
 
-The owner-approved builder ran from the merged source candidate `ad231e97a9b224e5864d41d2239f2d04d6f7d5cd` (agentnexus-connector#78). It wrote the artifacts below into `connector-release/`, where they are committed. Two builds were byte-identical, the manifest signature verified, and no private key material is in the tree or the wheel. The installation origin serves the same bytes.
+The owner-approved builder ran from the merged source candidate `ad231e97a9b224e5864d41d2239f2d04d6f7d5cd` (agentnexus-connector#78). It wrote the artifacts below into `connector-release/`, where they are committed. Two builds were byte-identical, the manifest signature verified, and no private key material is in the tree or the wheel. The installation origin served the same bytes.
 
 | Artifact | Value |
 | --- | --- |
@@ -62,4 +63,4 @@ The owner-approved builder ran from the merged source candidate `ad231e97a9b224e
 | Signed manifest `connector-release/connector/connector-release.json` | 347 bytes, SHA-256 `b5f2599f4aac3a5d8de4a04a5b6acc6a12a4ef257483a6227c74a70a4314467a`, `released_at` `2026-10-27T18:42:33Z` |
 | Detached signature `connector-release/connector/connector-release.json.sig` | 128 bytes, SHA-256 `9b554c2927af4e0199df13ef2f8c3a64dda194e3f32badbdd53af5184d552069` |
 
-The committed `connector-release.json` and its signature now name the pending 0.20.0, so the 0.18.0 manifest and signature are recorded here by their digests only, from the read-back above. The 0.18.0 wheel stays in the tree byte-identical, served under `https://agntnexus.com/connector/0.18.0/`. The state file records the release as `published_version` 0.18.0 and carries a `reproducible_releases` entry for the source commit, epoch and build backend. The 0.17.0 and 0.16.0 wheels stay in the tree byte-identical. The 0.17.0 manifest and signature are recorded in [`connector-0.17.0.md`](connector-0.17.0.md) by their digests only.
+Since the signing of 0.20.0 on 2026-11-02, the committed `connector-release.json` and its signature have named 0.20.0, so the 0.18.0 manifest and signature are recorded here by their digests only, from the read-back above. The 0.18.0 wheel stays in the tree byte-identical, served under `https://agntnexus.com/connector/0.18.0/`. When this record was written, the state file recorded the release as `published_version` 0.18.0 and carried a `reproducible_releases` entry for the source commit, epoch and build backend. The 0.17.0 and 0.16.0 wheels stay in the tree byte-identical. The 0.17.0 manifest and signature are recorded in [`connector-0.17.0.md`](connector-0.17.0.md) by their digests only.

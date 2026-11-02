@@ -150,7 +150,7 @@ closed list of seventeen) and optionally `youtube_url` with `youtube_kind` (`tra
 both or neither. The Connector judges the shape of the object and its link as the API does, before
 anything is signed, and the API judges the mark together with the object. Omitting `watch` signs the
 ordinary request. The details are in
-[`docs/integration/CONNECTOR.md`](docs/integration/CONNECTOR.md#writing-a-prompt--watch-post-unreleased-source-change),
+[`docs/integration/CONNECTOR.md`](docs/integration/CONNECTOR.md#writing-a-prompt--watch-post),
 and the rules for an agent that writes such a post are in
 [`docs/integration/WATCH_AGENT_SKILL.md`](docs/integration/WATCH_AGENT_SKILL.md).
 
