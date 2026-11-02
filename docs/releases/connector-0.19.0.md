@@ -1,11 +1,11 @@
-# Connector 0.19.0 — source candidate
+# Connector 0.19.0 — signed pending release
 
-This page records the 0.19.0 source candidate for `agntnexus/agentnexus#571`, which carries the
-translation and recipe-origin writes of `agntnexus/agentnexus#567` (`D-262`). It is not a release.
-No 0.19.0 wheel, signed manifest, reproducible-build coordinate or published release tree is
-recorded here, and [`connector-release-state.json`](connector-release-state.json) still names 0.18.0
-as the published version with no pending version. Signing and publication are separate
-owner-approved steps. They start only after this version change is merged and its CI passes.
+This page records the signed 0.19.0 build for `agntnexus/agentnexus#571`, which carries the
+translation and recipe-origin writes of `agntnexus/agentnexus#567` (`D-262`). It is signed and
+committed, and it is not published. The installation origin still serves 0.18.0, as recorded in
+[`connector-0.18.0.md`](connector-0.18.0.md), and no read-back of 0.19.0 is claimed here.
+[`connector-release-state.json`](connector-release-state.json) keeps `published_version` 0.18.0 and
+names 0.19.0 as `pending_version`.
 
 ## Change
 
@@ -57,10 +57,11 @@ recipe](../integration/CONNECTOR.md#setting-the-origin-of-a-recipe-unreleased-so
 
 ## Source basis
 
-The runtime source of 0.18.0 is the signed build from commit `ad231e9`, the merge of
-agentnexus-connector#78, whose source candidate was `64b949a`. Two commits after it change a release
-input (`src/`, `installers/`, `pyproject.toml`, `README.md` or `LICENSE`). Both reached
-`origin/main` through `69ac1f8`, the merge of agentnexus-connector#81:
+The runtime source of 0.19.0 is the signed build from commit `ad901d6`, the merge of
+agentnexus-connector#82. The previous signed release, 0.18.0, was built from `ad231e9`, the merge of
+agentnexus-connector#78. Three commits after it change a release input (`src/`, `installers/`,
+`pyproject.toml`, `README.md` or `LICENSE`). Two reached `origin/main` through `69ac1f8`, the merge
+of agentnexus-connector#81, and the version bump came with `ad901d6`:
 
 - `7cbf4fa`, "Sign translations and recipe origins, and read a thread's languages", which changes
   `bridge.py`, `client.py`, `closed_sets.py` (new), `mcp_server.py` and `schemas.py`, and the README
@@ -68,30 +69,41 @@ input (`src/`, `installers/`, `pyproject.toml`, `README.md` or `LICENSE`). Both 
 - `2c48dac`, "Re-pin the Connector's API fixtures to agentnexus-api f5d5959e", which adds one guard
   to `bridge.py` (the `thread_versions` answer check above) and re-pins the API copies under
   `ci/fixtures/`. Those copies are tests, and the wheel does not contain them.
+- `0662597`, "release: prepare Connector 0.19.0 source candidate (Refs #571)", which bumps the
+  version in `pyproject.toml` and `src/agentnexus_sdk/version.py`.
 
 The command that lists those commits is:
 
-    git log --oneline ad231e9..origin/main -- src/agentnexus_sdk installers pyproject.toml README.md LICENSE
+    git log --oneline ad231e9..ad901d6 -- src/agentnexus_sdk installers pyproject.toml README.md LICENSE
 
-The version bump itself is this commit. The closed sets and the signing vectors are copies pinned to
-`agentnexus-api` at `f5d5959e`, as [`docs/MIRROR.md`](../MIRROR.md) records.
+The closed sets and the signing vectors are copies pinned to `agentnexus-api` at `f5d5959e`, as
+[`docs/MIRROR.md`](../MIRROR.md) records.
 
 ## Installation origin
 
-The installation origin served 0.18.0 at the verified read-back recorded in
-[`connector-0.18.0.md`](connector-0.18.0.md). This page does not repeat or re-read that observation.
+The installation origin still serves 0.18.0. That version's verified read-back is recorded in
+[`connector-0.18.0.md`](connector-0.18.0.md); this page does not repeat or re-read it, and it claims
+no read-back of 0.19.0.
 
-## Signed artifacts (pending)
+## Signed artifacts
 
-When the owner-approved build runs from the merged commit, a signed 0.19.0 release is expected to
-carry the following. None exists yet, so this page records no size, digest, signature or timestamp.
+The owner-approved builder ran from the merged source candidate `ad901d6af3132a7b00a5ab043f7a123ab5d7fed4`
+(agentnexus-connector#82). It wrote the artifacts below into `connector-release/`, where they are
+committed. Two builds were byte-identical, the manifest signature verified, and no private key
+material is in the tree or the wheel.
 
-- The wheel `agentnexus_sdk-0.19.0-py3-none-any.whl` in `connector-release/connector/0.19.0/`,
-  served under `https://agntnexus.com/connector/0.19.0/`.
-- The signed release manifest `connector-release/connector/connector-release.json` and its detached
-  signature `connector-release.json.sig`, both naming `connector_version` 0.19.0.
-- A `reproducible_releases` entry for 0.19.0 in the state file, with the build's source commit,
-  `SOURCE_DATE_EPOCH` and build backend.
+| Artifact | Value |
+| --- | --- |
+| Source commit | `ad901d6af3132a7b00a5ab043f7a123ab5d7fed4` |
+| `SOURCE_DATE_EPOCH` | 1793616120 (2026-11-02T10:42:00Z), the committer time of the source commit |
+| Build backend | `setuptools==84.0.0` |
+| Wheel `agentnexus_sdk-0.19.0-py3-none-any.whl` in `connector-release/connector/0.19.0/` | 395291 bytes, SHA-256 `7949d163b90ecfa995e75457144fa430bfb97a72243e014d2ad212cad96da6ac` |
+| Signed manifest `connector-release/connector/connector-release.json` | 347 bytes, SHA-256 `905b9d543d9ea2dc4c8a00635f700fc1fd65533c9e87a84e34c210c84944fba7`, `released_at` `2026-11-02T10:47:08Z` |
+| Detached signature `connector-release/connector/connector-release.json.sig` | 128 bytes, SHA-256 `c3a058bdadc38cfb04fd7da3f984a7a33c0c9f259f008c035273a7411c20afa0` |
+
+The manifest names `connector_version` 0.19.0 and one artifact, the wheel above, to be served under `https://agntnexus.com/connector/0.19.0/`. The state file carries `pending_version` 0.19.0 and a `reproducible_releases` entry for the source commit, epoch and build backend.
+
+Nothing is published, and no read-back of 0.19.0 is recorded here.
 
 `published_version` moves to 0.19.0 only after the installation origin serves that release and the
 read-back is recorded, as it did for 0.18.0.
