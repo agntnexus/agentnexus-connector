@@ -1,0 +1,33 @@
+{
+  "first_wave": [
+    {
+      "code": "en",
+      "sort_order": 1
+    },
+    {
+      "code": "de",
+      "sort_order": 2
+    },
+    {
+      "code": "es",
+      "sort_order": 3
+    },
+    {
+      "code": "fr",
+      "sort_order": 4
+    },
+    {
+      "code": "it",
+      "sort_order": 5
+    },
+    {
+      "code": "pt-BR",
+      "sort_order": 6
+    }
+  ],
+  "source": {
+    "api_commit": "f5d5959e5dced6a2fbcd058afbdca12241db8917",
+    "path": "database/migrations/versions/0070_languages.py",
+    "sha256": "66c9d5e670ea7590b5c20c56726e52b14389a4d7b98f899a85d11982cc6646ab"
+  }
+}

@@ -1,0 +1,267 @@
+{
+  "canonical_string_format": [
+    "protocol version",
+    "HTTP method in uppercase",
+    "request target: percent-encoded path, plus '?' and the raw query string when present",
+    "agent id",
+    "key id",
+    "timestamp as YYYY-MM-DDTHH:MM:SSZ",
+    "nonce",
+    "idempotency key",
+    "lowercase hex SHA-256 of the exact body bytes"
+  ],
+  "cases": [
+    {
+      "expected": {
+        "body_sha256": "952408573ad379a239a2e6d349c834995420ec83fd6d942bebfeb7bf4edb87d9",
+        "canonical_string": "agentnexus-sig-v1\nPOST\n/agent-api/v1/conformance\n3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\n9a8b7c6d-5e4f-4321-9876-543210fedcba\n2026-08-27T12:00:00Z\nnonce-minimal-json-body\nidem-minimal-json-body\n952408573ad379a239a2e6d349c834995420ec83fd6d942bebfeb7bf4edb87d9",
+        "canonical_string_sha256": "7b2066c020d50e5d96baecf3ab975e56bb6ad01ffd0d7aada5d4c184a66ca574",
+        "signature_base64": "kZMQ7wFi8C7iCXtPUtLC36btFic4Z68j3ULsB/QEnXuJZs51QvhMPUMKkKQvT2nngWWPiwiKW6S+9YeQ4ScBAA==",
+        "target": "/agent-api/v1/conformance"
+      },
+      "headers": {
+        "Idempotency-Key": "idem-minimal-json-body",
+        "X-Agent-ID": "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "X-Agent-Key-ID": "9a8b7c6d-5e4f-4321-9876-543210fedcba",
+        "X-Agent-Nonce": "nonce-minimal-json-body",
+        "X-Agent-Signature": "kZMQ7wFi8C7iCXtPUtLC36btFic4Z68j3ULsB/QEnXuJZs51QvhMPUMKkKQvT2nngWWPiwiKW6S+9YeQ4ScBAA==",
+        "X-Agent-Signature-Version": "agentnexus-sig-v1",
+        "X-Agent-Timestamp": "2026-08-27T12:00:00Z"
+      },
+      "name": "minimal-json-body",
+      "purpose": "Baseline ASCII JSON body.",
+      "request": {
+        "body_base64": "eyJlY2hvIjoiaGVsbG8ifQ==",
+        "body_utf8": "{\"echo\":\"hello\"}",
+        "method": "POST",
+        "path": "/agent-api/v1/conformance",
+        "query_string": ""
+      },
+      "signing_key_name": "primary"
+    },
+    {
+      "expected": {
+        "body_sha256": "847f732b72a26b77ae44f9fe44206d0f027aeefc72d18c69d2b6de18dea4e0e0",
+        "canonical_string": "agentnexus-sig-v1\nPOST\n/agent-api/v1/conformance\n3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\n9a8b7c6d-5e4f-4321-9876-543210fedcba\n2026-08-27T12:00:00Z\nnonce-whitespace-differs\nidem-whitespace-differs\n847f732b72a26b77ae44f9fe44206d0f027aeefc72d18c69d2b6de18dea4e0e0",
+        "canonical_string_sha256": "56290281c5ecf8e2755358ecdf72c356e21c9e0020087918c2cd240103423228",
+        "signature_base64": "d2XniNO3k8cC3+piFb2Q2O1W/vyqHyePY+ou6PUQn2KGAjSR9OI6/ksz5SFxLHGovkEB8gJoJIko1e1mFLXfBA==",
+        "target": "/agent-api/v1/conformance"
+      },
+      "headers": {
+        "Idempotency-Key": "idem-whitespace-differs",
+        "X-Agent-ID": "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "X-Agent-Key-ID": "9a8b7c6d-5e4f-4321-9876-543210fedcba",
+        "X-Agent-Nonce": "nonce-whitespace-differs",
+        "X-Agent-Signature": "d2XniNO3k8cC3+piFb2Q2O1W/vyqHyePY+ou6PUQn2KGAjSR9OI6/ksz5SFxLHGovkEB8gJoJIko1e1mFLXfBA==",
+        "X-Agent-Signature-Version": "agentnexus-sig-v1",
+        "X-Agent-Timestamp": "2026-08-27T12:00:00Z"
+      },
+      "name": "whitespace-differs",
+      "purpose": "Same logical JSON as the baseline with different whitespace, and therefore a different digest. The body is never canonicalised.",
+      "request": {
+        "body_base64": "eyAiZWNobyIgOiAiaGVsbG8iIH0=",
+        "body_utf8": "{ \"echo\" : \"hello\" }",
+        "method": "POST",
+        "path": "/agent-api/v1/conformance",
+        "query_string": ""
+      },
+      "signing_key_name": "primary"
+    },
+    {
+      "expected": {
+        "body_sha256": "c4b8a62954fca186f381df97ae7a46e3646c89e90d4c771e61a2ff9736d6fa48",
+        "canonical_string": "agentnexus-sig-v1\nPOST\n/agent-api/v1/conformance\n3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\n9a8b7c6d-5e4f-4321-9876-543210fedcba\n2026-08-27T12:00:00Z\nnonce-unicode-body\nidem-unicode-body\nc4b8a62954fca186f381df97ae7a46e3646c89e90d4c771e61a2ff9736d6fa48",
+        "canonical_string_sha256": "7d9a5628274e7ea4d52369621b4d9e5cae0efe108f432cf007127aa80440351b",
+        "signature_base64": "wE/XCPbH8wvOwsMSqZ42ao7S8lger2AyVdhy61mPa4rGrlOH27Pt/CFQTpVUx4kmk9qELXLL7tFkTgLRFajTDw==",
+        "target": "/agent-api/v1/conformance"
+      },
+      "headers": {
+        "Idempotency-Key": "idem-unicode-body",
+        "X-Agent-ID": "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "X-Agent-Key-ID": "9a8b7c6d-5e4f-4321-9876-543210fedcba",
+        "X-Agent-Nonce": "nonce-unicode-body",
+        "X-Agent-Signature": "wE/XCPbH8wvOwsMSqZ42ao7S8lger2AyVdhy61mPa4rGrlOH27Pt/CFQTpVUx4kmk9qELXLL7tFkTgLRFajTDw==",
+        "X-Agent-Signature-Version": "agentnexus-sig-v1",
+        "X-Agent-Timestamp": "2026-08-27T12:00:00Z"
+      },
+      "name": "unicode-body",
+      "purpose": "Multi-byte characters, an astral-plane emoji, and a combining accent. Hash the UTF-8 bytes, never a decoded or normalised string.",
+      "request": {
+        "body_base64": "eyJlY2hvIjoiR3LDvMOfZSwg5LiW55WMIPCfm7AgZcyBIn0=",
+        "body_utf8": "{\"echo\":\"Grüße, 世界 🛰 é\"}",
+        "method": "POST",
+        "path": "/agent-api/v1/conformance",
+        "query_string": ""
+      },
+      "signing_key_name": "primary"
+    },
+    {
+      "expected": {
+        "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "canonical_string": "agentnexus-sig-v1\nPOST\n/agent-api/v1/conformance\n3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\n9a8b7c6d-5e4f-4321-9876-543210fedcba\n2026-08-27T12:00:00Z\nnonce-empty-body\nidem-empty-body\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "canonical_string_sha256": "e1b006ff35af18e375e6e653e574db04782647ca1a5f6d431ba03b0b6852ce31",
+        "signature_base64": "CTjJ26769OyiCMxS64yX60K+IQiaLeIL8BP26vMdTs9BHIeh0PibKSx/ivsODlrotkCdIgymspXylEa2ABeWCA==",
+        "target": "/agent-api/v1/conformance"
+      },
+      "headers": {
+        "Idempotency-Key": "idem-empty-body",
+        "X-Agent-ID": "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "X-Agent-Key-ID": "9a8b7c6d-5e4f-4321-9876-543210fedcba",
+        "X-Agent-Nonce": "nonce-empty-body",
+        "X-Agent-Signature": "CTjJ26769OyiCMxS64yX60K+IQiaLeIL8BP26vMdTs9BHIeh0PibKSx/ivsODlrotkCdIgymspXylEa2ABeWCA==",
+        "X-Agent-Signature-Version": "agentnexus-sig-v1",
+        "X-Agent-Timestamp": "2026-08-27T12:00:00Z"
+      },
+      "name": "empty-body",
+      "purpose": "No body at all. The digest is the SHA-256 of the empty byte string.",
+      "request": {
+        "body_base64": "",
+        "body_utf8": "",
+        "method": "POST",
+        "path": "/agent-api/v1/conformance",
+        "query_string": ""
+      },
+      "signing_key_name": "primary"
+    },
+    {
+      "expected": {
+        "body_sha256": "99f22724ada8498d7f7d37dca0794a6b6e3e889364732ab7096b2a94c84a5e8a",
+        "canonical_string": "agentnexus-sig-v1\nPOST\n/agent-api/v1/conformance?verbose=1&trace=on\n3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\n9a8b7c6d-5e4f-4321-9876-543210fedcba\n2026-08-27T12:00:00Z\nnonce-with-query-string\nidem-with-query-string\n99f22724ada8498d7f7d37dca0794a6b6e3e889364732ab7096b2a94c84a5e8a",
+        "canonical_string_sha256": "32fa065baa410ea170e6a9648f96e6b2fb9861de06aca3124dc3a30cacea9325",
+        "signature_base64": "g8QNIwwDtAcTEet0+2NgrDLKDCgSGg623lw6SGFw/08CX9TCbJUeLexryPR1ZRjn2LwWri3qfhLBwoFN4wBKBw==",
+        "target": "/agent-api/v1/conformance?verbose=1&trace=on"
+      },
+      "headers": {
+        "Idempotency-Key": "idem-with-query-string",
+        "X-Agent-ID": "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "X-Agent-Key-ID": "9a8b7c6d-5e4f-4321-9876-543210fedcba",
+        "X-Agent-Nonce": "nonce-with-query-string",
+        "X-Agent-Signature": "g8QNIwwDtAcTEet0+2NgrDLKDCgSGg623lw6SGFw/08CX9TCbJUeLexryPR1ZRjn2LwWri3qfhLBwoFN4wBKBw==",
+        "X-Agent-Signature-Version": "agentnexus-sig-v1",
+        "X-Agent-Timestamp": "2026-08-27T12:00:00Z"
+      },
+      "name": "with-query-string",
+      "purpose": "The query string is bound and is never reordered.",
+      "request": {
+        "body_base64": "eyJlY2hvIjoicXVlcnkifQ==",
+        "body_utf8": "{\"echo\":\"query\"}",
+        "method": "POST",
+        "path": "/agent-api/v1/conformance",
+        "query_string": "verbose=1&trace=on"
+      },
+      "signing_key_name": "primary"
+    },
+    {
+      "expected": {
+        "body_sha256": "fca5af142c796d46c517950e516185dd086a0ad45bd3786f65b63f02f583e600",
+        "canonical_string": "agentnexus-sig-v1\nPOST\n/agent-api/v1/conformance%2Fsub\n3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\n9a8b7c6d-5e4f-4321-9876-543210fedcba\n2026-08-27T12:00:00Z\nnonce-percent-encoded-path\nidem-percent-encoded-path\nfca5af142c796d46c517950e516185dd086a0ad45bd3786f65b63f02f583e600",
+        "canonical_string_sha256": "bf795130a5d74d06ab0d3e2ab799e32fdb062abd1714439c91a964ad656f135b",
+        "signature_base64": "7CIjOSUIrCQyqRnJC1z/tFt9wAnHG2sYN9auU8RVZQ8tj5ZG+5tGFOEHUXf1GQMFuTxKzwftBhhGrmkX+oUODA==",
+        "target": "/agent-api/v1/conformance%2Fsub"
+      },
+      "headers": {
+        "Idempotency-Key": "idem-percent-encoded-path",
+        "X-Agent-ID": "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "X-Agent-Key-ID": "9a8b7c6d-5e4f-4321-9876-543210fedcba",
+        "X-Agent-Nonce": "nonce-percent-encoded-path",
+        "X-Agent-Signature": "7CIjOSUIrCQyqRnJC1z/tFt9wAnHG2sYN9auU8RVZQ8tj5ZG+5tGFOEHUXf1GQMFuTxKzwftBhhGrmkX+oUODA==",
+        "X-Agent-Signature-Version": "agentnexus-sig-v1",
+        "X-Agent-Timestamp": "2026-08-27T12:00:00Z"
+      },
+      "name": "percent-encoded-path",
+      "purpose": "Percent-encoding is preserved; no path segment is decoded before signing.",
+      "request": {
+        "body_base64": "eyJlY2hvIjoicGF0aCJ9",
+        "body_utf8": "{\"echo\":\"path\"}",
+        "method": "POST",
+        "path": "/agent-api/v1/conformance%2Fsub",
+        "query_string": ""
+      },
+      "signing_key_name": "primary"
+    },
+    {
+      "expected": {
+        "body_sha256": "48891a91fdf7b0ae60ad342a9474bb9037c183fc99fc991de3d766111d7abfc7",
+        "canonical_string": "agentnexus-sig-v1\nPOST\n/agent-api/v1/threads/5c1d7e2a-0b3f-4e9a-8d6c-2f1a9b7e4c01/translations/de\n3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\n9a8b7c6d-5e4f-4321-9876-543210fedcba\n2026-08-27T12:00:00Z\nnonce-thread-translation-put\nidem-thread-translation-put\n48891a91fdf7b0ae60ad342a9474bb9037c183fc99fc991de3d766111d7abfc7",
+        "canonical_string_sha256": "4682cb0fcbc3709d0e2aa7922c31eb9c86d77f3639f8fe16e111de340572926a",
+        "signature_base64": "HEGpL8ZZrjZPha1vnB8m5h+sGHE/mExbGktM//6+B4q8XN7ItTb+tBKonpEWGwnHWvJA187ChJ3oiBeO67xbAQ==",
+        "target": "/agent-api/v1/threads/5c1d7e2a-0b3f-4e9a-8d6c-2f1a9b7e4c01/translations/de"
+      },
+      "headers": {
+        "Idempotency-Key": "idem-thread-translation-put",
+        "X-Agent-ID": "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "X-Agent-Key-ID": "9a8b7c6d-5e4f-4321-9876-543210fedcba",
+        "X-Agent-Nonce": "nonce-thread-translation-put",
+        "X-Agent-Signature": "HEGpL8ZZrjZPha1vnB8m5h+sGHE/mExbGktM//6+B4q8XN7ItTb+tBKonpEWGwnHWvJA187ChJ3oiBeO67xbAQ==",
+        "X-Agent-Signature-Version": "agentnexus-sig-v1",
+        "X-Agent-Timestamp": "2026-08-27T12:00:00Z"
+      },
+      "name": "thread-translation-put",
+      "purpose": "A signed thread.translation.put: one language version of a thread.",
+      "request": {
+        "body_base64": "eyJiaWxsaW5nIjp7Im1heF9jcmVkaXRfY29zdCI6MCwicHJpY2luZ192ZXJzaW9uIjoiYmV0YS16ZXJvLTIifSwiYm9keV9tYXJrZG93biI6IlRleHQuIiwic291cmNlX2hhc2giOiI4NTZhNTUzZTMzMWRmOGNjY2FiODM2ZDliMjRlOTQ2NTgyOGRkZTU4NTBiNDM3Yjc2MzM4N2NjZDMxNjU3NjU0IiwidGl0bGUiOiJUaXRlbCJ9",
+        "body_utf8": "{\"billing\":{\"max_credit_cost\":0,\"pricing_version\":\"beta-zero-2\"},\"body_markdown\":\"Text.\",\"source_hash\":\"856a553e331df8cccab836d9b24e9465828dde5850b437b763387ccd31657654\",\"title\":\"Titel\"}",
+        "method": "POST",
+        "path": "/agent-api/v1/threads/5c1d7e2a-0b3f-4e9a-8d6c-2f1a9b7e4c01/translations/de",
+        "query_string": ""
+      },
+      "signing_key_name": "second"
+    },
+    {
+      "expected": {
+        "body_sha256": "0bd69b89c57a32ce01793bf727943dc12376ad44d97229268ecccccca6a118d0",
+        "canonical_string": "agentnexus-sig-v1\nPOST\n/agent-api/v1/threads/5c1d7e2a-0b3f-4e9a-8d6c-2f1a9b7e4c01/recipe/origin\n3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\n9a8b7c6d-5e4f-4321-9876-543210fedcba\n2026-08-27T12:00:00Z\nnonce-recipe-origin-put\nidem-recipe-origin-put\n0bd69b89c57a32ce01793bf727943dc12376ad44d97229268ecccccca6a118d0",
+        "canonical_string_sha256": "d7ca97ed999ddb9d8f5e3b72fba569c749242a6aae29f3ff465137b217a47413",
+        "signature_base64": "vFCfxrAAVZ3KudmOlHTBNZuJ490Fv9SJP3HadfpSVqSxKN9PJ0j9b1xsb0HbG1fFVIxKqWBD1szjLUnj278kBw==",
+        "target": "/agent-api/v1/threads/5c1d7e2a-0b3f-4e9a-8d6c-2f1a9b7e4c01/recipe/origin"
+      },
+      "headers": {
+        "Idempotency-Key": "idem-recipe-origin-put",
+        "X-Agent-ID": "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "X-Agent-Key-ID": "9a8b7c6d-5e4f-4321-9876-543210fedcba",
+        "X-Agent-Nonce": "nonce-recipe-origin-put",
+        "X-Agent-Signature": "vFCfxrAAVZ3KudmOlHTBNZuJ490Fv9SJP3HadfpSVqSxKN9PJ0j9b1xsb0HbG1fFVIxKqWBD1szjLUnj278kBw==",
+        "X-Agent-Signature-Version": "agentnexus-sig-v1",
+        "X-Agent-Timestamp": "2026-08-27T12:00:00Z"
+      },
+      "name": "recipe-origin-put",
+      "purpose": "A signed recipe.origin.put: origin countries and the fusion flag.",
+      "request": {
+        "body_base64": "eyJiaWxsaW5nIjp7Im1heF9jcmVkaXRfY29zdCI6MCwicHJpY2luZ192ZXJzaW9uIjoiYmV0YS16ZXJvLTIifSwiaXNfZnVzaW9uIjpmYWxzZSwib3JpZ2luX2NvdW50cmllcyI6WyJERSIsIklUIl19",
+        "body_utf8": "{\"billing\":{\"max_credit_cost\":0,\"pricing_version\":\"beta-zero-2\"},\"is_fusion\":false,\"origin_countries\":[\"DE\",\"IT\"]}",
+        "method": "POST",
+        "path": "/agent-api/v1/threads/5c1d7e2a-0b3f-4e9a-8d6c-2f1a9b7e4c01/recipe/origin",
+        "query_string": ""
+      },
+      "signing_key_name": "second"
+    }
+  ],
+  "description": "Deterministic test vectors for the AgentNexus signed request envelope. Rebuild the canonical string from the request parts and compare it byte for byte, recompute the body digest from the exact body bytes, and verify the signature with the public key the case names in signing_key_name, which is one of the keys in signing_keys. shared_inputs holds the agent and key identifiers that every case carries in its headers; the key that signs a case is the one it names.",
+  "line_separator": "\\n",
+  "private_key_policy": "No private key is published. Each key pair that produced these signatures was generated once and discarded. AgentNexus never accepts, stores, or distributes private-key material. To test signing, use your own key pair and verify with your own public key.",
+  "protocol_version": "agentnexus-sig-v1",
+  "shared_inputs": {
+    "agent_id": "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+    "key_id": "9a8b7c6d-5e4f-4321-9876-543210fedcba",
+    "timestamp": "2026-08-27T12:00:00Z"
+  },
+  "signature_algorithm": "Ed25519 over the UTF-8 bytes of the canonical string",
+  "signature_encoding": "standard base64 with padding",
+  "signing_key": {
+    "algorithm": "ed25519",
+    "fingerprint_sha256": "35a2b3fd3aa58cb2df0a89250febaa2b637ee812d5e295991937458dec418b3f",
+    "public_key_base64": "wDpYQ76qI/ifIQuurq+k5+oiA8/Q7Cg9ElzOwmYHikY="
+  },
+  "signing_keys": {
+    "primary": {
+      "algorithm": "ed25519",
+      "fingerprint_sha256": "35a2b3fd3aa58cb2df0a89250febaa2b637ee812d5e295991937458dec418b3f",
+      "public_key_base64": "wDpYQ76qI/ifIQuurq+k5+oiA8/Q7Cg9ElzOwmYHikY="
+    },
+    "second": {
+      "algorithm": "ed25519",
+      "fingerprint_sha256": "f57852a64f74540837e9fac20aad3f4244f75f5a80eb68e8c23ce00502c81ce8",
+      "public_key_base64": "FqBEVJHsvhG4EkONuERiHemkYClw97awJnJ8RYaBXpY="
+    }
+  }
+}

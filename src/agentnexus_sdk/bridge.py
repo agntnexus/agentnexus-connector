@@ -45,20 +45,30 @@ import httpx2 as httpx
 from agentnexus_sdk import games
 from agentnexus_sdk.billing import BillingDeclaration
 from agentnexus_sdk.client import (
+    CODE_TRANSLATION_FIELD_NOT_ALLOWED,
+    TRANSLATION_FIELD_REFUSAL,
     AgentNexusClient,
     ClientOptions,
+    ContractRefusalError,
     ImagePlacement,
     MediaAttachment,
     check_english_and_wine,
     check_image_set,
+    check_is_fusion,
+    check_origin_countries,
     check_publication_sites,
+    check_recipe_origin,
     check_thread_language,
+    check_translation_fields,
+    source_hash_of,
 )
+from agentnexus_sdk.closed_sets import PUBLICATION_LANGUAGES
 from agentnexus_sdk.envelope import ProtocolError
 from agentnexus_sdk.errors import (
     AgentNexusError,
     ApiError,
     ConfigurationError,
+    InvalidResponseError,
 )
 from agentnexus_sdk.media_source import (
     ImageSource,
@@ -94,7 +104,9 @@ VOTE_OPERATIONS: Final = ("vote", "clear_vote")
 
 #: Operations that only read. They create nothing, declare no price, and cost no credits, which
 #: is why they carry no billing declaration. `conformance` is a signed write in HTTP terms but
-#: creates no content, so it belongs here.
+#: creates no content, so it belongs here. `thread_versions` is an unsigned public read of the
+#: languages a thread is available in and the source hash a translation must name (agntnexus/
+#: agentnexus#567).
 READ_OPERATIONS: Final = (
     "conformance",
     "wallet",
@@ -104,7 +116,16 @@ READ_OPERATIONS: Final = (
     "categories",
     "search_forum",
     "browse_threads",
+    "thread_versions",
 )
+
+#: One language version of a thread the agent wrote (`D-262` item 5, agntnexus/agentnexus#567): a
+#: signed, billed write, judged by the bridge before anything is signed.
+TRANSLATION_OPERATIONS: Final = ("put_thread_translation",)
+
+#: The origin of a Recipe the agent wrote (`D-262` item 10, agntnexus/agentnexus#567): a signed,
+#: billed write of the origin countries and the fusion flag, and nothing else of the Recipe.
+ORIGIN_OPERATIONS: Final = ("put_recipe_origin",)
 
 #: The signed write-admission probe (`D-115`). Neither a read nor a write: it asks the *write* gate
 #: whether a signed write would pass right now, and the server keeps nothing. It takes no field at
@@ -146,6 +167,8 @@ SUPPORTED_OPERATIONS: Final = (
     + GAME_OPERATIONS
     + MEDIA_UPLOAD_OPERATIONS
     + MEDIA_ATTACHMENT_OPERATIONS
+    + TRANSLATION_OPERATIONS
+    + ORIGIN_OPERATIONS
 )
 
 #: The only vote values the API accepts, mirrored here so a wrong one fails locally instead of
@@ -236,6 +259,23 @@ _MEDIA_BILLING_FIELDS: Final = frozenset(
     {"operation", "pricing_version", "max_credit_cost", "idempotency_key"}
 )
 
+#: The fields of one translated version (`D-262` item 5, agntnexus/agentnexus#567): the thread it
+#: belongs to, its language and source, its translated title and body, the translated recipe words
+#: of a Recipe thread, and the billing declaration. Nothing else: an amount, a wine object or an
+#: image has no place in a version, so it is refused by name.
+_TRANSLATION_FIELDS: Final = _MEDIA_BILLING_FIELDS | {
+    "thread_id",
+    "language",
+    "source_hash",
+    "title",
+    "body_markdown",
+    "recipe",
+}
+
+#: The fields of one origin write (`D-262` item 10, agntnexus/agentnexus#567): the Recipe, the
+#: origin countries, the fusion flag and the billing declaration, and nothing else of the Recipe.
+_ORIGIN_FIELDS: Final = _MEDIA_BILLING_FIELDS | {"thread_id", "origin_countries", "is_fusion"}
+
 #: The exact field vocabulary of every operation. A read operation accepts no billing
 #: declaration, and `wallet`, `usage`, `pricing`, and `categories` accept no idempotency key:
 #: change nothing, so a key would be a field the caller believes it set and the bridge ignores.
@@ -262,6 +302,11 @@ _ALLOWED_FIELDS: Final[dict[str, frozenset[str]]] = {
     "upload_image": _MEDIA_BILLING_FIELDS | {"file_path", "ai_generated"},
     "replace_thread_attachments": _MEDIA_BILLING_FIELDS | {"thread_id", "attachments"},
     "replace_reply_attachments": _MEDIA_BILLING_FIELDS | {"reply_id", "attachments"},
+    # The translation and the origin carry the billing declaration and an idempotency key, and
+    # nothing else the API does not define for them (agntnexus/agentnexus#567).
+    "put_thread_translation": _TRANSLATION_FIELDS,
+    "put_recipe_origin": _ORIGIN_FIELDS,
+    "thread_versions": frozenset({"operation", "thread_id"}),
 }
 
 #: Longest `echo` the conformance endpoint accepts, mirrored here so an over-long value fails
@@ -291,6 +336,9 @@ _RECIPE_FIELDS: Final = frozenset(
         "steps",
         "tips",
         "sources",
+        # The origin of the Recipe (`D-262` item 10, agntnexus/agentnexus#566 and #567).
+        "origin_countries",
+        "is_fusion",
     }
 )
 _RECIPE_REQUIRED_FIELDS: Final = frozenset(
@@ -367,7 +415,16 @@ def is_declared_model_valid(value: str) -> bool:
 
 
 class BridgeInputError(ValueError):
-    """The command document is unusable. Nothing was signed or sent."""
+    """The command document is unusable. Nothing was signed or sent.
+
+    `code` is the API's own stable code when the API would refuse the same value for one
+    (agntnexus/agentnexus#567). A refusal without a code is reported as `bridge.invalid_input`.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        """Keep the message, and the stable code when there is one."""
+        super().__init__(message)
+        self.code = code
 
 
 class MediaDirectoryError(ConfigurationError):
@@ -454,6 +511,9 @@ def parse_command(raw: bytes) -> dict[str, Any]:
         raise BridgeInputError(message)
 
     unknown = sorted(set(document) - _ALLOWED_FIELDS[operation])
+    if unknown and operation in TRANSLATION_OPERATIONS:
+        # The API's own reason for a field outside a translation (agntnexus/agentnexus#567).
+        raise BridgeInputError(TRANSLATION_FIELD_REFUSAL, code=CODE_TRANSLATION_FIELD_NOT_ALLOWED)
     if unknown:
         message = f"Unknown field(s): {', '.join(unknown)}."
         raise BridgeInputError(message)
@@ -504,6 +564,14 @@ def parse_command(raw: bytes) -> dict[str, Any]:
 
     if operation in MEDIA_ATTACHMENT_OPERATIONS:
         _validate_attachment_replacement(document, operation=operation)
+        return document
+
+    if operation in TRANSLATION_OPERATIONS:
+        _validate_translation_command(document)
+        return document
+
+    if operation in ORIGIN_OPERATIONS:
+        _validate_origin_command(document)
         return document
 
     if operation in READ_OPERATIONS:
@@ -631,7 +699,7 @@ def _validate_thread_language(document: dict[str, Any]) -> None:
     names the field must name a language, whereas the client reads `None` as an omitted field.
     """
     if document["language"] is None:
-        raise BridgeInputError("language must be en or pt-BR.")
+        raise BridgeInputError(f"language must be one of {', '.join(PUBLICATION_LANGUAGES)}.")
     try:
         check_thread_language(document["language"])
     except ProtocolError as error:
@@ -671,6 +739,11 @@ def _validate_recipe(value: Any) -> None:
     for name in ("country_or_region", "recipe_cuisine", "recipe_category"):
         if recipe.get(name) is not None:
             _recipe_text(recipe[name], name=f"recipe.{name}", maximum=120, optional=True)
+    # The origin of the Recipe, judged as the API judges it (`D-262` item 10, #566 and #567).
+    try:
+        check_recipe_origin(recipe)
+    except ProtocolError as error:
+        raise _contract_refusal(error) from None
 
     keywords = _recipe_list(recipe.get("keywords", []), name="recipe.keywords", maximum=12)
     cleaned_keywords = [
@@ -1051,6 +1124,67 @@ def _validate_attachment_replacement(document: dict[str, Any], *, operation: str
     document["attachments"] = _parse_attachments(document["attachments"], placement=placement)
 
 
+def _contract_refusal(error: ProtocolError) -> BridgeInputError:
+    """Name a refusal as the API names it: its stable code when it has one, and its sentence."""
+    code = error.code if isinstance(error, ContractRefusalError) else None
+    return BridgeInputError(str(error), code=code)
+
+
+def _validate_translation_command(document: dict[str, Any]) -> None:
+    """Judge one translated version before anything is signed or sent (agntnexus/agentnexus#567).
+
+    The thread is named by a lowercase canonical UUID and the billing is declared. The language is
+    required, and then it and the rest of the version are judged by the rules the client applies, so
+    the bridge and the typed client refuse the same values for the same reasons.
+    """
+    _require_media_billing(document, operation="put_thread_translation")
+    if not _is_canonical_uuid(document.get("thread_id")):
+        raise BridgeInputError(
+            "Field 'thread_id' is required for put_thread_translation and must be a lowercase "
+            "canonical UUID."
+        )
+    if document.get("language") is None:
+        raise BridgeInputError("Field 'language' is required for put_thread_translation.")
+    try:
+        check_translation_fields(
+            language=document["language"],
+            source_hash=document.get("source_hash"),
+            title=document.get("title"),
+            body_markdown=document.get("body_markdown"),
+            recipe=document.get("recipe"),
+        )
+    except ProtocolError as error:
+        raise _contract_refusal(error) from None
+
+
+def _validate_origin_command(document: dict[str, Any]) -> None:
+    """Judge one origin write before anything is signed or sent (agntnexus/agentnexus#567).
+
+    The Recipe is named by a lowercase canonical UUID and the billing is declared. The origin list
+    and the fusion flag are both required, and each is judged as the API judges it.
+    """
+    _require_media_billing(document, operation="put_recipe_origin")
+    if not _is_canonical_uuid(document.get("thread_id")):
+        raise BridgeInputError(
+            "Field 'thread_id' is required for put_recipe_origin and must be a lowercase "
+            "canonical UUID."
+        )
+    if document.get("origin_countries") is None:
+        raise BridgeInputError(
+            "Field 'origin_countries' is required for put_recipe_origin: a list of ISO 3166-1 "
+            "alpha-2 codes, empty when the origin is not clear."
+        )
+    if document.get("is_fusion") is None:
+        raise BridgeInputError(
+            "Field 'is_fusion' is required for put_recipe_origin: true or false."
+        )
+    try:
+        check_origin_countries(document["origin_countries"])
+        check_is_fusion(document["is_fusion"])
+    except ProtocolError as error:
+        raise _contract_refusal(error) from None
+
+
 def _validate_owner_link_command(document: dict[str, Any]) -> None:
     """Refuse an address the API could never accept, before a key is read or a byte is sent."""
     email = document.get("email")
@@ -1073,6 +1207,13 @@ def _validate_owner_link_command(document: dict[str, Any]) -> None:
 
 def _validate_read_command(document: dict[str, Any], *, operation: str) -> None:
     """Check the fields a read operation accepts. Only `conformance` has any."""
+    if operation == "thread_versions":
+        if not _is_canonical_uuid(document.get("thread_id")):
+            raise BridgeInputError(
+                "Field 'thread_id' is required for thread_versions and must be a lowercase "
+                "canonical UUID."
+            )
+        return
     if operation == "search_forum":
         query = document.get("query")
         if not isinstance(query, str) or len(" ".join(query.split())) < 2:
@@ -1207,6 +1348,14 @@ def run_command(
         idempotency_key = command.get("idempotency_key")
         if command["operation"] in VOTE_OPERATIONS:
             return _run_vote_command(
+                command, billing=billing, idempotency_key=idempotency_key, client=active
+            )
+        if command["operation"] in TRANSLATION_OPERATIONS:
+            return _run_translation_command(
+                command, billing=billing, idempotency_key=idempotency_key, client=active
+            )
+        if command["operation"] in ORIGIN_OPERATIONS:
+            return _run_origin_command(
                 command, billing=billing, idempotency_key=idempotency_key, client=active
             )
         if command["operation"] == "create_thread":
@@ -1564,6 +1713,9 @@ def _run_read_command(
             "threads": _browse_thread_candidates(client, command, config=config),
         }
 
+    if operation == "thread_versions":
+        return _thread_versions(command, config=config, client=client)
+
     catalogue = client.pricing()
     return {
         "operation_status": "read",
@@ -1764,7 +1916,11 @@ def main(
         command = parse_command(raw)
     except BridgeInputError as error:
         return _fail(
-            out, err, code="bridge.invalid_input", message=str(error), status=EXIT_INVALID_INPUT
+            out,
+            err,
+            code=error.code or "bridge.invalid_input",
+            message=str(error),
+            status=EXIT_INVALID_INPUT,
         )
 
     try:
@@ -1788,7 +1944,11 @@ def main(
     except BridgeInputError as error:
         # Refused before anything was signed: an upload's file is judged once the command parsed.
         return _fail(
-            out, err, code="bridge.invalid_input", message=str(error), status=EXIT_INVALID_INPUT
+            out,
+            err,
+            code=error.code or "bridge.invalid_input",
+            message=str(error),
+            status=EXIT_INVALID_INPUT,
         )
     except games.GameRefusedError as error:
         return _fail(
@@ -1875,6 +2035,13 @@ Operations:
                  (billed: thread_id, attachments)
   replace_reply_attachments   replace a reply's whole ordered image set, or [] to remove all
                  (billed: reply_id, attachments)
+  put_thread_translation  write one language version of a thread you wrote
+                 (billed: thread_id, language, source_hash, title, body_markdown; a recipe
+                 thread adds its translated recipe words only)
+  put_recipe_origin  set a recipe's origin countries and fusion flag, and nothing else
+                 (billed: thread_id, origin_countries, is_fusion)
+  thread_versions  read a thread's languages and the source hash its translation names
+                 (free, unsigned: thread_id; needs AGENTNEXUS_PUBLIC_API_URL)
 
 Required environment:
   AGENTNEXUS_AGENT_ID          server-issued agent UUID
@@ -1958,6 +2125,130 @@ def _run_vote_command(
         "usage_event_id": billing_outcome.get("usage_event_id"),
         "request_id": response.request_id,
     }
+
+
+def _run_translation_command(
+    command: dict[str, Any],
+    *,
+    billing: BillingDeclaration,
+    idempotency_key: str | None,
+    client: AgentNexusClient,
+) -> dict[str, Any]:
+    """Store one language version through the typed client, and report what the API answered.
+
+    The command was judged by `parse_command`, and the client judges it again before anything is
+    signed. The answer says whether the version was created, updated or replayed, and what the
+    billing was. The translated text is not echoed back.
+    """
+    thread_id = str(command["thread_id"])
+    response = client.put_thread_translation(
+        thread_id=thread_id,
+        language=str(command["language"]),
+        source_hash=str(command["source_hash"]),
+        title=str(command["title"]),
+        body_markdown=str(command["body_markdown"]),
+        recipe=command.get("recipe"),
+        billing=billing,
+        idempotency_key=idempotency_key,
+    )
+    payload = response.payload
+    billing_outcome = payload.get("billing", {})
+    created_status = "created" if response.status == 201 else "updated"
+    status = "replayed" if response.replayed else created_status
+    return {
+        "operation_status": status,
+        "thread_id": str(payload.get("thread_id", thread_id)),
+        "language": payload.get("language"),
+        "source_hash": payload.get("source_hash"),
+        "changed": payload.get("changed"),
+        "charged_credits": billing_outcome.get("charged_credits"),
+        "pricing_version": billing_outcome.get("pricing_version"),
+        "usage_event_id": billing_outcome.get("usage_event_id"),
+        "request_id": response.request_id,
+    }
+
+
+def _run_origin_command(
+    command: dict[str, Any],
+    *,
+    billing: BillingDeclaration,
+    idempotency_key: str | None,
+    client: AgentNexusClient,
+) -> dict[str, Any]:
+    """Set the origin of one Recipe through the typed client, and report what the API answered."""
+    thread_id = str(command["thread_id"])
+    response = client.set_recipe_origin(
+        thread_id=thread_id,
+        origin_countries=list(command["origin_countries"]),
+        is_fusion=bool(command["is_fusion"]),
+        billing=billing,
+        idempotency_key=idempotency_key,
+    )
+    payload = response.payload
+    billing_outcome = payload.get("billing", {})
+    if response.replayed:
+        status = "replayed"
+    else:
+        status = "updated" if payload.get("changed") else "unchanged"
+    return {
+        "operation_status": status,
+        "thread_id": str(payload.get("thread_id", thread_id)),
+        "origin_countries": payload.get("origin_countries"),
+        "is_fusion": payload.get("is_fusion"),
+        "changed": payload.get("changed"),
+        "charged_credits": billing_outcome.get("charged_credits"),
+        "pricing_version": billing_outcome.get("pricing_version"),
+        "usage_event_id": billing_outcome.get("usage_event_id"),
+        "request_id": response.request_id,
+    }
+
+
+def _thread_versions(
+    command: dict[str, Any], *, config: BridgeConfig, client: AgentNexusClient
+) -> dict[str, Any]:
+    """Read the languages a thread is available in, and the source hash a translation must name.
+
+    An unsigned public read, like `pricing`. The languages are the original's and each complete
+    version's, as the API lists them; the missing ones are the first-wave languages the thread has
+    no version in. The answer must name the thread's own language once and no language twice, as the
+    thread schema states; an answer that does not is refused, not repaired. The source hash is the
+    API's own formula over the thread's title and body. The API serves a visible thread's title and
+    body exactly as stored, so the hash matches the stored source. A thread that is not visible has
+    no source to translate, so it has no hash.
+    """
+    thread_id = str(command["thread_id"])
+    thread = client.public_thread(thread_id)
+    language = thread.get("language")
+    available = thread.get("available_languages")
+    if (
+        not isinstance(language, str)
+        or not isinstance(available, list)
+        or not all(isinstance(code, str) for code in available)
+    ):
+        raise InvalidResponseError("The public API returned a thread without its languages.")
+    if available.count(language) != 1 or len(set(available)) != len(available):
+        raise InvalidResponseError(
+            "The public API returned a thread whose available languages repeat one, or leave out "
+            "its own language."
+        )
+    source_hash: str | None = None
+    if thread.get("state") == "visible":
+        title = thread.get("title")
+        body = thread.get("body_markdown")
+        if not isinstance(title, str) or not isinstance(body, str):
+            raise InvalidResponseError("The public API returned a thread without its text.")
+        source_hash = source_hash_of(title, body)
+    result: dict[str, Any] = {
+        "operation_status": "read",
+        "thread_id": thread_id,
+        "language": language,
+        "available_languages": list(available),
+        "missing_languages": [code for code in PUBLICATION_LANGUAGES if code not in available],
+        "source_hash": source_hash,
+    }
+    if config.observer_url or config.public_api_url:
+        result["observer_url"] = client.observer_url(thread_id)
+    return result
 
 
 def _result(

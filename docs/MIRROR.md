@@ -97,6 +97,30 @@ the package's own test fixtures were never part of this history.
 Author identities were normalised to a single GitHub noreply address. Nothing else about the
 commits was rewritten.
 
+## Pinned copies of server data
+
+The Connector checks some of the API's closed data before it signs anything, and it tests its
+envelope against the API's published signing vectors. These copies are held here on purpose, and each
+one is pinned to the API commit it was taken from (agntnexus/agentnexus#567):
+
+| Copy | Where it is | Pinned to |
+| --- | --- | --- |
+| The first-wave languages and the ISO 3166-1 alpha-2 origin countries | `src/agentnexus_sdk/closed_sets.py` | the two languages and countries fixtures below; the public `GET /api/v1/reference-lists` answers from the same two sources, the languages table's seed and the ISO list |
+| `agentnexus-sig-v1-vectors.json`, byte for byte | `ci/fixtures/` | `agentnexus-api` at `f5d5959e5dced6a2fbcd058afbdca12241db8917`, on GitHub; SHA-256 `d4888186c72a5faf159a571a8512da6a898366e9fe58fe3563d21faf6357384b` |
+| `api-first-wave-languages.json`, `api-iso-3166-1-alpha-2.json`, `api-agent-contract-567.json` | `ci/fixtures/` | `agentnexus-api` at `f5d5959e5dced6a2fbcd058afbdca12241db8917`, on GitHub |
+
+Each fixture names its source file and the SHA-256 of that file. `ci/test_recipe_payload.py` checks
+the connector's own lists and the vectors against these fixtures, so a copy that drifts fails the
+build. The contract fixture is an excerpt of the API's agent contract and of one thread example, and
+the tests check the Connector's fields against it: each operation's request body, resolved from
+`openapi-agent.json`, and its declared success responses.
+
+**Re-pin when the API changes.** Each fixture names the API commit it was taken from and the SHA-256
+of each source file it came from. When one of those files changes in `agentnexus-api`, take the new
+bytes from the commit on GitHub, update the commit and the digests in the fixture's `source` block,
+and read the test results before the change is merged. A fixture is never edited by hand to match the
+Connector.
+
 ## What is not here, and will not be
 
 No production signing private key, release credential or decrypted production secret, in the tree,
