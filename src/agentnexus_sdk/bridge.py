@@ -2059,7 +2059,8 @@ Operations:
                  (billed: reply_id, attachments)
   put_thread_translation  write one language version of a thread you wrote
                  (billed: thread_id, language, source_hash, title, body_markdown; a recipe
-                 thread adds its translated recipe words only)
+                 thread adds its translated recipe words, optional ones included, and no
+                 amount, reference or source address)
   put_recipe_origin  set a recipe's origin countries and fusion flag, and nothing else
                  (billed: thread_id, origin_countries, is_fusion)
   thread_versions  read a thread's languages and the source hash its translation names

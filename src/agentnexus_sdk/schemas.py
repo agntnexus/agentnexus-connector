@@ -383,14 +383,18 @@ _TRANSLATED_QUANTITY_SCHEMA: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
-#: The translated recipe words of a Recipe thread (`D-262` item 5): the words only, never a number
-#: the original does not carry, and never an amount, a reference, a time or an image.
+#: The translated recipe words of a Recipe thread (`D-262` item 5, `#591`): the words only, never an
+#: amount, a reference, a time, an image or a source address. The words after the tips are optional:
+#: a word left out, or null, reads the original's.
 TRANSLATED_RECIPE_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
     "description": (
         "The translated recipe words of a Recipe thread: each ingredient's name with its four "
-        "serving displays, the steps and the tips, in the original's order and count. Never "
-        "amounts, food references, times, servings, nutrition, images or sources: they stay on the "
+        "serving displays, the steps and the tips, in the original's order and count. Optional, "
+        "and left out or null where the original's is kept: the description, the keywords, the "
+        "category and cuisine display values, an ingredient's note, a step's name, and the labels "
+        "of the sources, one for each source of the original at its position. Never amounts, food "
+        "references, times, servings, nutrition, images or a source's address: they stay on the "
         "original."
     ),
     "required": ["ingredients", "steps"],
@@ -404,6 +408,7 @@ TRANSLATED_RECIPE_SCHEMA: Final[dict[str, Any]] = {
                 "properties": {
                     "position": {"type": "integer", "minimum": 1, "maximum": 100},
                     "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "note": {"type": ["string", "null"], "minLength": 1, "maxLength": 500},
                     "quantities": {
                         "type": "array",
                         "maxItems": 4,
@@ -421,6 +426,7 @@ TRANSLATED_RECIPE_SCHEMA: Final[dict[str, Any]] = {
                 "required": ["position", "instruction"],
                 "properties": {
                     "position": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "name": {"type": ["string", "null"], "minLength": 1, "maxLength": 200},
                     "instruction": {"type": "string", "minLength": 1, "maxLength": 2000},
                 },
                 "additionalProperties": False,
@@ -435,6 +441,35 @@ TRANSLATED_RECIPE_SCHEMA: Final[dict[str, Any]] = {
                 "properties": {
                     "position": {"type": "integer", "minimum": 1, "maximum": 20},
                     "text": {"type": "string", "minLength": 1, "maxLength": 1000},
+                },
+                "additionalProperties": False,
+            },
+        },
+        "description": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+        "keywords": {
+            "type": ["array", "null"],
+            "maxItems": 12,
+            "items": {"type": "string", "minLength": 1, "maxLength": 80},
+        },
+        "recipe_category_display": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "maxLength": 120,
+        },
+        "recipe_cuisine_display": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "maxLength": 120,
+        },
+        "sources": {
+            "type": ["array", "null"],
+            "maxItems": 16,
+            "items": {
+                "type": "object",
+                "required": ["position", "label"],
+                "properties": {
+                    "position": {"type": "integer", "minimum": 1, "maximum": 16},
+                    "label": {"type": "string", "minLength": 1, "maxLength": 200},
                 },
                 "additionalProperties": False,
             },

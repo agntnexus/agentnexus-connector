@@ -75,7 +75,7 @@
       ],
       "request_body": {
         "additionalProperties": false,
-        "description": "The body of one translated version, with the billing declaration that prices it.\n\n``source_hash`` names the source the translation was made from. The server compares it with the\noriginal's current hash and refuses a mismatch, so a translation of an old source is never\nstored.\nNothing else of the original is accepted from the version (amounts, food references, times,\nservings, nutrition, images, description, category, cuisine, keywords and sources all stay on\nit).",
+        "description": "The body of one translated version, with the billing declaration that prices it.\n\n``source_hash`` names the source the translation was made from. The server compares it with the\noriginal's current hash and refuses a mismatch, so a translation of an old source is never\nstored.\nNothing else of the original is accepted from the version: amounts, food references, times,\nservings, nutrition and images stay on it, and so do the category and cuisine slugs and the\nsource addresses. The words of ``recipe`` that a version may carry are described there.",
         "properties": {
           "billing": {
             "additionalProperties": false,
@@ -113,17 +113,41 @@
             "anyOf": [
               {
                 "additionalProperties": false,
-                "description": "The recipe words of a version: ingredients, steps and tips, in the original's order.",
+                "description": "The recipe words of a version: its ingredients, steps and tips, in the original's order.\n\nThe words after them are optional. A word left out is read from the original, and so is a list\nleft out as a whole. A list that is given keeps the original's count: the keywords are given in\nthe original's order, one for each keyword of the original, and the sources keep its positions.",
                 "properties": {
+                  "description": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The translated description of the Recipe, with the original's numbers. Absent or null reads the original's description.",
+                    "title": "Description"
+                  },
                   "ingredients": {
                     "items": {
                       "additionalProperties": false,
-                      "description": "One translated ingredient: its position, its name and its four display strings.",
+                      "description": "One translated ingredient: its position, its name, its note and its four display strings.",
                       "properties": {
                         "name": {
                           "description": "The translated ingredient name.",
                           "title": "Name",
                           "type": "string"
+                        },
+                        "note": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The translated note of the ingredient, with the original's numbers. Absent or null reads the original's note. A note the original does not have is refused.",
+                          "title": "Note"
                         },
                         "position": {
                           "maximum": 100,
@@ -173,15 +197,103 @@
                     "title": "Ingredients",
                     "type": "array"
                   },
+                  "keywords": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 12,
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The translated keywords, in the original's order: one for each keyword of the original. Absent or null reads the original's keywords.",
+                    "title": "Keywords"
+                  },
+                  "recipe_category_display": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The display value of the Recipe's category in this language. The English category slug stays the identity and is never sent. Absent or null reads the original's value.",
+                    "title": "Recipe Category Display"
+                  },
+                  "recipe_cuisine_display": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The display value of the Recipe's cuisine in this language. The English cuisine slug stays the identity and is never sent. Absent or null reads the original's value.",
+                    "title": "Recipe Cuisine Display"
+                  },
+                  "sources": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "additionalProperties": false,
+                          "description": "One translated source: its position and its label. The address stays the original's.",
+                          "properties": {
+                            "label": {
+                              "description": "The translated label of the source, with the original's numbers.",
+                              "title": "Label",
+                              "type": "string"
+                            },
+                            "position": {
+                              "maximum": 16,
+                              "minimum": 1,
+                              "title": "Position",
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "position",
+                            "label"
+                          ],
+                          "title": "TranslatedSourceInput",
+                          "type": "object"
+                        },
+                        "maxItems": 16,
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The translated labels of the Recipe's sources, one for each source of the original, with its position. Absent or null reads the original's labels.",
+                    "title": "Sources"
+                  },
                   "steps": {
                     "items": {
                       "additionalProperties": false,
-                      "description": "One translated step: its position and its instruction.",
+                      "description": "One translated step: its position, its name and its instruction.",
                       "properties": {
                         "instruction": {
                           "description": "The translated instruction, with the original's numbers.",
                           "title": "Instruction",
                           "type": "string"
+                        },
+                        "name": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The translated name of the step, with the original's numbers. Absent or null reads the original's name. A name the original does not have is refused.",
+                          "title": "Name"
                         },
                         "position": {
                           "maximum": 100,
@@ -304,11 +416,11 @@
     ]
   },
   "source": {
-    "api_commit": "f32e5d9244980fb0f87911c31113de1b530c3441",
+    "api_commit": "8829cd09c4f60f515db115df48e965ec95543430",
     "api_commit_on_github": true,
     "files": {
       "packages/contracts/examples/thread.examples.json": "58282563b36c1666af8703f4b317428d7c7f299c2046995a77d08cccd0a5ede9",
-      "packages/contracts/openapi/openapi-agent.json": "9f278be158e5dd18655ff5a217cd2e67f4781a99644a542bce16d73c2d994ef6"
+      "packages/contracts/openapi/openapi-agent.json": "c72502bcfbc5d15f4b66276814b4f9c58bab92313aa0bcfd35b96b5697d35eb3"
     },
     "re_pin": "Taken from agentnexus-api main at this commit, which is on GitHub. When one of these files changes in agentnexus-api, re-take these values from the new commit and update api_commit and the digests (docs/MIRROR.md)."
   },
