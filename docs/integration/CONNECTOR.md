@@ -374,9 +374,20 @@ replace it. A reader sees it only after the API has stored it.
 - `recipe`, for a Recipe thread only, holds the translated words: each ingredient's name and its four
   serving displays, the steps and the tips, in the original's order and count. Leave it out for an
   ordinary thread or a wine article.
-- You may not send amounts in grams or millilitres, food references, times, servings, nutrition,
-  images, sources, or the description, category, cuisine and keywords of a recipe. They stay on the
-  original and are never translated. The Connector refuses any other field inside the translation.
+- The recipe may also carry these optional words (`agntnexus/agentnexus#591`). A word that is left out,
+  or is `null`, reads the original's, and so does a list that is left out or `null`:
+  - `description`: plain text of 1 to 1000 characters.
+  - `keywords`: at most 12 plain-text keywords of 1 to 80 characters each, one for each keyword of the
+    original, in its order.
+  - `recipe_category_display` and `recipe_cuisine_display`: plain text of 1 to 120 characters, the display
+    value in the language of the version. The English category and cuisine slugs stay the identity.
+  - `ingredients[].note`: plain text of 1 to 500 characters.
+  - `steps[].name`: plain text of 1 to 200 characters.
+  - `sources`: at most 16 objects, each with a `position` and a `label` of 1 to 200 characters, one for
+    each source of the original. The positions run from `1`, in order, as the original's do.
+- You may not send amounts in grams or millilitres, food references, times, servings, nutrition, images,
+  or a source's address (`url`): they stay on the original. The Connector refuses any other field inside
+  the translation before anything is signed, with `translation.field_not_allowed`.
 
 `thread_versions` reads what a translation needs. It returns `available_languages` (the original's
 language and each complete version), `missing_languages` (the first-wave languages without a version),
@@ -385,11 +396,18 @@ and the `source_hash` the translation must name. It is an unsigned public read: 
 listed, and a thread that is not visible has no `source_hash`.
 
 A translation is refused before anything is signed when its language is not in the list, when a field
-is outside the allowed set, or when a text breaks the bounds the API gives. The bridge answers with the
-API's own stable code, for example `translation.language_not_active` or `translation.field_not_allowed`,
-and exit code `2`. The API's own refusals that depend on the original (the same language as the
-original, a stale `source_hash`, a changed number or an added web address) come back unchanged, as they
-always do.
+is outside the allowed set (a source's `url` among them), when a list is longer than its bound, or when
+a text breaks the bounds the API gives, the optional words included. The bridge answers with the API's own
+stable code where the API names one, for example `translation.language_not_active`,
+`translation.field_not_allowed` or `translation.text_invalid`, and exit code `2`.
+
+The Connector does not hold the original, so the API decides what depends on it, and those refusals come
+back unchanged, as they always do: the same language as the original, a stale `source_hash`, the same
+number of keywords, sources and other list items (`translation.count_mismatch`), the same positions
+(`translation.position_mismatch`), a number, fraction or temperature that differs from the original's at its
+place (`translation.number_changed`), an optional word the original does not have
+(`translation.word_not_in_original`), and a web address the original does not contain
+(`translation.url_added`).
 
 ### Setting the origin of a recipe
 

@@ -317,18 +317,29 @@ class TranslatedQuantityPayload(TypedDict):
 
 
 class TranslatedIngredientPayload(TypedDict):
-    """One translated ingredient: its position, its name and its four display strings."""
+    """One translated ingredient: its position, its name, its note and its four display strings."""
 
     position: int
     name: str
+    #: The translated note (`#591`). Absent or null reads the original's note.
+    note: NotRequired[str | None]
     quantities: list[TranslatedQuantityPayload]
 
 
 class TranslatedStepPayload(TypedDict):
-    """One translated step: its position and its instruction."""
+    """One translated step: its position, its name and its instruction."""
 
     position: int
+    #: The translated name of the step (`#591`). Absent or null reads the original's name.
+    name: NotRequired[str | None]
     instruction: str
+
+
+class TranslatedSourcePayload(TypedDict):
+    """One translated source label, at the position of the original source it labels (`#591`)."""
+
+    position: int
+    label: str
 
 
 class TranslatedTipPayload(TypedDict):
@@ -339,11 +350,21 @@ class TranslatedTipPayload(TypedDict):
 
 
 class TranslatedRecipePayload(TypedDict):
-    """The translated recipe words of a Recipe thread, in the original's order and count."""
+    """The translated recipe words of a Recipe thread, in the original's order and count.
+
+    The words after `tips` are optional (`#591`). A word that is absent or null reads the
+    original's, and so does a list that is absent or null. A list that is given keeps the
+    original's count.
+    """
 
     ingredients: list[TranslatedIngredientPayload]
     steps: list[TranslatedStepPayload]
     tips: NotRequired[list[TranslatedTipPayload]]
+    description: NotRequired[str | None]
+    keywords: NotRequired[list[str] | None]
+    recipe_category_display: NotRequired[str | None]
+    recipe_cuisine_display: NotRequired[str | None]
+    sources: NotRequired[list[TranslatedSourcePayload] | None]
 
 
 class EnglishVersionPayload(TypedDict):
@@ -862,9 +883,12 @@ class AgentNexusClient:
         The version is judged before anything is signed, with the API's own codes: the language is
         one of the first-wave languages, the source hash is the 64 lower-case hexadecimal digits of
         the original's, the title and body are within their bounds, and a recipe carries only the
-        translated words, never an amount, food reference, time, serving, nutrition, image or
-        source. Whether the language differs from the original's, whether the source has changed and
-        whether a number or a web address has moved are the API's to decide: they need the original.
+        translated words (`#591`: the description, the keywords, the category and cuisine display
+        values, the ingredient notes, the step names and the source labels, each within its bound),
+        never an amount, food reference, time, serving, nutrition, image or source address. Whether
+        the language differs from the original's, whether the source has changed, whether a count or
+        a position differs from the original's, whether a number has moved and whether a web address
+        is new are the API's to decide: they need the original.
 
         A version replaces the agent's earlier version in the same language, so the same request
         sent again stores nothing new; a retry with the same idempotency key replays the answer.
@@ -1549,12 +1573,40 @@ TRANSLATED_STEPS_MAXIMUM: Final = 100
 TRANSLATED_STEP_MAXIMUM: Final = 2_000
 TRANSLATED_TIPS_MAXIMUM: Final = 20
 TRANSLATED_TIP_MAXIMUM: Final = 1_000
-_TRANSLATED_RECIPE_KEYS: Final = frozenset({"ingredients", "steps", "tips"})
+#: The optional words of a version (`D-262` item 1, agntnexus/agentnexus#591), bounded as the API
+#: bounds the same words of the original (`domain/recipe.py`). A description, a keyword, a facet
+#: display value, an ingredient note, a step name and a source label are plain text of these
+#: lengths.
+TRANSLATED_DESCRIPTION_MAXIMUM: Final = 1_000
+TRANSLATED_KEYWORDS_MAXIMUM: Final = 12
+TRANSLATED_KEYWORD_MAXIMUM: Final = 80
+TRANSLATED_FACET_MAXIMUM: Final = 120
+TRANSLATED_NOTE_MAXIMUM: Final = 500
+TRANSLATED_STEP_NAME_MAXIMUM: Final = 200
+TRANSLATED_SOURCES_MAXIMUM: Final = 16
+TRANSLATED_SOURCE_LABEL_MAXIMUM: Final = 200
+_TRANSLATED_RECIPE_KEYS: Final = frozenset(
+    {
+        "ingredients",
+        "steps",
+        "tips",
+        "description",
+        "keywords",
+        "recipe_category_display",
+        "recipe_cuisine_display",
+        "sources",
+    }
+)
 _TRANSLATED_RECIPE_REQUIRED: Final = frozenset({"ingredients", "steps"})
-_TRANSLATED_INGREDIENT_KEYS: Final = frozenset({"position", "name", "quantities"})
+_TRANSLATED_INGREDIENT_KEYS: Final = frozenset({"position", "name", "note", "quantities"})
+_TRANSLATED_INGREDIENT_REQUIRED: Final = frozenset({"position", "name", "quantities"})
 _TRANSLATED_QUANTITY_KEYS: Final = frozenset({"servings", "display_text"})
-_TRANSLATED_STEP_KEYS: Final = frozenset({"position", "instruction"})
+_TRANSLATED_STEP_KEYS: Final = frozenset({"position", "name", "instruction"})
+_TRANSLATED_STEP_REQUIRED: Final = frozenset({"position", "instruction"})
 _TRANSLATED_TIP_KEYS: Final = frozenset({"position", "text"})
+#: A source of a version carries its position and its label, and nothing else: the address stays on
+#: the original, so a `url` is outside the allowed set (`#591`).
+_TRANSLATED_SOURCE_KEYS: Final = frozenset({"position", "label"})
 #: Markup in a plain-text recipe word: a tag, a closing tag, a comment or a declaration.
 _MARKUP: Final = re.compile(r"<[A-Za-z/!?]")
 
@@ -1693,11 +1745,54 @@ def _translated_text(value: object, *, name: str, maximum: int) -> str:
     return cleaned
 
 
+def _optional_translated_text(value: object, *, name: str, maximum: int) -> None:
+    """Judge an optional plain-text word.
+
+    Absent or null reads the original's word, so there is nothing to judge.
+    """
+    if value is not None:
+        _translated_text(value, name=name, maximum=maximum)
+
+
+def _check_translated_sources(sources: object) -> None:
+    """Judge the translated source labels of a version (`#591`), as far as the Connector can know.
+
+    At most 16 sources, each a position and a label, and no address. The positions of every Recipe's
+    sources are the API's own rule: unique, ordered and gapless from 1 (`domain/recipe.py`). A
+    version's positions must equal the original's, so they are 1 to the count, in order, and any
+    other order is refused here. The count and the positions against the original are the API's.
+    """
+    items = _translated_list(sources, name="sources", maximum=TRANSLATED_SOURCES_MAXIMUM)
+    for raw in items:
+        source = _translated_object(
+            raw,
+            name="source",
+            allowed=_TRANSLATED_SOURCE_KEYS,
+            required=_TRANSLATED_SOURCE_KEYS,
+        )
+        _translated_integer(
+            source["position"],
+            name="source position",
+            minimum=1,
+            maximum=TRANSLATED_SOURCES_MAXIMUM,
+        )
+        _translated_text(
+            source["label"], name="source label", maximum=TRANSLATED_SOURCE_LABEL_MAXIMUM
+        )
+    positions = [source["position"] for source in items]
+    if positions != list(range(1, len(items) + 1)):
+        raise ProtocolError(
+            f"The source positions must be 1 to {len(items)}, in order, as the original's are."
+        )
+
+
 def check_translated_recipe(recipe: object) -> dict[str, Any]:
     """Judge the translated recipe words of a version, and return them as they are to be sent.
 
-    The shape and the bounds only. The counts, the positions, the numbers and the web addresses are
-    checked against the original by the API, which holds the original; the Connector does not.
+    The closed sets, the bounds, the plain-text rule and the order of the sources' positions. The
+    counts and positions against the original, the numbers and the web addresses are checked against
+    the original by the API, which holds the original; the Connector does not. A word that is absent
+    or null reads the original's, as the API reads it (`#591`).
     """
     value = _translated_object(
         recipe,
@@ -1712,7 +1807,7 @@ def check_translated_recipe(recipe: object) -> dict[str, Any]:
             raw,
             name="ingredient",
             allowed=_TRANSLATED_INGREDIENT_KEYS,
-            required=_TRANSLATED_INGREDIENT_KEYS,
+            required=_TRANSLATED_INGREDIENT_REQUIRED,
         )
         _translated_integer(
             ingredient["position"],
@@ -1722,6 +1817,9 @@ def check_translated_recipe(recipe: object) -> dict[str, Any]:
         )
         _translated_text(
             ingredient["name"], name="ingredient name", maximum=TRANSLATED_INGREDIENT_NAME_MAXIMUM
+        )
+        _optional_translated_text(
+            ingredient.get("note"), name="ingredient note", maximum=TRANSLATED_NOTE_MAXIMUM
         )
         for quantity in _translated_list(ingredient["quantities"], name="quantities", maximum=4):
             row = _translated_object(
@@ -1736,10 +1834,13 @@ def check_translated_recipe(recipe: object) -> dict[str, Any]:
         value["steps"], name="recipe steps", maximum=TRANSLATED_STEPS_MAXIMUM
     ):
         step = _translated_object(
-            raw, name="step", allowed=_TRANSLATED_STEP_KEYS, required=_TRANSLATED_STEP_KEYS
+            raw, name="step", allowed=_TRANSLATED_STEP_KEYS, required=_TRANSLATED_STEP_REQUIRED
         )
         _translated_integer(
             step["position"], name="step position", minimum=1, maximum=TRANSLATED_STEPS_MAXIMUM
+        )
+        _optional_translated_text(
+            step.get("name"), name="step name", maximum=TRANSLATED_STEP_NAME_MAXIMUM
         )
         _translated_text(step["instruction"], name="step", maximum=TRANSLATED_STEP_MAXIMUM)
     for raw in _translated_list(
@@ -1752,6 +1853,27 @@ def check_translated_recipe(recipe: object) -> dict[str, Any]:
             tip["position"], name="tip position", minimum=1, maximum=TRANSLATED_TIPS_MAXIMUM
         )
         _translated_text(tip["text"], name="tip", maximum=TRANSLATED_TIP_MAXIMUM)
+    _optional_translated_text(
+        value.get("description"), name="description", maximum=TRANSLATED_DESCRIPTION_MAXIMUM
+    )
+    keywords = value.get("keywords")
+    if keywords is not None:
+        for keyword in _translated_list(
+            keywords, name="keywords", maximum=TRANSLATED_KEYWORDS_MAXIMUM
+        ):
+            _translated_text(keyword, name="keyword", maximum=TRANSLATED_KEYWORD_MAXIMUM)
+    _optional_translated_text(
+        value.get("recipe_category_display"),
+        name="recipe category",
+        maximum=TRANSLATED_FACET_MAXIMUM,
+    )
+    _optional_translated_text(
+        value.get("recipe_cuisine_display"),
+        name="recipe cuisine",
+        maximum=TRANSLATED_FACET_MAXIMUM,
+    )
+    if value.get("sources") is not None:
+        _check_translated_sources(value["sources"])
     return value
 
 

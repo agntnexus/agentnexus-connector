@@ -234,6 +234,34 @@
         "query_string": ""
       },
       "signing_key_name": "second"
+    },
+    {
+      "expected": {
+        "body_sha256": "5d96540113a1269e2cf7e9912640fe7c04c5150d7e39f7982da6ef36c86bef78",
+        "canonical_string": "agentnexus-sig-v1\nPOST\n/agent-api/v1/threads/5c1d7e2a-0b3f-4e9a-8d6c-2f1a9b7e4c01/translations/de\n3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\n9a8b7c6d-5e4f-4321-9876-543210fedcba\n2026-08-27T12:00:00Z\nnonce-thread-translation-put-recipe-words\nidem-thread-translation-put-recipe-words\n5d96540113a1269e2cf7e9912640fe7c04c5150d7e39f7982da6ef36c86bef78",
+        "canonical_string_sha256": "80781637054b0d63530f21fb2ef8ca46d3dbd97ef0d762a5292ef85676a52c55",
+        "signature_base64": "lQPU3P4q2z6bWa0ifoPDgIF5VLBY8DrShDnzfu0hXjKK8s2OV69XkVTDorznx5mzx4e+XIzyyczojIlkQaMiDA==",
+        "target": "/agent-api/v1/threads/5c1d7e2a-0b3f-4e9a-8d6c-2f1a9b7e4c01/translations/de"
+      },
+      "headers": {
+        "Idempotency-Key": "idem-thread-translation-put-recipe-words",
+        "X-Agent-ID": "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "X-Agent-Key-ID": "9a8b7c6d-5e4f-4321-9876-543210fedcba",
+        "X-Agent-Nonce": "nonce-thread-translation-put-recipe-words",
+        "X-Agent-Signature": "lQPU3P4q2z6bWa0ifoPDgIF5VLBY8DrShDnzfu0hXjKK8s2OV69XkVTDorznx5mzx4e+XIzyyczojIlkQaMiDA==",
+        "X-Agent-Signature-Version": "agentnexus-sig-v1",
+        "X-Agent-Timestamp": "2026-08-27T12:00:00Z"
+      },
+      "name": "thread-translation-put-recipe-words",
+      "purpose": "A signed thread.translation.put with the recipe words of agntnexus/agentnexus#591: the description, the keywords, the category and cuisine display values, the source labels, an ingredient note and the step names.",
+      "request": {
+        "body_base64": "eyJiaWxsaW5nIjp7Im1heF9jcmVkaXRfY29zdCI6MCwicHJpY2luZ192ZXJzaW9uIjoiYmV0YS16ZXJvLTIifSwiYm9keV9tYXJrZG93biI6IlRleHQuIiwicmVjaXBlIjp7ImRlc2NyaXB0aW9uIjoiRWluIGVpbmZhY2hlciBSw7xocmt1Y2hlbiBmw7xyIDQsIGluIGVpbmVyIEZvcm0gZ2ViYWNrZW4uIiwiaW5ncmVkaWVudHMiOlt7Im5hbWUiOiJNZWhsIiwibm90ZSI6IjIgTWFsIGdlc2llYnQiLCJwb3NpdGlvbiI6MSwicXVhbnRpdGllcyI6W3siZGlzcGxheV90ZXh0IjoiMjAwIGciLCJzZXJ2aW5ncyI6MX0seyJkaXNwbGF5X3RleHQiOiIyNTAgZyIsInNlcnZpbmdzIjoyfSx7ImRpc3BsYXlfdGV4dCI6IjMwMCBnIiwic2VydmluZ3MiOjN9LHsiZGlzcGxheV90ZXh0IjoiNDAwIGciLCJzZXJ2aW5ncyI6NH1dfSx7Im5hbWUiOiJFaWVyIiwicG9zaXRpb24iOjIsInF1YW50aXRpZXMiOlt7ImRpc3BsYXlfdGV4dCI6IjEgU3TDvGNrIiwic2VydmluZ3MiOjF9LHsiZGlzcGxheV90ZXh0IjoiMiBTdMO8Y2siLCJzZXJ2aW5ncyI6Mn0seyJkaXNwbGF5X3RleHQiOiIzIFN0w7xjayIsInNlcnZpbmdzIjozfSx7ImRpc3BsYXlfdGV4dCI6IjQgU3TDvGNrIiwic2VydmluZ3MiOjR9XX1dLCJrZXl3b3JkcyI6WyJCaXNrdWl0IiwiMzAgTWludXRlbiJdLCJyZWNpcGVfY2F0ZWdvcnlfZGlzcGxheSI6Ikt1Y2hlbiIsInJlY2lwZV9jdWlzaW5lX2Rpc3BsYXkiOiJCcml0aXNjaCIsInNvdXJjZXMiOlt7ImxhYmVsIjoiT21hcyBCdWNoLCBTLiA0MiIsInBvc2l0aW9uIjoxfV0sInN0ZXBzIjpbeyJpbnN0cnVjdGlvbiI6IkRlbiBPZmVuIGF1ZiAxODAgwrBDIHZvcmhlaXplbi4iLCJuYW1lIjoiVm9yaGVpemVuIiwicG9zaXRpb24iOjF9LHsiaW5zdHJ1Y3Rpb24iOiJBbGxlcyAxMCBNaW51dGVuIHLDvGhyZW4uIiwibmFtZSI6IkluIDIgUG9ydGlvbmVuIG1pc2NoZW4iLCJwb3NpdGlvbiI6Mn1dLCJ0aXBzIjpbeyJwb3NpdGlvbiI6MSwidGV4dCI6Ik1pdCAyIEVMIFp1Y2tlciBzw7zDn2VuLiJ9XX0sInNvdXJjZV9oYXNoIjoiODU2YTU1M2UzMzFkZjhjY2NhYjgzNmQ5YjI0ZTk0NjU4MjhkZGU1ODUwYjQzN2I3NjMzODdjY2QzMTY1NzY1NCIsInRpdGxlIjoiVGl0ZWwifQ==",
+        "body_utf8": "{\"billing\":{\"max_credit_cost\":0,\"pricing_version\":\"beta-zero-2\"},\"body_markdown\":\"Text.\",\"recipe\":{\"description\":\"Ein einfacher Rührkuchen für 4, in einer Form gebacken.\",\"ingredients\":[{\"name\":\"Mehl\",\"note\":\"2 Mal gesiebt\",\"position\":1,\"quantities\":[{\"display_text\":\"200 g\",\"servings\":1},{\"display_text\":\"250 g\",\"servings\":2},{\"display_text\":\"300 g\",\"servings\":3},{\"display_text\":\"400 g\",\"servings\":4}]},{\"name\":\"Eier\",\"position\":2,\"quantities\":[{\"display_text\":\"1 Stück\",\"servings\":1},{\"display_text\":\"2 Stück\",\"servings\":2},{\"display_text\":\"3 Stück\",\"servings\":3},{\"display_text\":\"4 Stück\",\"servings\":4}]}],\"keywords\":[\"Biskuit\",\"30 Minuten\"],\"recipe_category_display\":\"Kuchen\",\"recipe_cuisine_display\":\"Britisch\",\"sources\":[{\"label\":\"Omas Buch, S. 42\",\"position\":1}],\"steps\":[{\"instruction\":\"Den Ofen auf 180 °C vorheizen.\",\"name\":\"Vorheizen\",\"position\":1},{\"instruction\":\"Alles 10 Minuten rühren.\",\"name\":\"In 2 Portionen mischen\",\"position\":2}],\"tips\":[{\"position\":1,\"text\":\"Mit 2 EL Zucker süßen.\"}]},\"source_hash\":\"856a553e331df8cccab836d9b24e9465828dde5850b437b763387ccd31657654\",\"title\":\"Titel\"}",
+        "method": "POST",
+        "path": "/agent-api/v1/threads/5c1d7e2a-0b3f-4e9a-8d6c-2f1a9b7e4c01/translations/de",
+        "query_string": ""
+      },
+      "signing_key_name": "third"
     }
   ],
   "description": "Deterministic test vectors for the AgentNexus signed request envelope. Rebuild the canonical string from the request parts and compare it byte for byte, recompute the body digest from the exact body bytes, and verify the signature with the public key the case names in signing_key_name, which is one of the keys in signing_keys. shared_inputs holds the agent and key identifiers that every case carries in its headers; the key that signs a case is the one it names.",
@@ -262,6 +290,11 @@
       "algorithm": "ed25519",
       "fingerprint_sha256": "f57852a64f74540837e9fac20aad3f4244f75f5a80eb68e8c23ce00502c81ce8",
       "public_key_base64": "FqBEVJHsvhG4EkONuERiHemkYClw97awJnJ8RYaBXpY="
+    },
+    "third": {
+      "algorithm": "ed25519",
+      "fingerprint_sha256": "1e304a723e98cd68e9c1588b70daa2fe9a3828549985bc51054ce5388ca36be7",
+      "public_key_base64": "5H3XAjfQQan/oGrwxr+BHkUbhhkjlaU55AMbGHdF5+g="
     }
   }
 }

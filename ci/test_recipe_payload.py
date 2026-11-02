@@ -66,13 +66,25 @@ STABLE_CODES = {
     "translation-language-case": "translation.language_not_active",
     "translation-field-wine": "translation.field_not_allowed",
     "translation-field-image": "translation.field_not_allowed",
-    "translation-field-note": "translation.field_not_allowed",
     "translation-field-amount": "translation.field_not_allowed",
     "translation-field-food-ref": "translation.field_not_allowed",
     "translation-field-times": "translation.field_not_allowed",
+    # A source carrying an address is outside the allowed set (`#591`, the source `url`).
     "translation-field-sources": "translation.field_not_allowed",
     "translation-markup-step": "translation.text_invalid",
     "translation-empty-step": "translation.text_invalid",
+    # The optional words of `#591` that the API judges as plain text (`D-262` item 1).
+    "translation-words-description-empty": "translation.text_invalid",
+    "translation-words-description-long": "translation.text_invalid",
+    "translation-words-description-markup": "translation.text_invalid",
+    "translation-words-keyword-long": "translation.text_invalid",
+    "translation-words-category-long": "translation.text_invalid",
+    "translation-words-cuisine-empty": "translation.text_invalid",
+    "translation-words-source-label-long": "translation.text_invalid",
+    "translation-words-note-long": "translation.text_invalid",
+    "translation-words-note-markup": "translation.text_invalid",
+    "translation-words-step-name-long": "translation.text_invalid",
+    "translation-words-step-name-empty": "translation.text_invalid",
 }
 #: The refusal mutations that name a translation or an origin write, not a create command.
 WRITE_MUTATION_PREFIXES = ("translation-", "origin-put-")
@@ -255,6 +267,39 @@ def translated_recipe() -> dict[str, Any]:
     }
 
 
+def translated_recipe_words() -> dict[str, Any]:
+    """Return the French words of `recipe()` with every optional word of `#591` given once.
+
+    The description, the keywords (two, as the original has), the category and cuisine display
+    values, one source label, an ingredient note and a step name. Each stays within its bound and
+    names no number the original does not have.
+    """
+    words = translated_recipe()
+    words["description"] = "Une soupe de lentilles chaude, au citron et au cumin."
+    words["keywords"] = ["lentilles", "semaine"]
+    words["recipe_category_display"] = "Soupe"
+    words["recipe_cuisine_display"] = "Méditerranéenne"
+    words["sources"] = [{"position": 1, "label": "Guide des légumineuses"}]
+    words["ingredients"][0]["note"] = "finement émincé"
+    words["steps"][0]["name"] = "Faire revenir l'oignon"
+    return words
+
+
+def translated_recipe_words_absent() -> dict[str, Any]:
+    """Return the same words with every optional word given as null, which reads the original's."""
+    words = translated_recipe_words()
+    words.update(
+        description=None,
+        keywords=None,
+        recipe_category_display=None,
+        recipe_cuisine_display=None,
+        sources=None,
+    )
+    words["ingredients"][0]["note"] = None
+    words["steps"][0]["name"] = None
+    return words
+
+
 def translation(**changes: Any) -> dict[str, Any]:
     """Return one French version of the lentil soup, as a bridge command, with changes applied."""
     document: dict[str, Any] = {
@@ -264,7 +309,7 @@ def translation(**changes: Any) -> dict[str, Any]:
         "source_hash": ORIGINAL_SOURCE_HASH,
         "title": "Soupe de lentilles de la semaine",
         "body_markdown": "Une introduction utile et visible à la recette.",
-        "recipe": translated_recipe(),
+        "recipe": translated_recipe_words(),
         "pricing_version": "p1",
         "max_credit_cost": 0,
         "idempotency_key": "translation-retry-567",
@@ -326,9 +371,7 @@ def write_refusal_document(mutation: str) -> dict[str, Any]:
         # The mutations below change the recipe words of an otherwise valid version.
         document = translation()
         words = document["recipe"]
-        if mutation == "translation-field-note":
-            words["ingredients"][0]["note"] = "finely diced"
-        elif mutation == "translation-field-amount":
+        if mutation == "translation-field-amount":
             words["ingredients"][0]["quantities"][0]["amount"] = {"value": 80, "unit": "g"}
         elif mutation == "translation-field-food-ref":
             words["ingredients"][0]["food_ref"] = {"source": "usda_fdc", "id": 12345}
@@ -344,6 +387,43 @@ def write_refusal_document(mutation: str) -> dict[str, Any]:
             words["steps"][0]["instruction"] = "   "
         elif mutation == "translation-too-many-steps":
             words["steps"] = [{"position": n, "instruction": "Mélanger."} for n in range(1, 102)]
+        elif mutation == "translation-words-description-empty":
+            words["description"] = "  "
+        elif mutation == "translation-words-description-long":
+            words["description"] = "d" * 1001
+        elif mutation == "translation-words-description-markup":
+            words["description"] = "<i>Lentilles</i>"
+        elif mutation == "translation-words-keywords-too-many":
+            words["keywords"] = [f"mot {n}" for n in range(1, 14)]
+        elif mutation == "translation-words-keyword-long":
+            words["keywords"] = ["k" * 81]
+        elif mutation == "translation-words-keyword-not-text":
+            words["keywords"] = [5]
+        elif mutation == "translation-words-category-long":
+            words["recipe_category_display"] = "c" * 121
+        elif mutation == "translation-words-cuisine-empty":
+            words["recipe_cuisine_display"] = ""
+        elif mutation == "translation-words-source-too-many":
+            words["sources"] = [{"position": n, "label": f"Guide {n}"} for n in range(1, 18)]
+        elif mutation == "translation-words-source-gap":
+            words["sources"] = [
+                {"position": 1, "label": "Guide"},
+                {"position": 3, "label": "Livre"},
+            ]
+        elif mutation == "translation-words-source-position-range":
+            words["sources"] = [{"position": 17, "label": "Guide"}]
+        elif mutation == "translation-words-source-label-long":
+            words["sources"] = [{"position": 1, "label": "g" * 201}]
+        elif mutation == "translation-words-source-missing-label":
+            words["sources"] = [{"position": 1}]
+        elif mutation == "translation-words-note-long":
+            words["ingredients"][0]["note"] = "n" * 501
+        elif mutation == "translation-words-note-markup":
+            words["ingredients"][0]["note"] = "<b>fin</b>"
+        elif mutation == "translation-words-step-name-long":
+            words["steps"][0]["name"] = "s" * 201
+        elif mutation == "translation-words-step-name-empty":
+            words["steps"][0]["name"] = "   "
         else:
             raise AssertionError(mutation)
         return document
@@ -492,12 +572,26 @@ def _assert_contract_agreement() -> None:
     assert set(body["properties"]) == {"source_hash", "title", "body_markdown", "recipe", "billing"}
     assert set(body["required"]) == {"source_hash", "title", "body_markdown", "billing"}
     words = body["properties"]["recipe"]["anyOf"][0]["properties"]
-    assert set(words) == {"ingredients", "steps", "tips"}
+    assert set(words) == {
+        "ingredients",
+        "steps",
+        "tips",
+        "description",
+        "keywords",
+        "recipe_category_display",
+        "recipe_cuisine_display",
+        "sources",
+    }
     ingredient = words["ingredients"]["items"]["properties"]
-    assert set(ingredient) == {"position", "name", "quantities"}
+    assert set(ingredient) == {"position", "name", "note", "quantities"}
     assert set(ingredient["quantities"]["items"]["properties"]) == {"servings", "display_text"}
-    assert set(words["steps"]["items"]["properties"]) == {"position", "instruction"}
+    assert set(words["steps"]["items"]["properties"]) == {"position", "instruction", "name"}
     assert set(words["tips"]["items"]["properties"]) == {"position", "text"}
+    # The optional words of `#591`: at most 12 keywords, and at most 16 sources, each with a
+    # position and a label and no address.
+    assert words["keywords"]["anyOf"][0]["maxItems"] == 12
+    assert words["sources"]["anyOf"][0]["maxItems"] == 16
+    assert set(words["sources"]["anyOf"][0]["items"]["properties"]) == {"position", "label"}
     origin_body = origin_op["request_body"]
     assert set(origin_body["properties"]) == {"origin_countries", "is_fusion", "billing"}
     assert set(origin_body["required"]) == {"origin_countries", "is_fusion", "billing"}
@@ -508,6 +602,12 @@ def _assert_contract_agreement() -> None:
     assert billed <= set(translation_tool["properties"])
     assert {"pricing_version", "max_credit_cost"} <= set(translation_tool["properties"])
     assert set(words) == set(translation_tool["properties"]["recipe"]["properties"])
+    # The tool names every member its nested objects carry, and a source has no address.
+    tool_words = translation_tool["properties"]["recipe"]["properties"]
+    assert set(tool_words["ingredients"]["items"]["properties"]) == set(ingredient)
+    assert set(tool_words["steps"]["items"]["properties"]) == {"position", "instruction", "name"}
+    assert set(tool_words["sources"]["items"]["properties"]) == {"position", "label"}
+    assert tool_words["sources"]["items"]["additionalProperties"] is False
     origin_tool = tool_named("put_recipe_origin")["inputSchema"]
     assert set(origin_body["properties"]) - {"billing"} <= set(origin_tool["properties"])
     assert {"pricing_version", "max_credit_cost"} <= set(origin_tool["properties"])
@@ -581,6 +681,7 @@ def _assert_signed_write_matches_contract(write: str) -> None:
     """Check that a translation or an origin write is signed as sent, and matches the contract."""
     client, transport, public_key = signed_client()
     billing = BillingDeclaration(pricing_version="p1", max_credit_cost=0)
+    words: dict[str, Any] | None = None
     if write == "origin":
         with client:
             client.set_recipe_origin(
@@ -599,6 +700,11 @@ def _assert_signed_write_matches_contract(write: str) -> None:
     else:
         english = write == "translation-wine-article"
         language = "en" if english else "fr"
+        words = {
+            "translation-recipe": translated_recipe(),
+            "translation-recipe-words": translated_recipe_words(),
+            "translation-recipe-words-absent": translated_recipe_words_absent(),
+        }.get(write)
         with client:
             client.put_thread_translation(
                 thread_id=THREAD_ID,
@@ -610,20 +716,23 @@ def _assert_signed_write_matches_contract(write: str) -> None:
                     if english
                     else "Une introduction utile et visible."
                 ),
-                recipe=translated_recipe() if write == "translation-recipe" else None,
+                recipe=words,
                 billing=billing,
                 idempotency_key="translation-signed-567",
             )
         path = f"/agent-api/v1/threads/{THREAD_ID}/translations/{language}"
         key, operation = "translation-signed-567", "thread.translation.put"
         expected = {"source_hash", "title", "body_markdown", "billing"}
-        if write == "translation-recipe":
+        if words is not None:
             expected.add("recipe")
     (request,) = transport.requests
     assert request.method == "POST"
     assert request.url.path == path
     assert request.headers["idempotency-key"] == key
     assert set(json.loads(request.content)) == expected
+    if words is not None:
+        # The words are sent as given, every optional one included, neither added to nor dropped.
+        assert json.loads(request.content)["recipe"] == words
     contract_fields = fixture("api-agent-contract-567.json")["operations"][operation]
     assert expected <= set(contract_fields["request_body"]["properties"])
     assert signature_verifies(request, public_key)
@@ -743,6 +852,7 @@ def _assert_new_operations_sign_the_published_vectors() -> None:
                     source_hash=body["source_hash"],
                     title=body["title"],
                     body_markdown=body["body_markdown"],
+                    recipe=body.get("recipe"),
                     billing=billing,
                     idempotency_key=headers["Idempotency-Key"],
                 )
@@ -756,9 +866,12 @@ def _assert_new_operations_sign_the_published_vectors() -> None:
                 )
         (sent,) = transport.requests
         assert sent.url.path == path, case["name"]
-        # The published body is the same JSON document. The client writes its keys in the order it
-        # builds them: the server verifies the bytes it receives, so that order is not a rule.
-        document = json.dumps(json.loads(sent.content), sort_keys=True, separators=(",", ":"))
+        # The published body is the same JSON document, with Unicode kept as UTF-8 as the client
+        # writes it. The client writes its keys in the order it builds them: the server verifies the
+        # bytes it receives, so that order is not a rule.
+        document = json.dumps(
+            json.loads(sent.content), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
         assert document == request["body_utf8"], case["name"]
         # The client signs exactly the bytes it sends, under the identifiers, timestamp and nonce of
         # the published case, so the envelope it signs is the one the server rebuilds from the wire.
@@ -778,7 +891,11 @@ def _assert_new_operations_sign_the_published_vectors() -> None:
         )
         assert message == sent_envelope.signing_bytes(), case["name"]
         checked.append(case["name"])
-    assert checked == ["thread-translation-put", "recipe-origin-put"]
+    assert checked == [
+        "thread-translation-put",
+        "recipe-origin-put",
+        "thread-translation-put-recipe-words",
+    ]
 
 
 def _assert_translation_statuses_are_reported() -> None:
@@ -823,6 +940,8 @@ def _assert_translation_statuses_are_reported() -> None:
             )
         assert result["operation_status"] == status, (code, extra)
         assert len(transport.requests) == 1
+        # The bridge forwards every recipe word of the command as it was given (`#591`).
+        assert json.loads(transport.requests[0].content)["recipe"] == translated_recipe_words()
 
 
 @pytest.mark.parametrize(
@@ -834,6 +953,8 @@ def _assert_translation_statuses_are_reported() -> None:
         "contract-agreement",
         "translation-plain",
         "translation-recipe",
+        "translation-recipe-words",
+        "translation-recipe-words-absent",
         "translation-wine-article",
         "translation-statuses",
         "origin",
@@ -1007,11 +1128,27 @@ def test_the_bridge_validates_and_forwards_the_recipe_without_calculation(shape:
         ("translation-language-missing", "Field 'language' is required"),
         ("translation-field-wine", "outside the allowed set"),
         ("translation-field-image", "outside the allowed set"),
-        ("translation-field-note", "outside the allowed set"),
         ("translation-field-amount", "outside the allowed set"),
         ("translation-field-food-ref", "outside the allowed set"),
         ("translation-field-times", "outside the allowed set"),
         ("translation-field-sources", "outside the allowed set"),
+        ("translation-words-description-empty", "The description must not be empty"),
+        ("translation-words-description-long", "must not exceed 1000 characters"),
+        ("translation-words-description-markup", "without markup"),
+        ("translation-words-keywords-too-many", "keywords must contain 0 to 12 items"),
+        ("translation-words-keyword-long", "must not exceed 80 characters"),
+        ("translation-words-keyword-not-text", "The keyword must be a string"),
+        ("translation-words-category-long", "must not exceed 120 characters"),
+        ("translation-words-cuisine-empty", "must not be empty"),
+        ("translation-words-source-too-many", "sources must contain 0 to 16 items"),
+        ("translation-words-source-gap", "positions must be 1 to 2"),
+        ("translation-words-source-position-range", "from 1 to 16"),
+        ("translation-words-source-label-long", "must not exceed 200 characters"),
+        ("translation-words-source-missing-label", "in source: label"),
+        ("translation-words-note-long", "must not exceed 500 characters"),
+        ("translation-words-note-markup", "without markup"),
+        ("translation-words-step-name-long", "must not exceed 200 characters"),
+        ("translation-words-step-name-empty", "must not be empty"),
         ("translation-servings-five", "from 1 to 4"),
         ("translation-markup-step", "without markup"),
         ("translation-empty-step", "must not be empty"),
