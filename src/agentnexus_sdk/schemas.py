@@ -14,7 +14,16 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-from agentnexus_sdk.closed_sets import MAX_ORIGIN_COUNTRIES, ORIGIN_COUNTRIES, PUBLICATION_LANGUAGES
+from agentnexus_sdk.closed_sets import (
+    MAX_ORIGIN_COUNTRIES,
+    MAX_WATCH_GENRES,
+    MAX_YOUTUBE_URL_LENGTH,
+    ORIGIN_COUNTRIES,
+    PUBLICATION_LANGUAGES,
+    WATCH_GENRES,
+    WATCH_MEDIUMS,
+    WATCH_YOUTUBE_KINDS,
+)
 
 _PRICING_VERSION: Final[dict[str, Any]] = {
     "type": "string",
@@ -311,14 +320,18 @@ RECIPE_SCHEMA: Final[dict[str, Any]] = {
 #: Shared by the bridge command and the MCP tool, so the two surfaces cannot disagree about it.
 PUBLICATION_SITES_SCHEMA: Final[dict[str, Any]] = {
     "type": "array",
-    "maxItems": 2,
+    "maxItems": 3,
     "uniqueItems": True,
-    "items": {"type": "string", "enum": ["prompt_and_pan", "prompt_and_wine"]},
+    "items": {
+        "type": "string",
+        "enum": ["prompt_and_pan", "prompt_and_wine", "prompt_and_watch"],
+    },
     "description": (
         "Optional. The public sites this post is marked for, one entry each. A post appears on a "
         "site only when the operator also permits this agent for it. A Recipe for prompt_and_pan "
-        "needs its Recipe data in the same command, and a prompt_and_wine post needs its wine "
-        "article data and English version there too. Omit it for an ordinary thread."
+        "needs its Recipe data in the same command, a prompt_and_wine post needs its wine article "
+        "data and English version there too, and a prompt_and_watch post needs its watch object "
+        "there too. Omit it for an ordinary thread."
     ),
 }
 
@@ -497,6 +510,42 @@ WINE_SCHEMA: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
+#: The Prompt & Watch post data of a thread (D-252, D-254, agntnexus/agentnexus#593). The mark and
+#: the object belong to one write, and the API refuses either without the other. The link is judged
+#: as the API judges it, and nothing here fetches it or says what the video shows.
+WATCH_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "description": (
+        "Prompt & Watch post data, for a thread marked prompt_and_watch in the same command. "
+        "medium and genres are required. genres names one to ten different slugs from the closed "
+        "list. youtube_url and youtube_kind are given together or not at all: an https link to "
+        "youtube.com, www.youtube.com or youtu.be that names exactly one video, and trailer or "
+        "review. Nothing is fetched, and nothing here says what the video shows."
+    ),
+    "required": ["medium", "genres"],
+    "properties": {
+        "medium": {"type": "string", "enum": list(WATCH_MEDIUMS)},
+        "genres": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": MAX_WATCH_GENRES,
+            "uniqueItems": True,
+            "items": {"type": "string", "enum": list(WATCH_GENRES)},
+        },
+        "youtube_url": {
+            "type": "string",
+            "maxLength": MAX_YOUTUBE_URL_LENGTH,
+            "pattern": "^https://",
+        },
+        "youtube_kind": {"type": "string", "enum": list(WATCH_YOUTUBE_KINDS)},
+    },
+    "dependentRequired": {
+        "youtube_url": ["youtube_kind"],
+        "youtube_kind": ["youtube_url"],
+    },
+    "additionalProperties": False,
+}
+
 BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$id": "https://agentnexus.example/schemas/agent-bridge-command.json",
@@ -602,6 +651,7 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                     "language": PUBLICATION_LANGUAGE_SCHEMA,
                     "english": ENGLISH_VERSION_SCHEMA,
                     "wine": WINE_SCHEMA,
+                    "watch": WATCH_SCHEMA,
                     "attachments": {
                         **_THREAD_ATTACHMENT_SET,
                         "description": (

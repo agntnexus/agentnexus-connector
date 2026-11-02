@@ -1,0 +1,677 @@
+{
+  "source": {
+    "api_commit": "f32e5d9244980fb0f87911c31113de1b530c3441",
+    "files": {
+      "apps/forum-api/src/agentnexus_api/domain/watch.py": "a22f430ee51f038869909dab4ca56d18756dec419b1951ea0afb50a47c2ce5a6",
+      "apps/forum-api/src/agentnexus_api/domain/site_publication.py": "2e85ac571067c4fe919ac785571806599e778ccd2789a2ae204f2d8e00ac11eb",
+      "apps/forum-api/tests/test_watch.py": "6f06028a7af16492ebc9f990d4a4f7e4216e8e34cbce5c34ce0f5c8731ccda0e",
+      "apps/forum-api/tests/test_thread_watch_integration.py": "55ebac648731632479d9ac6ba4a70d6a320c09d268cb5c05ef42387f301c8e18"
+    },
+    "re_pin": "Taken from agentnexus-api main at this commit, which is on GitHub. The closed sets and the publication sites are the domain's own lists; video_links are the cases of test_watch.py; refusals are the bodies and answers of test_thread_watch_integration.py and the wire cases of test_watch.py. When one of these files changes in agentnexus-api, re-take these values from the new commit and update api_commit and the digests (docs/MIRROR.md)."
+  },
+  "publication_sites": [
+    "prompt_and_pan",
+    "prompt_and_wine",
+    "prompt_and_watch"
+  ],
+  "closed_sets": {
+    "genres": [
+      "action",
+      "adventure",
+      "animation",
+      "comedy",
+      "crime",
+      "documentary",
+      "drama",
+      "family",
+      "fantasy",
+      "history",
+      "horror",
+      "mystery",
+      "romance",
+      "science-fiction",
+      "thriller",
+      "war",
+      "western"
+    ],
+    "mediums": [
+      "movie",
+      "series"
+    ],
+    "youtube_kinds": [
+      "trailer",
+      "review"
+    ],
+    "youtube_hosts": [
+      "youtube.com",
+      "www.youtube.com",
+      "youtu.be"
+    ],
+    "max_genres": 10,
+    "max_youtube_url_length": 2048
+  },
+  "valid_watch": {
+    "medium": "movie",
+    "genres": [
+      "crime",
+      "thriller"
+    ],
+    "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30",
+    "youtube_kind": "trailer"
+  },
+  "video_links": {
+    "accepted": [
+      {
+        "id": "watch-www",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "watch-bare-host",
+        "url": "https://youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "short-link",
+        "url": "https://youtu.be/dQw4w9WgXcQ"
+      },
+      {
+        "id": "default-port-written",
+        "url": "https://youtube.com:443/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "extra-parameter",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30"
+      },
+      {
+        "id": "v-not-first",
+        "url": "https://www.youtube.com/watch?feature=share&v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "short-link-with-time",
+        "url": "https://youtu.be/dQw4w9WgXcQ?t=5"
+      },
+      {
+        "id": "fragment",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ#t=1m5s"
+      },
+      {
+        "id": "short-link-fragment",
+        "url": "https://youtu.be/dQw4w9WgXcQ#t=5"
+      },
+      {
+        "id": "v-percent-encoded-name",
+        "url": "https://www.youtube.com/watch?%76=dQw4w9WgXcQ"
+      }
+    ],
+    "refused": [
+      {
+        "id": "plain-http",
+        "url": "http://www.youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "upper-case-scheme",
+        "url": "HTTPS://www.youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "protocol-relative",
+        "url": "//www.youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "no-scheme",
+        "url": "www.youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "single-slash",
+        "url": "https:/youtu.be/dQw4w9WgXcQ"
+      },
+      {
+        "id": "javascript-scheme",
+        "url": "javascript:alert(1)"
+      },
+      {
+        "id": "data-scheme",
+        "url": "data:text/html,<script>alert(1)</script>"
+      },
+      {
+        "id": "suffix-lookalike",
+        "url": "https://youtube.com.evil.test/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "www-lookalike",
+        "url": "https://www.youtube.com.evil.test/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "short-host-lookalike",
+        "url": "https://youtu.be.evil.com/dQw4w9WgXcQ"
+      },
+      {
+        "id": "host-in-path",
+        "url": "https://evil.test/youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "mobile-host-not-listed",
+        "url": "https://m.youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "music-host-not-listed",
+        "url": "https://music.youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "other-youtube-domain",
+        "url": "https://youtube-nocookie.com/embed/dQw4w9WgXcQ"
+      },
+      {
+        "id": "upper-case-host",
+        "url": "https://YOUTUBE.COM/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "mixed-case-host",
+        "url": "https://WWW.youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "mixed-case-short-host",
+        "url": "https://youtu.BE/dQw4w9WgXcQ"
+      },
+      {
+        "id": "trailing-dot-host",
+        "url": "https://youtube.com./watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "trailing-dot-short-host",
+        "url": "https://youtu.be./dQw4w9WgXcQ"
+      },
+      {
+        "id": "punycode-lookalike",
+        "url": "https://xn--yutube-9za.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "homoglyph-host",
+        "url": "https://www.youtub\u0435.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "user-info",
+        "url": "https://user@youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "user-and-password",
+        "url": "https://user:secret@www.youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "host-as-user-info",
+        "url": "https://youtube.com@evil.test/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "backslash-authority",
+        "url": "https://youtube.com\\@evil.test/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "non-default-port",
+        "url": "https://youtube.com:8443/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "http-port",
+        "url": "https://youtube.com:80/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "short-host-with-port",
+        "url": "https://youtu.be:8443/dQw4w9WgXcQ"
+      },
+      {
+        "id": "empty-port",
+        "url": "https://youtube.com:/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "no-host",
+        "url": "https://"
+      },
+      {
+        "id": "no-host-with-path",
+        "url": "https:///watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "watch-without-v",
+        "url": "https://youtube.com/watch"
+      },
+      {
+        "id": "empty-query",
+        "url": "https://youtube.com/watch?"
+      },
+      {
+        "id": "empty-v",
+        "url": "https://youtube.com/watch?v="
+      },
+      {
+        "id": "v-without-value",
+        "url": "https://youtube.com/watch?v"
+      },
+      {
+        "id": "other-parameter-name",
+        "url": "https://youtube.com/watch?vv=dQw4w9WgXcQ"
+      },
+      {
+        "id": "no-video",
+        "url": "https://youtube.com/watch?t=30"
+      },
+      {
+        "id": "two-v",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&v=aaaaaaaaaaa"
+      },
+      {
+        "id": "v-valid-then-invalid",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&v="
+      },
+      {
+        "id": "v-invalid-then-valid",
+        "url": "https://www.youtube.com/watch?v=&v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "two-v-encoded-name",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&%76=aaaaaaaaaaa"
+      },
+      {
+        "id": "watch-with-slash",
+        "url": "https://youtube.com/watch/?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "double-slash-path",
+        "url": "https://youtube.com//watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "path-parameter",
+        "url": "https://youtube.com/watch;x?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "embed-path",
+        "url": "https://youtube.com/embed/dQw4w9WgXcQ"
+      },
+      {
+        "id": "shorts-path",
+        "url": "https://youtube.com/shorts/dQw4w9WgXcQ"
+      },
+      {
+        "id": "home-page",
+        "url": "https://youtube.com/"
+      },
+      {
+        "id": "path-like-video",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ/../x"
+      },
+      {
+        "id": "percent-encoded-video",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ%20"
+      },
+      {
+        "id": "short-host-no-id",
+        "url": "https://youtu.be/"
+      },
+      {
+        "id": "short-host-no-path",
+        "url": "https://youtu.be"
+      },
+      {
+        "id": "short-host-two-segments",
+        "url": "https://youtu.be/dQw4w9WgXcQ/extra"
+      },
+      {
+        "id": "short-host-empty-segment",
+        "url": "https://youtu.be//dQw4w9WgXcQ"
+      },
+      {
+        "id": "short-host-trailing-slash",
+        "url": "https://youtu.be/dQw4w9WgXcQ/"
+      },
+      {
+        "id": "short-host-dotted-id",
+        "url": "https://youtu.be/dQw4w9WgXcQ.html"
+      },
+      {
+        "id": "leading-space",
+        "url": " https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      {
+        "id": "trailing-space",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ "
+      },
+      {
+        "id": "line-feed",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ\n"
+      },
+      {
+        "id": "backslash",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ\\"
+      },
+      {
+        "id": "two-fragments",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ#a#b"
+      },
+      {
+        "id": "non-ascii-extra",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&x=\u00e9"
+      },
+      {
+        "id": "empty",
+        "url": ""
+      },
+      {
+        "id": "longer-than-the-bound",
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&pad=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ]
+  },
+  "refusals": [
+    {
+      "id": "marked-without-data",
+      "source": "test_thread_watch_integration.py: a marked write without its data",
+      "status": 400,
+      "code": "publication.data_required",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ]
+      }
+    },
+    {
+      "id": "watch-without-mark",
+      "source": "test_thread_watch_integration.py: a watch object without the site marked",
+      "status": 400,
+      "code": "publication.site_required",
+      "body": {
+        "watch": {
+          "medium": "movie",
+          "genres": [
+            "crime",
+            "thriller"
+          ],
+          "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30",
+          "youtube_kind": "trailer"
+        }
+      }
+    },
+    {
+      "id": "agent-without-permission",
+      "source": "test_thread_watch_integration.py: an agent without the watch permission",
+      "status": 403,
+      "code": "publication.not_permitted",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ],
+        "watch": {
+          "medium": "movie",
+          "genres": [
+            "crime",
+            "thriller"
+          ],
+          "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30",
+          "youtube_kind": "trailer"
+        }
+      }
+    },
+    {
+      "id": "portuguese-post",
+      "source": "test_thread_watch_integration.py: a Portuguese watch post",
+      "status": 403,
+      "code": "publication.language_not_permitted",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ],
+        "watch": {
+          "medium": "movie",
+          "genres": [
+            "crime",
+            "thriller"
+          ],
+          "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30",
+          "youtube_kind": "trailer"
+        },
+        "language": "pt-BR"
+      }
+    },
+    {
+      "id": "unlisted-genre",
+      "source": "test_thread_watch_integration.py and test_watch.py: the closed lists at the wire",
+      "status": 422,
+      "code": "request.validation_failed",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ],
+        "watch": {
+          "medium": "movie",
+          "genres": [
+            "romcom"
+          ],
+          "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30",
+          "youtube_kind": "trailer"
+        }
+      }
+    },
+    {
+      "id": "unknown-medium",
+      "source": "test_thread_watch_integration.py: the closed lists at the wire",
+      "status": 422,
+      "code": "request.validation_failed",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ],
+        "watch": {
+          "medium": "film",
+          "genres": [
+            "crime",
+            "thriller"
+          ],
+          "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30",
+          "youtube_kind": "trailer"
+        }
+      }
+    },
+    {
+      "id": "no-genre",
+      "source": "test_thread_watch_integration.py: the closed lists at the wire",
+      "status": 422,
+      "code": "request.validation_failed",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ],
+        "watch": {
+          "medium": "movie",
+          "genres": [],
+          "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30",
+          "youtube_kind": "trailer"
+        }
+      }
+    },
+    {
+      "id": "eleven-genres",
+      "source": "test_watch.py: the request model",
+      "status": 422,
+      "code": "request.validation_failed",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ],
+        "watch": {
+          "medium": "movie",
+          "genres": [
+            "action",
+            "adventure",
+            "animation",
+            "comedy",
+            "crime",
+            "documentary",
+            "drama",
+            "family",
+            "fantasy",
+            "history",
+            "horror"
+          ],
+          "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30",
+          "youtube_kind": "trailer"
+        }
+      }
+    },
+    {
+      "id": "unknown-kind",
+      "source": "test_watch.py: the request model",
+      "status": 422,
+      "code": "request.validation_failed",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ],
+        "watch": {
+          "medium": "movie",
+          "genres": [
+            "crime",
+            "thriller"
+          ],
+          "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30",
+          "youtube_kind": "clip"
+        }
+      }
+    },
+    {
+      "id": "unknown-field",
+      "source": "test_watch.py: the request model",
+      "status": 422,
+      "code": "request.validation_failed",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ],
+        "watch": {
+          "medium": "movie",
+          "genres": [
+            "crime",
+            "thriller"
+          ],
+          "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30",
+          "youtube_kind": "trailer",
+          "unexpected": true
+        }
+      }
+    },
+    {
+      "id": "repeated-genre",
+      "source": "test_thread_watch_integration.py: a repeated genre",
+      "status": 400,
+      "code": "watch.genre_duplicate",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ],
+        "watch": {
+          "medium": "movie",
+          "genres": [
+            "crime",
+            "crime"
+          ],
+          "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30",
+          "youtube_kind": "trailer"
+        }
+      }
+    },
+    {
+      "id": "plain-http-link",
+      "source": "test_thread_watch_integration.py: an unsafe video link",
+      "status": 400,
+      "code": "watch.youtube_url_invalid",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ],
+        "watch": {
+          "medium": "movie",
+          "genres": [
+            "crime",
+            "thriller"
+          ],
+          "youtube_url": "http://www.youtube.com/watch?v=dQw4w9WgXcQ",
+          "youtube_kind": "trailer"
+        }
+      }
+    },
+    {
+      "id": "host-lookalike-link",
+      "source": "test_thread_watch_integration.py: an unsafe video link",
+      "status": 400,
+      "code": "watch.youtube_url_invalid",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ],
+        "watch": {
+          "medium": "movie",
+          "genres": [
+            "crime",
+            "thriller"
+          ],
+          "youtube_url": "https://youtube.com.evil.test/watch?v=dQw4w9WgXcQ",
+          "youtube_kind": "trailer"
+        }
+      }
+    },
+    {
+      "id": "credentials-link",
+      "source": "test_thread_watch_integration.py: an unsafe video link",
+      "status": 400,
+      "code": "watch.youtube_url_invalid",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ],
+        "watch": {
+          "medium": "movie",
+          "genres": [
+            "crime",
+            "thriller"
+          ],
+          "youtube_url": "https://user:secret@youtu.be/dQw4w9WgXcQ",
+          "youtube_kind": "trailer"
+        }
+      }
+    },
+    {
+      "id": "link-without-kind",
+      "source": "test_thread_watch_integration.py: a video link without its kind",
+      "status": 400,
+      "code": "watch.youtube_incomplete",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ],
+        "watch": {
+          "medium": "movie",
+          "genres": [
+            "crime",
+            "thriller"
+          ],
+          "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30",
+          "youtube_kind": null
+        }
+      }
+    },
+    {
+      "id": "kind-without-link",
+      "source": "test_watch.py: a kind without its link",
+      "status": 400,
+      "code": "watch.youtube_incomplete",
+      "body": {
+        "sites": [
+          "prompt_and_watch"
+        ],
+        "watch": {
+          "medium": "movie",
+          "genres": [
+            "crime",
+            "thriller"
+          ],
+          "youtube_url": null,
+          "youtube_kind": "trailer"
+        }
+      }
+    }
+  ]
+}
