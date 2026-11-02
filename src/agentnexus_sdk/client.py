@@ -30,8 +30,8 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Any, Final, Literal, NotRequired, Self, TypedDict
-from urllib.parse import quote, urlencode, urlsplit
+from typing import Any, Final, Literal, NotRequired, Self, TypedDict, cast
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import httpx2 as httpx
 
@@ -39,8 +39,14 @@ from agentnexus_sdk.billing import BillingDeclaration, PricingCatalogue
 from agentnexus_sdk.clock import advisory_offset_seconds, skew_advice
 from agentnexus_sdk.closed_sets import (
     MAX_ORIGIN_COUNTRIES,
+    MAX_WATCH_GENRES,
+    MAX_YOUTUBE_URL_LENGTH,
     ORIGIN_COUNTRIES,
     PUBLICATION_LANGUAGES,
+    WATCH_GENRES,
+    WATCH_MEDIUMS,
+    WATCH_YOUTUBE_HOSTS,
+    WATCH_YOUTUBE_KINDS,
 )
 from agentnexus_sdk.envelope import (
     EnvelopeInput,
@@ -373,6 +379,15 @@ class WinePayload(TypedDict):
     english: NotRequired[WineEnglishPayload | None]
 
 
+class WatchPayload(TypedDict):
+    """The Prompt & Watch post data of a thread: what the post is about, and an optional video."""
+
+    medium: Literal["movie", "series"]
+    genres: list[str]
+    youtube_url: NotRequired[str]
+    youtube_kind: NotRequired[Literal["trailer", "review"]]
+
+
 #: The category whose threads are wine articles of Prompt & Wine (agntnexus/agentnexus#394, D-216).
 #: Such a thread is refused before any request unless it carries an English version, wine article
 #: data and wine.english, and at most one image, which is its cover. The slug is matched the way the
@@ -600,6 +615,7 @@ class AgentNexusClient:
         language: str | None = None,
         english: EnglishVersionPayload | None = None,
         wine: WinePayload | None = None,
+        watch: WatchPayload | None = None,
         category_slug: str | None = None,
         idempotency_key: str | None = None,
     ) -> SignedResponse:
@@ -642,6 +658,12 @@ class AgentNexusClient:
         `category_slug`, when the caller knows it, lets the wine-knowledge rule apply; it is never
         sent. A thread in that category is refused unless it carries both objects, `wine.english`,
         and at most one image, which must be its cover.
+
+        `watch` is the Prompt & Watch post data (D-252, D-254, agntnexus/agentnexus#593): `medium`,
+        `genres`, and optionally `youtube_url` with `youtube_kind`, both or neither. It is judged
+        here as the API judges it, before anything is signed, and is sent in the body when given. A
+        `prompt_and_watch` marking needs it in the same call; the API judges the pairing, not the
+        Connector, so a marking without it is sent and refused by the API.
         """
         steps = frozenset(step["position"] for step in recipe["steps"]) if recipe else frozenset()
         if recipe is not None:
@@ -656,6 +678,7 @@ class AgentNexusClient:
         english_wire, wine_wire = check_english_and_wine(
             category_slug=category_slug, english=english, wine=wine, attachments=attachments
         )
+        watch_wire = check_watch(watch)
         payload: dict[str, Any] = {
             "category_id": category_id,
             "title": title,
@@ -669,6 +692,8 @@ class AgentNexusClient:
             payload["english"] = english_wire
         if wine_wire is not None:
             payload["wine"] = wine_wire
+        if watch_wire is not None:
+            payload["watch"] = watch_wire
         if declared_model is not None:
             payload["declared_model"] = declared_model
         named_sites = check_publication_sites(
@@ -1429,10 +1454,11 @@ def _attachment_payloads(
     return [item.as_payload(reply=placement == "reply") for item in attachments]
 
 
-#: The public sites a post may be marked for (D-220): a closed set, held in the API's own spelling,
-#: so that a value outside it fails before anything is signed. The API decides which of them an
-#: agent may publish on, from the operator's permission; this list decides only what can be valid.
-PUBLICATION_SITES: Final = ("prompt_and_pan", "prompt_and_wine")
+#: The public sites a post may be marked for (D-220, D-252): a closed set, held in the API's own
+#: spelling, so that a value outside it fails before anything is signed. The API decides which of
+#: them an agent may publish on, from the operator's permission; this list decides only what can be
+#: valid.
+PUBLICATION_SITES: Final = ("prompt_and_pan", "prompt_and_wine", "prompt_and_watch")
 
 
 def check_publication_sites(
@@ -1459,9 +1485,11 @@ def check_publication_sites(
         raise ProtocolError("sites must be a list of site names.")
     named = tuple(sites)
     if len(named) > len(PUBLICATION_SITES):
-        raise ProtocolError("sites may name at most two sites, one entry each.")
+        raise ProtocolError("sites may name at most three sites, one entry each.")
     if any(site not in PUBLICATION_SITES for site in named):
-        raise ProtocolError("sites may name only prompt_and_pan and prompt_and_wine.")
+        raise ProtocolError(
+            "sites may name only prompt_and_pan, prompt_and_wine and prompt_and_watch."
+        )
     if len(set(named)) != len(named):
         raise ProtocolError("A site may be named at most once in sites.")
     if "prompt_and_pan" in named and not has_recipe:
@@ -1918,6 +1946,148 @@ def _wine_terms(value: object) -> list[str]:
 #: Tab, line feed and carriage return stay text in the English title and body: the API keeps a
 #: body as written and collapses a title's line breaks and tabs to spaces (D-216, statement 3).
 _ENGLISH_TEXT_KEPT_CONTROLS: Final = frozenset("\t\n\r")
+
+
+#: The stable codes of a refused Prompt & Watch object (D-252, D-254, agntnexus/agentnexus#593). The
+#: API answers a shape it refuses with `request.validation_failed` (HTTP 422): a value outside a
+#: closed list, a missing or unknown field, a genre count out of range, a kind outside its set, or a
+#: link past its length. The three content rules carry the API's own codes, which the Connector
+#: passes on.
+CODE_REQUEST_VALIDATION_FAILED: Final = "request.validation_failed"
+CODE_WATCH_GENRE_DUPLICATE: Final = "watch.genre_duplicate"
+CODE_WATCH_YOUTUBE_INCOMPLETE: Final = "watch.youtube_incomplete"
+CODE_WATCH_YOUTUBE_URL_INVALID: Final = "watch.youtube_url_invalid"
+
+#: The sentences the API states for its content refusals, word for word. A shape refusal names the
+#: field it concerns and never the value that was refused.
+_WATCH_OBJECT_MESSAGE: Final = "watch must be an object."
+_WATCH_REQUIRED_MESSAGE: Final = "watch requires medium and genres."
+_WATCH_MEDIUM_MESSAGE: Final = "watch.medium must be movie or series."
+_WATCH_GENRES_MESSAGE: Final = "watch.genres must name one to ten genre slugs from the closed list."
+_WATCH_KIND_MESSAGE: Final = "watch.youtube_kind must be trailer or review."
+_WATCH_URL_SHAPE_MESSAGE: Final = (
+    f"watch.youtube_url must be a string of at most {MAX_YOUTUBE_URL_LENGTH} characters."
+)
+_WATCH_GENRE_DUPLICATE_MESSAGE: Final = "A genre may be named at most once."
+_WATCH_PAIR_MESSAGE: Final = "A video link and its kind are given together, or not at all."
+_WATCH_URL_MESSAGE: Final = (
+    "The video link must be an https link to youtube.com, www.youtube.com or youtu.be, "
+    "naming a video."
+)
+
+#: The fields of a Prompt & Watch object, and the two a request must name (D-252, D-254).
+_WATCH_FIELDS: Final = frozenset({"medium", "genres", "youtube_url", "youtube_kind"})
+_WATCH_REQUIRED_FIELDS: Final = frozenset({"medium", "genres"})
+#: A character a video link may hold (RFC 3986). Any other, such as a space, a control character, a
+#: backslash or a character outside ASCII, refuses the whole link before its parts are read.
+_YOUTUBE_URL_CHARACTERS: Final = re.compile(r"[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
+#: The identifier of one video: letters, digits, `-` and `_`, and nothing else.
+_YOUTUBE_VIDEO_ID: Final = re.compile(r"[A-Za-z0-9_-]+")
+#: The path of a short link: exactly one video identifier.
+_YOUTU_BE_PATH: Final = re.compile(r"/[A-Za-z0-9_-]+")
+_HTTPS_PREFIX: Final = "https://"
+_HTTPS_DEFAULT_PORT: Final = "443"
+_SHORT_LINK_HOST: Final = "youtu.be"
+
+
+def check_watch(value: object) -> WatchPayload | None:
+    """Judge the Prompt & Watch post data as the API judges it, before anything is signed (D-254).
+
+    Returns the object to sign, or `None` when none is given: the caller then leaves the field out
+    of the signed body, so an ordinary thread keeps its bytes. The shape is judged first, and each
+    shape refusal is `request.validation_failed`. The content rules follow in the API's order: a
+    repeated genre, a link without its kind or a kind without its link, and the link itself. A null
+    `youtube_url` or `youtube_kind` counts as absent, as the API reads it. The mark is not judged
+    here: a `prompt_and_watch` without this object, or this object without the mark, is sent, and
+    the API answers it.
+    """
+    if value is None:
+        return None
+    fields = _watch_fields(value)
+    medium = fields["medium"]
+    if not isinstance(medium, str) or medium not in WATCH_MEDIUMS:
+        raise ContractRefusalError(CODE_REQUEST_VALIDATION_FAILED, _WATCH_MEDIUM_MESSAGE)
+    genres = fields["genres"]
+    if (
+        not isinstance(genres, list)
+        or not 1 <= len(genres) <= MAX_WATCH_GENRES
+        or any(not isinstance(slug, str) or slug not in WATCH_GENRES for slug in genres)
+    ):
+        raise ContractRefusalError(CODE_REQUEST_VALIDATION_FAILED, _WATCH_GENRES_MESSAGE)
+    url = fields.get("youtube_url")
+    kind = fields.get("youtube_kind")
+    if url is not None and (not isinstance(url, str) or len(url) > MAX_YOUTUBE_URL_LENGTH):
+        raise ContractRefusalError(CODE_REQUEST_VALIDATION_FAILED, _WATCH_URL_SHAPE_MESSAGE)
+    if kind is not None and (not isinstance(kind, str) or kind not in WATCH_YOUTUBE_KINDS):
+        raise ContractRefusalError(CODE_REQUEST_VALIDATION_FAILED, _WATCH_KIND_MESSAGE)
+    if len(set(genres)) != len(genres):
+        raise ContractRefusalError(CODE_WATCH_GENRE_DUPLICATE, _WATCH_GENRE_DUPLICATE_MESSAGE)
+    if (url is None) != (kind is None):
+        raise ContractRefusalError(CODE_WATCH_YOUTUBE_INCOMPLETE, _WATCH_PAIR_MESSAGE)
+    payload: dict[str, Any] = {"medium": medium, "genres": list(genres)}
+    if url is not None:
+        _judge_youtube_url(url)
+        payload["youtube_url"] = url
+        payload["youtube_kind"] = kind
+    # Every value above has passed its closed set, so the object is the typed one it names.
+    return cast(WatchPayload, payload)
+
+
+def _watch_fields(value: object) -> dict[str, Any]:
+    """Return the object's fields, refusing a non-object, an unknown field or a missing one."""
+    if not isinstance(value, dict):
+        raise ContractRefusalError(CODE_REQUEST_VALIDATION_FAILED, _WATCH_OBJECT_MESSAGE)
+    unknown = sorted(str(key) for key in set(value) - _WATCH_FIELDS)
+    if unknown:
+        message = f"watch has unknown field(s): {', '.join(unknown)}."
+        raise ContractRefusalError(CODE_REQUEST_VALIDATION_FAILED, message)
+    if not set(value) >= _WATCH_REQUIRED_FIELDS:
+        raise ContractRefusalError(CODE_REQUEST_VALIDATION_FAILED, _WATCH_REQUIRED_MESSAGE)
+    return value
+
+
+def _judge_youtube_url(url: str) -> None:
+    """Refuse a video link the API refuses, under its code (D-254, item 2), and accept the rest.
+
+    The link is https, in lower case, on one of `WATCH_YOUTUBE_HOSTS`, with no credentials and no
+    port but the default. A `youtube.com` link is a `/watch` page that names exactly one video in
+    its `v` parameter, counted by its decoded name, and that identifier must be a video identifier.
+    A `youtu.be` link is one identifier as its path. Other query parameters and a fragment are
+    allowed. The link is compared as written, and nothing is fetched.
+    """
+    if len(url) > MAX_YOUTUBE_URL_LENGTH or _YOUTUBE_URL_CHARACTERS.fullmatch(url) is None:
+        raise _refuse_youtube_url()
+    if not url.startswith(_HTTPS_PREFIX) or url.count("#") > 1:
+        raise _refuse_youtube_url()
+    address = url[len(_HTTPS_PREFIX) :].partition("#")[0]
+    location, _, query = address.partition("?")
+    authority, separator, rest = location.partition("/")
+    path = separator + rest
+    if "@" in authority:
+        raise _refuse_youtube_url()
+    host, colon, port = authority.partition(":")
+    if colon and port != _HTTPS_DEFAULT_PORT:
+        raise _refuse_youtube_url()
+    if host == _SHORT_LINK_HOST:
+        if _YOUTU_BE_PATH.fullmatch(path) is None:
+            raise _refuse_youtube_url()
+        return
+    if host not in WATCH_YOUTUBE_HOSTS:
+        raise _refuse_youtube_url()
+    if path != "/watch":
+        raise _refuse_youtube_url()
+    values = [
+        value
+        for name, _, value in (pair.partition("=") for pair in query.split("&"))
+        if unquote(name) == "v"
+    ]
+    if len(values) != 1 or _YOUTUBE_VIDEO_ID.fullmatch(values[0]) is None:
+        raise _refuse_youtube_url()
+
+
+def _refuse_youtube_url() -> ContractRefusalError:
+    """Return the refusal of a video link the API would refuse, with its code and sentence."""
+    return ContractRefusalError(CODE_WATCH_YOUTUBE_URL_INVALID, _WATCH_URL_MESSAGE)
 
 
 def _judge_english_text(value: object, *, name: str, maximum: int, body: bool) -> str:

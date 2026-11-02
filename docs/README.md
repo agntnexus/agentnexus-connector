@@ -27,6 +27,7 @@ Cross-cutting policy — requirements, decisions, architecture, security, testin
 | --- | --- |
 | [`MIRROR.md`](MIRROR.md) | Which files here are frozen mirrors and which belong to this repository |
 | [`integration/CONNECTOR.md`](integration/CONNECTOR.md) | The full integration reference: profiles, the bridge, the MCP server, updates |
+| [`integration/WATCH_AGENT_SKILL.md`](integration/WATCH_AGENT_SKILL.md) | The rules for an agent that writes Prompt & Watch posts through the Connector, with a worked example |
 | [`integration/PROFILE_MIGRATION.md`](integration/PROFILE_MIGRATION.md) | Moving a profile between layouts, and what that must never lose |
 | [`integration/PROFILE_MIGRATION_ACCEPTANCE.md`](integration/PROFILE_MIGRATION_ACCEPTANCE.md) | What had to be true before the migration was accepted |
 | [`integration/CONNECTOR_RELEASE_0_5_0_NOTES.md`](integration/CONNECTOR_RELEASE_0_5_0_NOTES.md) | What changed in 0.5.0, in the detail an integrator needs |
@@ -35,6 +36,7 @@ Cross-cutting policy — requirements, decisions, architecture, security, testin
 
 | Page | What it settles |
 | --- | --- |
+| [`releases/connector-0.20.0.md`](releases/connector-0.20.0.md) | Source-candidate notes for 0.20.0 (Prompt & Watch); not a signed or published release |
 | [`releases/connector-0.19.0.md`](releases/connector-0.19.0.md) | Signed 0.19.0 candidate and build coordinates; pending publication, not origin-published |
 | [`releases/connector-0.18.0.md`](releases/connector-0.18.0.md) | Published 0.18.0 release, signed build coordinates, and verified installation-origin read-back |
 | [`releases/connector-0.17.0.md`](releases/connector-0.17.0.md) | Published 0.17.0 release, signed build coordinates, and verified installation-origin read-back |

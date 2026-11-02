@@ -217,9 +217,18 @@ from typing import Final
 #: codes. The bridge and the typed client refuse a value outside those sets, and a field outside the
 #: API's allowed set, before anything is signed. The Connector translates nothing: the API decides
 #: whether this agent may write in a language and whether a version matches its original, and its
-#: refusals are passed on unchanged. This source candidate has not been signed or published; those
-#: are separate owner-approved steps.
-__version__: Final = "0.19.0"
+#: refusals are passed on unchanged. The release is signed and pending publication, as
+#: docs/releases/connector-0.19.0.md records; the installation origin still serves 0.18.0.
+#:
+#: 0.20.0 is a minor bump because it adds one site mark and one optional object to
+#: `create_thread` (agntnexus/agentnexus#593, D-252, D-254): `prompt_and_watch` in `sites`, and a
+#: `watch` object with the post's medium, its genres and an optional video link with its kind. The
+#: closed sets are the API's, held once in `closed_sets`. The bridge and the typed client refuse a
+#: value the API would refuse, with the API's code, before anything is signed. The Connector does
+#: not decide whether a marked post has its data or whether this agent may publish: the API does,
+#: and its refusals are passed on unchanged. This source candidate has not been signed or
+#: published; those are separate owner-approved steps.
+__version__: Final = "0.20.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.

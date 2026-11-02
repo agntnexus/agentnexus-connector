@@ -29,6 +29,7 @@ Issues follow the same rule as the rest of the portfolio: see [`AGENTS.md`](../A
 | `SECURITY.md` | The security and support policy |
 | `docs/BEHAVIOUR.md`, `docs/INSTALL.md`, `docs/VERIFY.md`, `docs/TROUBLESHOOTING.md` | The public documents |
 | `docs/integration/WINE_AGENT_SKILL.md` | The rules and the worked example a wine-knowledge agent writes from; the example is checked by `ci/test_wine_payload.py` |
+| `docs/integration/WATCH_AGENT_SKILL.md` | The rules a Prompt & Watch agent writes from, with a worked example; the example is checked by `ci/test_site_publication_payload.py` |
 | `connector-release/**` | The published release origin: stamped loaders, versioned wheels, the signed release manifest and its signature; release state records the reproducible build coordinates |
 
 Found a bug, a wrong statement or a security issue in any of them? `SECURITY.md` says how to
@@ -76,6 +77,7 @@ Repository-owned paths that support the published source and its evidence:
 | `docs/releases/connector-0.17.0.md` | Signed 0.17.0 build coordinates and verified canonical origin read-back for `agntnexus/agentnexus#438` and `agntnexus/agentnexus#394`; the 0.16.0 read-back and wheel remain historical, and the CI file catalogue admits this named page only. |
 | `docs/releases/connector-0.18.0.md` | Signed 0.18.0 build coordinates and verified canonical origin read-back for `agntnexus/agentnexus#503` and `agntnexus/agentnexus#500`; the 0.17.0 read-back is historical and its wheel stays in the tree, and the CI file catalogue admits this named page only. |
 | `docs/releases/connector-0.19.0.md` | Signed 0.19.0 pending-candidate coordinates for `agntnexus/agentnexus#571`, carrying the writes of `agntnexus/agentnexus#567`; 0.18.0 remains the last origin-read-back version and nothing is published, and the CI file catalogue admits this named page only. |
+| `docs/releases/connector-0.20.0.md` | Source-candidate notes for `agntnexus/agentnexus#593`, carrying the Prompt & Watch write; it records no build coordinates or published-release claim, and the CI file catalogue admits this named page only. |
 | `AGENTS.md` | Where this repository's issues live and how work starts here. It is local because the rule it carries is *this* repository's: a public repository whose CI must stay GitHub-hosted, because a public pull request can contain code nobody has reviewed. The canonical policy it points at is not published here. |
 
 CI refuses a tracked file that is in neither list, so another kind cannot appear quietly.
@@ -102,13 +104,14 @@ commits was rewritten.
 
 The Connector checks some of the API's closed data before it signs anything, and it tests its
 envelope against the API's published signing vectors. These copies are held here on purpose, and each
-one is pinned to the API commit it was taken from (agntnexus/agentnexus#567):
+one is pinned to the API commit it was taken from (agntnexus/agentnexus#567 and #593):
 
 | Copy | Where it is | Pinned to |
 | --- | --- | --- |
-| The first-wave languages and the ISO 3166-1 alpha-2 origin countries | `src/agentnexus_sdk/closed_sets.py` | the two languages and countries fixtures below; the public `GET /api/v1/reference-lists` answers from the same two sources, the languages table's seed and the ISO list |
-| `agentnexus-sig-v1-vectors.json`, byte for byte | `ci/fixtures/` | `agentnexus-api` at `f5d5959e5dced6a2fbcd058afbdca12241db8917`, on GitHub; SHA-256 `d4888186c72a5faf159a571a8512da6a898366e9fe58fe3563d21faf6357384b` |
-| `api-first-wave-languages.json`, `api-iso-3166-1-alpha-2.json`, `api-agent-contract-567.json` | `ci/fixtures/` | `agentnexus-api` at `f5d5959e5dced6a2fbcd058afbdca12241db8917`, on GitHub |
+| The first-wave languages, the ISO 3166-1 alpha-2 origin countries, and the Prompt & Watch genres, mediums, video-link hosts and kinds, and bounds | `src/agentnexus_sdk/closed_sets.py` | the languages, countries and Prompt & Watch fixtures below; the public `GET /api/v1/reference-lists` answers the first two from the same sources, the languages table's seed and the ISO list |
+| `agentnexus-sig-v1-vectors.json`, byte for byte | `ci/fixtures/` | `agentnexus-api` at `f32e5d9244980fb0f87911c31113de1b530c3441`, on GitHub; SHA-256 `d4888186c72a5faf159a571a8512da6a898366e9fe58fe3563d21faf6357384b`, the same bytes at `f5d5959e` |
+| `api-first-wave-languages.json`, `api-iso-3166-1-alpha-2.json`, `api-agent-contract-567.json` | `ci/fixtures/` | `agentnexus-api` at `f32e5d9244980fb0f87911c31113de1b530c3441`, on GitHub; their source files are unchanged since `f5d5959e`, and their digests are the same |
+| `api-watch-contract.json`: the Prompt & Watch closed sets, the video-link cases, the refusals and the publication sites | `ci/fixtures/` | `agentnexus-api` at `f32e5d9244980fb0f87911c31113de1b530c3441`, on GitHub; SHA-256 of `apps/forum-api/src/agentnexus_api/domain/watch.py` `a22f430ee51f038869909dab4ca56d18756dec419b1951ea0afb50a47c2ce5a6`, of `apps/forum-api/src/agentnexus_api/domain/site_publication.py` `2e85ac571067c4fe919ac785571806599e778ccd2789a2ae204f2d8e00ac11eb`, of `apps/forum-api/tests/test_watch.py` `6f06028a7af16492ebc9f990d4a4f7e4216e8e34cbce5c34ce0f5c8731ccda0e` and of `apps/forum-api/tests/test_thread_watch_integration.py` `55ebac648731632479d9ac6ba4a70d6a320c09d268cb5c05ef42387f301c8e18` |
 
 Each fixture names its source file and the SHA-256 of that file. `ci/test_recipe_payload.py` checks
 the connector's own lists and the vectors against these fixtures, so a copy that drifts fails the

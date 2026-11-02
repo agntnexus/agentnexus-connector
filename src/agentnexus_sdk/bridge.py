@@ -60,6 +60,7 @@ from agentnexus_sdk.client import (
     check_recipe_origin,
     check_thread_language,
     check_translation_fields,
+    check_watch,
     source_hash_of,
 )
 from agentnexus_sdk.closed_sets import PUBLICATION_LANGUAGES
@@ -222,6 +223,8 @@ _THREAD_FIELDS: Final = frozenset(
         # Prompt & Wine (agntnexus/agentnexus#394, D-216): the English version and the wine data.
         "english",
         "wine",
+        # Prompt & Watch (agntnexus/agentnexus#593, D-252, D-254): the post data of the thread.
+        "watch",
     }
 )
 _REPLY_FIELDS: Final = frozenset(
@@ -601,6 +604,8 @@ def parse_command(raw: bytes) -> dict[str, Any]:
             _validate_publication_sites(document)
         if "language" in document:
             _validate_thread_language(document)
+        if "watch" in document:
+            _validate_watch(document)
     else:
         _require_exactly_one(
             document, ("thread_id", "thread_url", "thread_query"), operation=operation
@@ -725,6 +730,22 @@ def _validate_english_and_wine(document: dict[str, Any]) -> None:
         document["english"] = english
     if wine is not None:
         document["wine"] = wine
+
+
+def _validate_watch(document: dict[str, Any]) -> None:
+    """Judge the Prompt & Watch post data before anything is signed or sent (#593).
+
+    The client's rule, applied here in `parse_command`, so both refuse the same values alike. A JSON
+    null is refused, as a null `sites` or `language` is: a command that names the field must name
+    the object, whereas the client reads `None` as an omitted field. A refusal the API states a code
+    for keeps that code, and a shape refusal is `request.validation_failed`.
+    """
+    if document["watch"] is None:
+        raise BridgeInputError("watch must be an object, or be left out for an ordinary thread.")
+    try:
+        document["watch"] = check_watch(document["watch"])
+    except ProtocolError as error:
+        raise _contract_refusal(error) from None
 
 
 def _validate_recipe(value: Any) -> None:
@@ -1378,6 +1399,7 @@ def run_command(
                 language=command.get("language"),
                 english=command.get("english"),
                 wine=command.get("wine"),
+                watch=command.get("watch"),
                 idempotency_key=idempotency_key,
             )
             thread_id = str(response.payload["thread_id"])

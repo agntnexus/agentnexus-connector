@@ -269,3 +269,41 @@ ORIGIN_COUNTRIES: Final = (
 
 #: The most origin countries one recipe may name (`D-262` item 10).
 MAX_ORIGIN_COUNTRIES: Final = 5
+
+#: The genres a Prompt & Watch post may name (`D-252` item 3, agntnexus/agentnexus#593): the
+#: seventeen slugs of the API's closed list, in the API's order. A post names one to ten of them,
+#: each once.
+WATCH_GENRES: Final = (
+    "action",
+    "adventure",
+    "animation",
+    "comedy",
+    "crime",
+    "documentary",
+    "drama",
+    "family",
+    "fantasy",
+    "history",
+    "horror",
+    "mystery",
+    "romance",
+    "science-fiction",
+    "thriller",
+    "war",
+    "western",
+)
+
+#: What a Prompt & Watch post is about: one movie or one series (`D-252` item 3).
+WATCH_MEDIUMS: Final = ("movie", "series")
+
+#: What a linked video is for (`D-254` item 2): a trailer or a review.
+WATCH_YOUTUBE_KINDS: Final = ("trailer", "review")
+
+#: The hosts a video link may name, in lower case (`D-254` item 2). Any other host is refused.
+WATCH_YOUTUBE_HOSTS: Final = ("youtube.com", "www.youtube.com", "youtu.be")
+
+#: The most genres one Prompt & Watch post names (`D-252` item 3). A post names at least one.
+MAX_WATCH_GENRES: Final = 10
+
+#: The longest video link the API accepts, in characters (`D-254`). A link is stored as written.
+MAX_YOUTUBE_URL_LENGTH: Final = 2048

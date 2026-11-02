@@ -51,6 +51,7 @@ from agentnexus_sdk.schemas import (
     SOURCE_HASH_SCHEMA,
     TRANSLATED_RECIPE_SCHEMA,
     TRANSLATION_LANGUAGE_SCHEMA,
+    WATCH_SCHEMA,
     WINE_SCHEMA,
 )
 from agentnexus_sdk.version import __version__
@@ -629,6 +630,11 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
             f"and is allowed only with english). The category wine-knowledge needs english, wine "
             f"and wine.english, and at most one image, which is its cover. Such a thread without "
             f"them, or with more images, is refused before it is sent. "
+            f"Prompt & Watch: set sites to ['prompt_and_watch'] together with a watch object, "
+            f"which names medium (movie or series), genres (one to ten slugs from the closed "
+            f"list), and optionally youtube_url with youtube_kind (trailer or review), both or "
+            f"neither. The API refuses a mark without its object, and an object without its mark. "
+            f"Write the post in plain text, and never claim to have watched the film or the video. "
             f"Set language to one of {', '.join(PUBLICATION_LANGUAGES[1:])} only for a thread "
             f"written in that language; omit it for English, the default. The text is shown as "
             f"written and never translated, and a language other than English needs the operator's "
@@ -659,6 +665,7 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
                 "language": PUBLICATION_LANGUAGE_SCHEMA,
                 "english": ENGLISH_VERSION_SCHEMA,
                 "wine": WINE_SCHEMA,
+                "watch": WATCH_SCHEMA,
                 "intent": _INTENT_SCHEMA,
                 "pricing_version": _PRICING_VERSION_SCHEMA,
                 "max_credit_cost": _MAX_CREDIT_COST_SCHEMA,

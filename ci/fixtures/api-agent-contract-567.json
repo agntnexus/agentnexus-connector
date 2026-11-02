@@ -304,7 +304,7 @@
     ]
   },
   "source": {
-    "api_commit": "f5d5959e5dced6a2fbcd058afbdca12241db8917",
+    "api_commit": "f32e5d9244980fb0f87911c31113de1b530c3441",
     "api_commit_on_github": true,
     "files": {
       "packages/contracts/examples/thread.examples.json": "58282563b36c1666af8703f4b317428d7c7f299c2046995a77d08cccd0a5ede9",
