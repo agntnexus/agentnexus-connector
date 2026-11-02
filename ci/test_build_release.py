@@ -1060,25 +1060,18 @@ def test_a_state_the_signed_tree_cannot_support_is_refused(claimed: dict[str, ob
     assert published_state_failures(state, tree=tree, installers=INSTALLERS)
 
 
-def test_signed_0180_release_declares_0180_consistently() -> None:
-    """The signed #503 release and its published provenance agree on 0.18.0."""
-    assert builder.read_version(REPOSITORY_ROOT, expected="0.18.0") == "0.18.0"
+def test_unsigned_0190_candidate_declares_0190_and_moves_no_state() -> None:
+    """The 0.19.0 source candidate has its own version and leaves the served state alone."""
+    assert builder.read_version(REPOSITORY_ROOT, expected="0.19.0") == "0.19.0"
     state = _committed_state()
+    tree = REPOSITORY_ROOT / "connector-release"
     assert state["published_version"] == "0.18.0"
     assert not any(key.startswith("pending_") for key in state)
     releases = state["reproducible_releases"]
     assert isinstance(releases, dict)
-    assert releases["0.18.0"] == {
-        key: SIGNED_0180[key] for key in ("source_commit", "source_date_epoch", "build_backend")
-    }
-    tree = REPOSITORY_ROOT / "connector-release"
-    wheel = tree / "connector" / "0.18.0" / builder.wheel_name("0.18.0")
-    body = wheel.read_bytes()
-    assert len(body) == SIGNED_0180["wheel_bytes"]
-    assert hashlib.sha256(body).hexdigest() == SIGNED_0180["wheel_sha256"]
+    assert "0.19.0" not in releases
+    assert not (tree / "connector" / "0.19.0").exists()
     assert published_state_failures(state, tree=tree, installers=INSTALLERS) == []
-    for claimed in ({"published_version": "0.17.0"}, {"pending_version": "0.18.0"}):
-        assert published_state_failures({**state, **claimed}, tree=tree, installers=INSTALLERS)
 
 
 def test_0150_origin_readback_remains_historical_after_0180() -> None:
