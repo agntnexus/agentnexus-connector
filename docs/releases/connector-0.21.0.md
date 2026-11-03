@@ -1,6 +1,6 @@
 # Connector 0.21.0 — published signed release
 
-This page records the signed and published 0.21.0 release for `agntnexus/agentnexus#591`, which carries the optional recipe words of the translation write (`D-262`, as amended under `#591`). The canonical installation origin serves its wheel, as the read-back below records. When this record was written, [`connector-release-state.json`](connector-release-state.json) set `published_version` to 0.21.0 and carried no `pending_version`. [`connector-0.20.0.md`](connector-0.20.0.md) records the earlier published release, which stays in the tree.
+This page records the signed and published 0.21.0 release for `agntnexus/agentnexus#591`, which carries the optional recipe words of the translation write (`D-262`, as amended under `#591`). The canonical installation origin serves its manifest, its detached signature and its wheel, as the read-back below records. When this record was written, [`connector-release-state.json`](connector-release-state.json) set `published_version` to 0.21.0 and carried no `pending_version`. [`connector-0.20.0.md`](connector-0.20.0.md) records the earlier published release, which stays in the tree.
 
 ## Change
 
@@ -40,4 +40,15 @@ The manifest names `connector_version` 0.21.0 and one artifact, the wheel above,
 
 The Observer image `ghcr.io/agntnexus/agentnexus-observer@sha256:af3011d4f4af633fbcc5a2e3ca0d1ebcf64081515fac946406df41221227fbef` was promoted to production at about 10:24Z on 2026-11-03. It was built from `agentnexus-web@44979a53fd66da1d46fe952e94791824f561de3c`, on which CI run 41610777450 ran.
 
-A public HTTPS read-back of the wheel at `https://agntnexus.com/connector/0.21.0/agentnexus_sdk-0.21.0-py3-none-any.whl`, taken on 2026-11-03, returned HTTP 200 with 401359 bytes and SHA-256 `b306a39cdf60e81e33c5a1201175bd2d4dd791d43a9ffd1245381309cd86f8df`. Those are the bytes of the signed wheel in the release tree. This read-back covers the wheel only: the manifest, its detached signature and the installers were not read back for this record, and this page claims no read-back of them. The committed installers are the bytes the origin served at the 0.20.0 read-back, as [`connector-0.20.0.md`](connector-0.20.0.md) records, and 0.21.0 did not change them.
+A public HTTPS read-back of the canonical origin, taken on 2026-11-03 after 10:35Z, returned the manifest and its detached signature, and the `connect.sh` and `connect.ps1` installers. The served manifest and signature are byte-identical to the signed files in the release tree. Each installer was compared with its committed loader with line endings normalised, and the read-back matched the first sixteen hexadecimal characters of its SHA-256. The byte counts and full digests in the table are those of the committed files:
+
+| Served file | Bytes | SHA-256 |
+| --- | --- | --- |
+| `connector-release.json` (manifest) | 347 | `1776f9770c00f4e2b4187584b0c5d17a9299cd7b97913724bc1fc0be9190dea5` |
+| `connector-release.json.sig` (detached signature) | 128 | `ff3e00e7d646b77449a61c3eeb4cb21768e6010890d35faa18e4a63466c5901f` |
+| `connect.sh` | 15131 | `a3eae983a94cf8795f2caa891d805b77c668620dfc24ccc23842afd7139426b9` |
+| `connect.ps1` | 30192 | `f36bda505055a2ba6a3f0a560ccb70b1f0eac0160eb653d9e3b6a26e32bd34b7` |
+
+A public HTTPS read-back of the wheel at `https://agntnexus.com/connector/0.21.0/agentnexus_sdk-0.21.0-py3-none-any.whl`, taken on 2026-11-03, returned HTTP 200 with 401359 bytes and SHA-256 `b306a39cdf60e81e33c5a1201175bd2d4dd791d43a9ffd1245381309cd86f8df`. Those are the bytes of the signed wheel in the release tree.
+
+`remove.ps1` was not part of either read-back, so this page claims no read-back of it. The committed `remove.ps1` matches, with line endings normalised, the digest read back at 0.20.0, as [`connector-0.20.0.md`](connector-0.20.0.md) records, and 0.21.0 did not change it.

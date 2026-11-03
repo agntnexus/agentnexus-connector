@@ -910,13 +910,24 @@ ORIGIN_READBACK_0200 = {
     "retained_0180_sha256": "e4ece234013b3e6848db7474b9762f37c8bc0d3a7315c6d8f1cd1df2a2dc182d",
 }
 
-#: What the canonical origin served on 2026-11-03, after the Observer carrying 0.21.0 was promoted
-#: (agentnexus-web 44979a53, image sha256:af3011d4, CI run 41610777450; promoted about 10:24Z). Read
-#: back over public HTTPS that day: the served wheel is byte-identical to the signed one. The
-#: manifest, its signature and the installers were not read back for this record.
+#: What the canonical origin served after the Observer carrying 0.21.0 was promoted (agentnexus-web
+#: 44979a53, image sha256:af3011d4, CI run 41610777450; promoted about 10:24Z). The manifest, its
+#: signature and the connect.sh and connect.ps1 installers were read back over public HTTPS on
+#: 2026-11-03 after 10:35Z: each is byte-identical to the signed tree or the committed loader, with
+#: line endings normalised, and the installer read-back matched the first sixteen hex digits of
+#: each installer digest. The wheel was read back on 2026-11-03 and is byte-identical to the signed
+#: wheel. remove.ps1 was not read back for this record.
 ORIGIN_READBACK_0210 = {
     "observer_image": "sha256:af3011d4f4af633fbcc5a2e3ca0d1ebcf64081515fac946406df41221227fbef",
     "observer_source": "44979a53fd66da1d46fe952e94791824f561de3c",
+    "manifest_bytes": 347,
+    "manifest_sha256": "1776f9770c00f4e2b4187584b0c5d17a9299cd7b97913724bc1fc0be9190dea5",
+    "signature_bytes": 128,
+    "signature_sha256": "ff3e00e7d646b77449a61c3eeb4cb21768e6010890d35faa18e4a63466c5901f",
+    "connect_sh_bytes": 15131,
+    "connect_sh_sha256": "a3eae983a94cf8795f2caa891d805b77c668620dfc24ccc23842afd7139426b9",
+    "connect_ps1_bytes": 30192,
+    "connect_ps1_sha256": "f36bda505055a2ba6a3f0a560ccb70b1f0eac0160eb653d9e3b6a26e32bd34b7",
     "wheel_bytes": 401359,
     "wheel_sha256": "b306a39cdf60e81e33c5a1201175bd2d4dd791d43a9ffd1245381309cd86f8df",
 }
@@ -1061,6 +1072,8 @@ def test_the_origin_serves_0210_and_the_state_says_so() -> None:
     assert manifest_document["released_at"] == SIGNED_0210["released_at"]
     assert len(manifest) == SIGNED_0210["manifest_bytes"]
     assert hashlib.sha256(manifest).hexdigest() == SIGNED_0210["manifest_sha256"]
+    assert len(manifest) == ORIGIN_READBACK_0210["manifest_bytes"]
+    assert hashlib.sha256(manifest).hexdigest() == ORIGIN_READBACK_0210["manifest_sha256"]
     # The served 0.20.0 manifest is no longer in the tree: the 0.21.0 manifest was signed over it.
     assert hashlib.sha256(manifest).hexdigest() != ORIGIN_READBACK_0200["manifest_sha256"]
     assert hashlib.sha256(manifest).hexdigest() != ORIGIN_READBACK_0180["manifest_sha256"]
@@ -1076,6 +1089,8 @@ def test_the_origin_serves_0210_and_the_state_says_so() -> None:
     signature = (connector / builder.SIGNATURE_NAME).read_bytes()
     assert len(signature) == SIGNED_0210["signature_bytes"]
     assert hashlib.sha256(signature).hexdigest() == SIGNED_0210["signature_sha256"]
+    assert len(signature) == ORIGIN_READBACK_0210["signature_bytes"]
+    assert hashlib.sha256(signature).hexdigest() == ORIGIN_READBACK_0210["signature_sha256"]
     tree = REPOSITORY_ROOT / "connector-release"
     assert published_state_failures(state, tree=tree, installers=INSTALLERS) == []
     served = (connector / "0.20.0" / builder.wheel_name("0.20.0")).read_bytes()
@@ -1099,6 +1114,8 @@ def test_the_origin_serves_0210_and_the_state_says_so() -> None:
     for value in (*SIGNED_0210.values(), *ORIGIN_READBACK_0210.values()):
         assert str(value) in note_0210, value
     assert "This page records the signed and published 0.21.0 release" in flat_0210
+    assert "taken on 2026-11-03 after 10:35Z" in flat_0210
+    assert "was not part of either read-back" in flat_0210
     assert "signed and not published" not in flat_0210
     assert "pending publication" not in flat_0210
     note_0200 = (REPOSITORY_ROOT / "docs" / "releases" / "connector-0.20.0.md").read_text(
@@ -1114,13 +1131,17 @@ def test_the_origin_serves_0210_and_the_state_says_so() -> None:
     for name, prefix in (
         ("connect.sh", "connect_sh"),
         ("connect.ps1", "connect_ps1"),
-        ("remove.ps1", "remove_ps1"),
     ):
         # A Windows checkout with core.autocrlf writes CRLF; the committed file is LF, which is the
         # file the origin serves, so line endings are normalised before the size and digest.
         loader = (REPOSITORY_ROOT / "connector-release" / name).read_bytes().replace(b"\r\n", b"\n")
-        assert len(loader) == ORIGIN_READBACK_0200[f"{prefix}_bytes"], name
-        assert hashlib.sha256(loader).hexdigest() == ORIGIN_READBACK_0200[f"{prefix}_sha256"], name
+        assert len(loader) == ORIGIN_READBACK_0210[f"{prefix}_bytes"], name
+        assert hashlib.sha256(loader).hexdigest() == ORIGIN_READBACK_0210[f"{prefix}_sha256"], name
+    # remove.ps1 was not read back for 0.21.0; the committed file is the one read back at 0.20.0.
+    remove_path = REPOSITORY_ROOT / "connector-release" / "remove.ps1"
+    remove = remove_path.read_bytes().replace(b"\r\n", b"\n")
+    assert len(remove) == ORIGIN_READBACK_0200["remove_ps1_bytes"]
+    assert hashlib.sha256(remove).hexdigest() == ORIGIN_READBACK_0200["remove_ps1_sha256"]
     note_0180 = (REPOSITORY_ROOT / "docs" / "releases" / "connector-0.18.0.md").read_text(
         encoding="utf-8"
     )
