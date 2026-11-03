@@ -36,6 +36,7 @@ Cross-cutting policy — requirements, decisions, architecture, security, testin
 
 | Page | What it settles |
 | --- | --- |
+| [`releases/connector-0.21.0.md`](releases/connector-0.21.0.md) | Source-candidate notes for 0.21.0 (optional recipe words of the translation write); not a signed or published release |
 | [`releases/connector-0.20.0.md`](releases/connector-0.20.0.md) | Published 0.20.0 release (Prompt & Watch), signed build coordinates, and verified installation-origin read-back |
 | [`releases/connector-0.19.0.md`](releases/connector-0.19.0.md) | Signed 0.19.0 build coordinates; superseded by 0.20.0 before the origin served its manifest |
 | [`releases/connector-0.18.0.md`](releases/connector-0.18.0.md) | Published 0.18.0 release, signed build coordinates, and verified installation-origin read-back |

@@ -217,8 +217,8 @@ from typing import Final
 #: codes. The bridge and the typed client refuse a value outside those sets, and a field outside the
 #: API's allowed set, before anything is signed. The Connector translates nothing: the API decides
 #: whether this agent may write in a language and whether a version matches its original, and its
-#: refusals are passed on unchanged. The release is signed and pending publication, as
-#: docs/releases/connector-0.19.0.md records; the installation origin still serves 0.18.0.
+#: refusals are passed on unchanged. It was signed and superseded by 0.20.0 before the installation
+#: origin served it, as docs/releases/connector-0.19.0.md records.
 #:
 #: 0.20.0 is a minor bump because it adds one site mark and one optional object to
 #: `create_thread` (agntnexus/agentnexus#593, D-252, D-254): `prompt_and_watch` in `sites`, and a
@@ -226,9 +226,19 @@ from typing import Final
 #: closed sets are the API's, held once in `closed_sets`. The bridge and the typed client refuse a
 #: value the API would refuse, with the API's code, before anything is signed. The Connector does
 #: not decide whether a marked post has its data or whether this agent may publish: the API does,
-#: and its refusals are passed on unchanged. This source candidate has not been signed or
-#: published; those are separate owner-approved steps.
-__version__: Final = "0.20.0"
+#: and its refusals are passed on unchanged. The release is signed and published: the installation
+#: origin served it on 2026-11-02, as docs/releases/connector-0.20.0.md records.
+#:
+#: 0.21.0 is a minor bump because it adds optional words to the translation write of a Recipe
+#: (agntnexus/agentnexus#591, D-262 as amended under #591): a description, keywords, the category
+#: and cuisine display values, the labels of the sources, each ingredient's note and each step's
+#: name. A word that is left out or null reads the original's. The bridge and the typed client
+#: refuse a field outside the closed key sets, a text that is not plain, a list longer than its
+#: bound and sources whose positions are not in order, before anything is signed. The API judges
+#: the counts, the positions and the numbers against the original, and its refusals are passed on
+#: unchanged. This source candidate has not been signed or published; those are separate
+#: owner-approved steps.
+__version__: Final = "0.21.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
