@@ -910,6 +910,17 @@ ORIGIN_READBACK_0200 = {
     "retained_0180_sha256": "e4ece234013b3e6848db7474b9762f37c8bc0d3a7315c6d8f1cd1df2a2dc182d",
 }
 
+#: What the canonical origin served on 2026-11-03, after the Observer carrying 0.21.0 was promoted
+#: (agentnexus-web 44979a53, image sha256:af3011d4, CI run 41610777450; promoted about 10:24Z). Read
+#: back over public HTTPS that day: the served wheel is byte-identical to the signed one. The
+#: manifest, its signature and the installers were not read back for this record.
+ORIGIN_READBACK_0210 = {
+    "observer_image": "sha256:af3011d4f4af633fbcc5a2e3ca0d1ebcf64081515fac946406df41221227fbef",
+    "observer_source": "44979a53fd66da1d46fe952e94791824f561de3c",
+    "wheel_bytes": 401359,
+    "wheel_sha256": "b306a39cdf60e81e33c5a1201175bd2d4dd791d43a9ffd1245381309cd86f8df",
+}
+
 #: The immutable wheel committed by the signed 0.15.0 release (#339, PR #66).
 SIGNED_0150_WHEEL = {
     "bytes": 374083,
@@ -987,8 +998,8 @@ SIGNED_0200 = {
     "released_at": "2026-11-02T13:21:24Z",
 }
 
-#: The signed 0.21.0 artifact built from the merged #591 source (agentnexus-connector#88). It is
-#: pending publication: the installation origin does not serve it, and no read-back exists.
+#: The signed 0.21.0 artifact built from the merged #591 source (agentnexus-connector#88). The
+#: installation origin serves its wheel, as ORIGIN_READBACK_0210 records.
 SIGNED_0210 = {
     "source_commit": "38d9dd21e6d82774da1951f2c7423f8084e5301d",
     "source_date_epoch": 1793693372,
@@ -1012,12 +1023,11 @@ SIGNED_0140_SOURCE = "89aca9136aff420f119c011e991dff6440ebf3b1"
 SIGNED_0150_SOURCE = "541d0e863ce486393baf6c7991c6138bc0cf77bb"
 
 
-def test_the_origin_serves_0200_while_the_signed_0210_is_pending() -> None:
-    """The verified 0.20.0 origin read-back stays published while the signed 0.21.0 is pending."""
+def test_the_origin_serves_0210_and_the_state_says_so() -> None:
+    """The verified 0.21.0 origin read-back is the published state, with nothing left pending."""
     state = _committed_state()
-    assert state["published_version"] == "0.20.0"
-    assert state["pending_version"] == "0.21.0"
-    assert {key for key in state if key.startswith("pending_")} == {"pending_version"}
+    assert state["published_version"] == "0.21.0"
+    assert not any(key.startswith("pending_") for key in state)
     releases = state["reproducible_releases"]
     assert isinstance(releases, dict)
     assert releases["0.13.0"] == PROVENANCE_0130
@@ -1061,6 +1071,8 @@ def test_the_origin_serves_0200_while_the_signed_0210_is_pending() -> None:
     assert artifact["url"] == f"https://agntnexus.com/connector/0.21.0/{wheel.name}"
     assert artifact["size"] == len(body) == SIGNED_0210["wheel_bytes"]
     assert artifact["sha256"] == hashlib.sha256(body).hexdigest() == SIGNED_0210["wheel_sha256"]
+    assert len(body) == ORIGIN_READBACK_0210["wheel_bytes"]
+    assert hashlib.sha256(body).hexdigest() == ORIGIN_READBACK_0210["wheel_sha256"]
     signature = (connector / builder.SIGNATURE_NAME).read_bytes()
     assert len(signature) == SIGNED_0210["signature_bytes"]
     assert hashlib.sha256(signature).hexdigest() == SIGNED_0210["signature_sha256"]
@@ -1079,6 +1091,16 @@ def test_the_origin_serves_0200_while_the_signed_0210_is_pending() -> None:
     retained = (connector / "0.17.0" / builder.wheel_name("0.17.0")).read_bytes()
     assert len(retained) == ORIGIN_READBACK_0170["wheel_bytes"]
     assert hashlib.sha256(retained).hexdigest() == ORIGIN_READBACK_0170["wheel_sha256"]
+    note_0210 = (REPOSITORY_ROOT / "docs" / "releases" / "connector-0.21.0.md").read_text(
+        encoding="utf-8"
+    )
+    # Whitespace-normalised: the sentences are wrapped in the file, and a wrap must not decide.
+    flat_0210 = " ".join(note_0210.split())
+    for value in (*SIGNED_0210.values(), *ORIGIN_READBACK_0210.values()):
+        assert str(value) in note_0210, value
+    assert "This page records the signed and published 0.21.0 release" in flat_0210
+    assert "signed and not published" not in flat_0210
+    assert "pending publication" not in flat_0210
     note_0200 = (REPOSITORY_ROOT / "docs" / "releases" / "connector-0.20.0.md").read_text(
         encoding="utf-8"
     )
@@ -1173,19 +1195,17 @@ def test_a_state_the_signed_tree_cannot_support_is_refused(claimed: dict[str, ob
     assert published_state_failures(state, tree=tree, installers=INSTALLERS)
 
 
-def test_signed_0210_is_the_pending_release_over_the_published_0200() -> None:
-    """The signed 0.21.0 is the pending release over the published 0.20.0, which stays served.
+def test_signed_0210_release_declares_0210_and_the_superseded_0200_stays_in_the_tree() -> None:
+    """The signed 0.21.0 has its own version and is published; 0.20.0 stays in the tree.
 
     The published 0.20.0 wheel and the superseded 0.19.0 wheel stay in the tree byte-identical. A
-    tree that holds 0.21.0 with no declared pending state is refused: the operator declares it
-    pending, and only then does the state hold.
+    state that names another release as published, or names 0.21.0 as pending, is refused.
     """
     assert builder.read_version(REPOSITORY_ROOT, expected="0.21.0") == "0.21.0"
     state = _committed_state()
     tree = REPOSITORY_ROOT / "connector-release"
-    assert state["published_version"] == "0.20.0"
-    assert state["pending_version"] == "0.21.0"
-    assert {key for key in state if key.startswith("pending_")} == {"pending_version"}
+    assert state["published_version"] == "0.21.0"
+    assert not any(key.startswith("pending_") for key in state)
     releases = state["reproducible_releases"]
     assert isinstance(releases, dict)
     for version, signed in (
@@ -1209,12 +1229,10 @@ def test_signed_0210_is_the_pending_release_over_the_published_0200() -> None:
         assert len(kept) == signed["wheel_bytes"], version
         assert hashlib.sha256(kept).hexdigest() == signed["wheel_sha256"], version
     assert published_state_failures(state, tree=tree, installers=INSTALLERS) == []
-    missing_pending = {key: value for key, value in state.items() if key != "pending_version"}
-    assert published_state_failures(missing_pending, tree=tree, installers=INSTALLERS)
     for claimed in (
-        {"published_version": "0.21.0"},
+        {"published_version": "0.20.0"},
+        {"pending_version": "0.21.0"},
         {"pending_version": "0.20.0"},
-        {"pending_version": "0.19.0"},
         {"pending_version": "0.22.0"},
     ):
         assert published_state_failures({**state, **claimed}, tree=tree, installers=INSTALLERS)
@@ -1226,57 +1244,48 @@ def test_signed_0210_is_the_pending_release_over_the_published_0200() -> None:
         assert str(value) in note_0190, value
     assert "superseded by 0.20.0 before the installation origin served it" in flat_0190
     assert "The installation origin never served the 0.19.0 manifest" in flat_0190
-    note_0210 = (REPOSITORY_ROOT / "docs" / "releases" / "connector-0.21.0.md").read_text(
-        encoding="utf-8"
-    )
-    flat_0210 = " ".join(note_0210.split())
-    for value in SIGNED_0210.values():
-        assert str(value) in note_0210, value
-    assert "It is signed and not published." in flat_0210
-    assert "The installation origin still serves 0.20.0" in flat_0210
 
 
-def test_0150_origin_readback_remains_historical_while_0210_is_pending() -> None:
+def test_0150_origin_readback_remains_historical_after_0210() -> None:
     """The earlier 0.15.0 origin read-back and immutable wheel remain historical evidence."""
     state = _committed_state()
     tree = REPOSITORY_ROOT / "connector-release"
     releases = state["reproducible_releases"]
     assert isinstance(releases, dict)
-    assert state["published_version"] == "0.20.0"
-    assert state["pending_version"] == "0.21.0"
+    assert state["published_version"] == "0.21.0"
+    assert not any(key.startswith("pending_") for key in state)
     assert releases["0.15.0"]["source_commit"] == SIGNED_0150_SOURCE
     wheel = tree / "connector" / "0.15.0" / builder.wheel_name("0.15.0")
     body = wheel.read_bytes()
     assert len(body) == SIGNED_0150_WHEEL["bytes"]
     assert hashlib.sha256(body).hexdigest() == SIGNED_0150_WHEEL["sha256"]
     assert published_state_failures(state, tree=tree, installers=INSTALLERS) == []
-    missing_pending = {key: value for key, value in state.items() if key != "pending_version"}
     for claimed in (
+        {"published_version": "0.20.0"},
         {"published_version": "0.19.0"},
         {"published_version": "0.18.0"},
         {"published_version": "0.17.0"},
         {"published_version": "0.16.0"},
         {"published_version": "0.15.0"},
     ):
-        assert published_state_failures(
-            {**missing_pending, **claimed}, tree=tree, installers=INSTALLERS
-        )
+        assert published_state_failures({**state, **claimed}, tree=tree, installers=INSTALLERS)
     for claimed in (
+        {"pending_version": "0.21.0"},
+        {"pending_version": "0.20.0"},
         {"pending_version": "0.19.0"},
         {"pending_version": "0.18.0"},
-        {"pending_version": "0.17.0"},
         {"pending_version": "0.22.0"},
     ):
         assert published_state_failures({**state, **claimed}, tree=tree, installers=INSTALLERS)
 
 
-def test_0140_remains_in_the_tree_beside_the_published_0200() -> None:
+def test_0140_remains_in_the_tree_beside_the_published_0210() -> None:
     """The previously published 0.14.0 wheel and provenance stay immutable."""
     state = _committed_state()
     tree = REPOSITORY_ROOT / "connector-release"
     releases = state["reproducible_releases"]
     assert isinstance(releases, dict)
-    assert state["published_version"] == "0.20.0"
+    assert state["published_version"] == "0.21.0"
     provenance = releases["0.14.0"]
     assert isinstance(provenance, dict)
     assert provenance["source_commit"] == SIGNED_0140_SOURCE
@@ -1285,13 +1294,13 @@ def test_0140_remains_in_the_tree_beside_the_published_0200() -> None:
     assert published_state_failures(state, tree=tree, installers=INSTALLERS) == []
 
 
-def test_0132_stays_in_the_tree_beside_the_published_0200() -> None:
+def test_0132_stays_in_the_tree_beside_the_published_0210() -> None:
     """0.13.2 is no longer the served version, but its wheel and provenance stay immutable."""
     state = _committed_state()
     tree = REPOSITORY_ROOT / "connector-release"
     releases = state["reproducible_releases"]
     assert isinstance(releases, dict)
-    assert state["published_version"] == "0.20.0"
+    assert state["published_version"] == "0.21.0"
     provenance = releases["0.13.2"]
     assert isinstance(provenance, dict)
     assert provenance["source_commit"] == SIGNED_0132_SOURCE
@@ -1300,13 +1309,13 @@ def test_0132_stays_in_the_tree_beside_the_published_0200() -> None:
     assert published_state_failures(state, tree=tree, installers=INSTALLERS) == []
 
 
-def test_0131_stays_in_the_tree_beside_the_published_0200() -> None:
+def test_0131_stays_in_the_tree_beside_the_published_0210() -> None:
     """0.13.1 is no longer the served version, but its wheel and provenance stay immutable."""
     state = _committed_state()
     tree = REPOSITORY_ROOT / "connector-release"
     releases = state["reproducible_releases"]
     assert isinstance(releases, dict)
-    assert state["published_version"] == "0.20.0"
+    assert state["published_version"] == "0.21.0"
     provenance = releases["0.13.1"]
     assert isinstance(provenance, dict)
     assert provenance["source_commit"] == "031c5520d0923a5deccb2299bc291ce2f0b02614"
