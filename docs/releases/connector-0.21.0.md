@@ -1,6 +1,6 @@
-# Connector 0.21.0 — source candidate
+# Connector 0.21.0 — signed pending release
 
-This page records the 0.21.0 source candidate for `agntnexus/agentnexus#591`, which carries the optional recipe words of the translation write (`D-262`, as amended under `#591`). It is unsigned and unpublished. No build coordinates, manifest, signature or wheel for 0.21.0 exist in `connector-release/`, and [`connector-release-state.json`](connector-release-state.json) names neither a pending nor a published 0.21.0. The state is unchanged: `published_version` is 0.20.0 and there is no `pending_version`, as [`connector-0.20.0.md`](connector-0.20.0.md) records.
+This page records the signed 0.21.0 build for `agntnexus/agentnexus#591`, which carries the optional recipe words of the translation write (`D-262`, as amended under `#591`). It is signed and not published. The installation origin still serves 0.20.0, as [`connector-0.20.0.md`](connector-0.20.0.md) records, and no read-back of 0.21.0 is claimed here. [`connector-release-state.json`](connector-release-state.json) keeps `published_version` 0.20.0 and names 0.21.0 as `pending_version`.
 
 ## Change
 
@@ -13,18 +13,35 @@ This page records the 0.21.0 source candidate for `agntnexus/agentnexus#591`, wh
 
 ## Source basis
 
-The source candidate is the merge of agentnexus-connector#87 (`ce45ec9`), whose feature commit is `666dcda`, "Connector: sign the optional recipe words of a translation". It sits on top of the published 0.20.0 source commit `12730c5`. Two commits after it change a release input (`src/`, `installers/`, `pyproject.toml`, `README.md` or `LICENSE`): `72a4e2b`, which changes one link anchor in the README, and `666dcda`. The commit that adds this page bumps the version in `pyproject.toml` and `src/agentnexus_sdk/version.py`.
+The signed build is from commit `38d9dd21e6d82774da1951f2c7423f8084e5301d`, the merge of agentnexus-connector#88 (`707502b`, "release: prepare Connector 0.21.0 source candidate (Refs #591)", merged). The feature is the merge of agentnexus-connector#87 (`ce45ec9`), whose feature commit is `666dcda`, "Connector: sign the optional recipe words of a translation". The signed build sits on top of the published 0.20.0 source commit `12730c5`. Three commits after it change a release input (`src/`, `installers/`, `pyproject.toml`, `README.md` or `LICENSE`): `72a4e2b`, which changes one link anchor in the README; `666dcda`, which carries the feature; and `707502b`, which bumps the version in `pyproject.toml` and `src/agentnexus_sdk/version.py` and adds the candidate notes that this page replaces.
 
 The command that lists those commits is:
 
-    git log --oneline 12730c5..HEAD -- src/agentnexus_sdk installers pyproject.toml README.md LICENSE
+    git log --oneline 12730c5..38d9dd2 -- src/agentnexus_sdk installers pyproject.toml README.md LICENSE
 
-The API copies are pinned to `agentnexus-api` at `8829cd09`, as [`docs/MIRROR.md`](../MIRROR.md) records. The languages, the countries and the Prompt & Watch contract are the same bytes as at `f32e5d92`, which the 0.20.0 note names.
+The `SOURCE_DATE_EPOCH` is the committer time of `38d9dd2`, 1793693372 (2026-11-03T08:09:32Z). The API copies are pinned to `agentnexus-api` at `8829cd09`, as [`docs/MIRROR.md`](../MIRROR.md) records. The languages, the countries and the Prompt & Watch contract are the same bytes as at `f32e5d92`, which the 0.20.0 note names.
+
+## Signed artifacts
+
+The release builder ran from the merged source `38d9dd21e6d82774da1951f2c7423f8084e5301d` (agentnexus-connector#88). It wrote the artifacts below into `connector-release/`, where they are committed. The values are measured from the committed tree, from the blobs in Git and not the working copy, on 2026-11-03.
+
+| Artifact | Value |
+| --- | --- |
+| Source commit | `38d9dd21e6d82774da1951f2c7423f8084e5301d` |
+| `SOURCE_DATE_EPOCH` | 1793693372 (2026-11-03T08:09:32Z), the committer time of the source commit |
+| Build backend | `setuptools==84.0.0` |
+| Wheel `agentnexus_sdk-0.21.0-py3-none-any.whl` in `connector-release/connector/0.21.0/` | 401359 bytes, SHA-256 `b306a39cdf60e81e33c5a1201175bd2d4dd791d43a9ffd1245381309cd86f8df` |
+| Signed manifest `connector-release/connector/connector-release.json` | 347 bytes, SHA-256 `1776f9770c00f4e2b4187584b0c5d17a9299cd7b97913724bc1fc0be9190dea5`, `released_at` `2026-11-03T08:10:53Z` |
+| Detached signature `connector-release/connector/connector-release.json.sig` | 128 bytes, SHA-256 `ff3e00e7d646b77449a61c3eeb4cb21768e6010890d35faa18e4a63466c5901f` |
+
+The manifest names `connector_version` 0.21.0 and one artifact, the wheel above, to be served under `https://agntnexus.com/connector/0.21.0/`. The state file names 0.21.0 as `pending_version` over the published 0.20.0, and carries a `reproducible_releases` entry for the source commit, epoch and build backend. The 0.20.0 and 0.19.0 wheels stay in the tree byte-identical.
+
+Nothing is published, and no read-back of 0.21.0 is recorded here.
 
 ## Installation origin
 
-The installation origin serves 0.20.0, as [`connector-0.20.0.md`](connector-0.20.0.md) records. This page claims no read-back of 0.21.0.
+The installation origin still serves 0.20.0, as [`connector-0.20.0.md`](connector-0.20.0.md) records. This page claims no read-back of 0.21.0.
 
 ## Next steps
 
-Signing, publication and the release of 0.21.0 are separate owner-approved steps. This page is not a release, and it authorises none of them.
+The signing is done and committed. Publication is a separate owner-approved step: `published_version` moves to 0.21.0 only after the installation origin serves that release and the read-back is recorded, as it did for 0.18.0 and 0.20.0. This page is not a publication, and it authorises none.

@@ -27,7 +27,7 @@ The closed sets and the Prompt & Watch copies are pinned to `agentnexus-api` at 
 
 The Observer image `ghcr.io/agntnexus/agentnexus-observer@sha256:db995888225b3d70e341c644012bd15d85747193b6d6a9bd46f94e4ba7e37555` was promoted on 2026-11-02. It was built from `agentnexus-web@cbe62ff30feb78c04f0baabf91d6f477893d9d18`, the merge of agentnexus-web PR #150, on which CI run 41463533352 succeeded. The promotion is recorded in agentnexus-infra PR #286, merged as `102b5192533a332969db83aa783e23e78619969e`.
 
-A public HTTPS read-back of the canonical origin, taken on 2026-11-02 around 15:09Z, returned HTTP 200 for the manifest, its detached signature and the 0.20.0 wheel. The served files are byte-identical to the signed files in the release tree:
+A public HTTPS read-back of the canonical origin, taken on 2026-11-02 around 15:09Z, returned HTTP 200 for the manifest, its detached signature and the 0.20.0 wheel. The served files were byte-identical to the signed files in the release tree when the read-back was taken:
 
 | Served file | Bytes | SHA-256 |
 | --- | --- | --- |
@@ -47,7 +47,7 @@ The 0.19.0 and 0.18.0 wheels also answered HTTP 200 at their own addresses, with
 
 ## Signed artifacts
 
-The owner-approved builder ran from the merged source `12730c59b4e0a0c63db82e75bf98a5a7dcddff07` (agentnexus-connector#84). It wrote the artifacts below into `connector-release/`, where they are committed. Two builds were byte-identical, the manifest signature verified, and no private key material is in the tree or the wheel. The installation origin served the same bytes.
+The owner-approved builder ran from the merged source `12730c59b4e0a0c63db82e75bf98a5a7dcddff07` (agentnexus-connector#84). It wrote the artifacts below into `connector-release/`, where they were committed. Two builds were byte-identical, the manifest signature verified, and no private key material is in the tree or the wheel. The installation origin served the same bytes. The signing of 0.21.0 on 2026-11-03 replaced the manifest and signature below in the tree, so they are recorded here by their digests only.
 
 | Artifact | Value |
 | --- | --- |
@@ -55,7 +55,7 @@ The owner-approved builder ran from the merged source `12730c59b4e0a0c63db82e75b
 | `SOURCE_DATE_EPOCH` | 1793625575 (2026-11-02T13:19:35Z), the committer time of the source commit |
 | Build backend | `setuptools==84.0.0` |
 | Wheel `agentnexus_sdk-0.20.0-py3-none-any.whl` in `connector-release/connector/0.20.0/` | 399596 bytes, SHA-256 `d9791f0c9066421f84ac01b1bd6b45874fd63f31375d2403b82a78acf0f5d14a` |
-| Signed manifest `connector-release/connector/connector-release.json` | 347 bytes, SHA-256 `61eb194566fc2fbd9e18b9ff751bf23ad59929dc8f670ec7e4670f31963e0c3f`, `released_at` `2026-11-02T13:21:24Z` |
-| Detached signature `connector-release/connector/connector-release.json.sig` | 128 bytes, SHA-256 `2659e48e4334aa99fe00057829d47b6fb66f25df06ce7e9396470f6997b4e95d` |
+| Signed manifest for 0.20.0, superseded in `connector-release/connector/connector-release.json` by 0.21.0 | 347 bytes, SHA-256 `61eb194566fc2fbd9e18b9ff751bf23ad59929dc8f670ec7e4670f31963e0c3f`, `released_at` `2026-11-02T13:21:24Z` |
+| Detached signature for 0.20.0, superseded by 0.21.0's `connector-release/connector/connector-release.json.sig` | 128 bytes, SHA-256 `2659e48e4334aa99fe00057829d47b6fb66f25df06ce7e9396470f6997b4e95d` |
 
 The manifest names `connector_version` 0.20.0 and one artifact, the wheel above, served under `https://agntnexus.com/connector/0.20.0/`. When this record was written, the state file recorded the release as `published_version` 0.20.0, with no `pending_version`, and carried a `reproducible_releases` entry for the source commit, epoch and build backend. The 0.19.0 wheel stays in the tree byte-identical, with its own entry.
