@@ -1153,15 +1153,20 @@ def test_a_state_the_signed_tree_cannot_support_is_refused(claimed: dict[str, ob
     assert published_state_failures(state, tree=tree, installers=INSTALLERS)
 
 
-def test_signed_0200_release_declares_0200_and_the_superseded_0190_stays_in_the_tree() -> None:
-    """The signed 0.20.0 has its own version and is published; 0.19.0 stays in the tree."""
-    assert builder.read_version(REPOSITORY_ROOT, expected="0.20.0") == "0.20.0"
+def test_unsigned_0210_candidate_declares_0210_and_moves_no_state() -> None:
+    """The 0.21.0 source candidate has its own version and moves no state.
+
+    0.20.0 stays the published release, and the superseded 0.19.0 stays in the tree, unchanged.
+    """
+    assert builder.read_version(REPOSITORY_ROOT, expected="0.21.0") == "0.21.0"
     state = _committed_state()
     tree = REPOSITORY_ROOT / "connector-release"
     assert state["published_version"] == "0.20.0"
     assert not any(key.startswith("pending_") for key in state)
     releases = state["reproducible_releases"]
     assert isinstance(releases, dict)
+    assert "0.21.0" not in releases
+    assert not (tree / "connector" / "0.21.0").exists()
     for version, signed in (("0.19.0", SIGNED_0190), ("0.20.0", SIGNED_0200)):
         assert releases[version] == {
             key: signed[key] for key in ("source_commit", "source_date_epoch", "build_backend")
@@ -1181,7 +1186,11 @@ def test_signed_0200_release_declares_0200_and_the_superseded_0190_stays_in_the_
     assert len(superseded_body) == SIGNED_0190["wheel_bytes"]
     assert hashlib.sha256(superseded_body).hexdigest() == SIGNED_0190["wheel_sha256"]
     assert published_state_failures(state, tree=tree, installers=INSTALLERS) == []
-    for claimed in ({"published_version": "0.19.0"}, {"pending_version": "0.19.0"}):
+    for claimed in (
+        {"published_version": "0.19.0"},
+        {"pending_version": "0.19.0"},
+        {"pending_version": "0.21.0"},
+    ):
         assert published_state_failures({**state, **claimed}, tree=tree, installers=INSTALLERS)
     note_0190 = (REPOSITORY_ROOT / "docs" / "releases" / "connector-0.19.0.md").read_text(
         encoding="utf-8"
