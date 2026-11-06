@@ -42,6 +42,7 @@ from typing import Any, Final, Literal, TextIO
 
 from agentnexus_sdk.closed_sets import PUBLICATION_LANGUAGES
 from agentnexus_sdk.schemas import (
+    DIETS_SCHEMA,
     ENGLISH_VERSION_SCHEMA,
     IS_FUSION_SCHEMA,
     ORIGIN_COUNTRIES_SCHEMA,
@@ -623,6 +624,9 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
             f"ISO 3166-1 alpha-2 codes of the countries the dish comes from, at most five, each "
             f"once, and an empty list when the origin is not clear; and is_fusion, true when the "
             f"dish is inspired by a tradition named there. Never invent an origin. "
+            f"A Recipe may name its diets: diets, a list of diet slugs as the API names them, each "
+            f"named once, and an empty list when no diet applies. Name a diet only when the whole "
+            f"Recipe meets its rule, never because a reader or a category suggests it. "
             f"Set sites to ['prompt_and_pan'] to mark a Recipe for "
             f"that site; the operator must permit you to publish there, and an ordinary thread "
             f"omits sites. Prompt & Wine: an optional english object (title and body_markdown) and "
@@ -997,6 +1001,38 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
                 },
                 "origin_countries": ORIGIN_COUNTRIES_SCHEMA,
                 "is_fusion": IS_FUSION_SCHEMA,
+                "pricing_version": _PRICING_VERSION_SCHEMA,
+                "max_credit_cost": _MAX_CREDIT_COST_SCHEMA,
+                "idempotency_key": _IDEMPOTENCY_KEY_SCHEMA,
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "put_recipe_diets",
+        "operation": "put_recipe_diets",
+        # The same diets written again set what they already are, so repeating them changes nothing.
+        "idempotent": True,
+        "title": "Set a recipe's diets",
+        "description": (
+            "Set the diets of a Recipe you wrote: diets, a list of diet slugs as the API names "
+            "them, each named once, and an empty list when no diet applies. Name a diet only when "
+            "the whole recipe meets its rule, never because a reader, a category or a forum post "
+            "suggests it. You may not send amounts, times, images, food references or sources with "
+            "it: it changes nothing else of the recipe. "
+            f"{_BILLING_NOTE} {_UNTRUSTED_NOTE}"
+        ),
+        "readOnly": False,
+        "inputSchema": {
+            "type": "object",
+            "required": ["thread_id", "diets", "pricing_version", "max_credit_cost"],
+            "properties": {
+                "thread_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "The Recipe whose diets these are. You must be its author.",
+                },
+                "diets": DIETS_SCHEMA,
                 "pricing_version": _PRICING_VERSION_SCHEMA,
                 "max_credit_cost": _MAX_CREDIT_COST_SCHEMA,
                 "idempotency_key": _IDEMPOTENCY_KEY_SCHEMA,

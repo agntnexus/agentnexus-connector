@@ -61,6 +61,14 @@ STABLE_CODES = {
     "origin-put-invalid-code": "recipe.origin_countries_invalid",
     "origin-put-too-many": "recipe.origin_countries_too_many",
     "origin-put-duplicate": "recipe.origin_countries_duplicate",
+    # A diet that is not a slug of 2 to 40 characters is refused with the API's code for a diet it
+    # does not accept (`D-274` item 4, agntnexus/agentnexus#632).
+    "diets-item-not-text": "recipe.diets_invalid",
+    "diets-item-too-short": "recipe.diets_invalid",
+    "diets-item-too-long": "recipe.diets_invalid",
+    "diets-put-slug-not-text": "recipe.diets_invalid",
+    "diets-put-slug-too-short": "recipe.diets_invalid",
+    "diets-put-slug-too-long": "recipe.diets_invalid",
     "translation-language-nl": "translation.language_not_active",
     "translation-language-regional": "translation.language_not_active",
     "translation-language-case": "translation.language_not_active",
@@ -86,8 +94,8 @@ STABLE_CODES = {
     "translation-words-step-name-long": "translation.text_invalid",
     "translation-words-step-name-empty": "translation.text_invalid",
 }
-#: The refusal mutations that name a translation or an origin write, not a create command.
-WRITE_MUTATION_PREFIXES = ("translation-", "origin-put-")
+#: The refusal mutations that name a translation, an origin or a diets write, not a create command.
+WRITE_MUTATION_PREFIXES = ("translation-", "origin-put-", "diets-put-")
 
 
 def recipe() -> dict[str, Any]:
@@ -333,6 +341,20 @@ def origin(**changes: Any) -> dict[str, Any]:
     return document
 
 
+def diets_put(**changes: Any) -> dict[str, Any]:
+    """Return one diets write as a bridge command, with changes applied (`D-274` item 4, #632)."""
+    document: dict[str, Any] = {
+        "operation": "put_recipe_diets",
+        "thread_id": THREAD_ID,
+        "diets": ["vegan"],
+        "pricing_version": "p1",
+        "max_credit_cost": 0,
+        "idempotency_key": "diets-retry-632",
+    }
+    document.update(changes)
+    return document
+
+
 def without(document: dict[str, Any], *keys: str) -> dict[str, Any]:
     """Return a copy of a command with the named fields taken out."""
     return {key: value for key, value in document.items() if key not in keys}
@@ -447,6 +469,24 @@ def write_refusal_document(mutation: str) -> dict[str, Any]:
         return without(origin(), "pricing_version")
     if mutation == "origin-put-thread-id-upper":
         return origin(thread_id=THREAD_ID.replace("4", "A", 1))
+    if mutation == "diets-put-missing":
+        return without(diets_put(), "diets")
+    if mutation == "diets-put-null":
+        return diets_put(diets=None)
+    if mutation == "diets-put-not-list":
+        return diets_put(diets="vegan")
+    if mutation == "diets-put-slug-too-short":
+        return diets_put(diets=["v"])
+    if mutation == "diets-put-slug-too-long":
+        return diets_put(diets=["v" * 41])
+    if mutation == "diets-put-slug-not-text":
+        return diets_put(diets=[5])
+    if mutation == "diets-put-unknown-field":
+        return diets_put(image="https://example.org/dish.jpg")
+    if mutation == "diets-put-missing-billing":
+        return without(diets_put(), "pricing_version")
+    if mutation == "diets-put-thread-id-upper":
+        return diets_put(thread_id=THREAD_ID.replace("4", "A", 1))
     raise AssertionError(f"no write document for {mutation!r}")
 
 
@@ -678,11 +718,25 @@ def _assert_thread_versions_reads_the_contract_example() -> None:
 
 
 def _assert_signed_write_matches_contract(write: str) -> None:
-    """Check that a translation or an origin write is signed as sent, and matches the contract."""
+    """Check that a translation, origin or diets write is signed as sent, and fits the contract."""
     client, transport, public_key = signed_client()
     billing = BillingDeclaration(pricing_version="p1", max_credit_cost=0)
     words: dict[str, Any] | None = None
-    if write == "origin":
+    if write == "diets":
+        with client:
+            client.set_recipe_diets(
+                thread_id=THREAD_ID,
+                diets=["vegan"],
+                billing=billing,
+                idempotency_key="diets-signed-632",
+            )
+        path, key, operation = (
+            f"/agent-api/v1/threads/{THREAD_ID}/recipe/diets",
+            "diets-signed-632",
+            "recipe.diets.put",
+        )
+        expected = {"diets", "billing"}
+    elif write == "origin":
         with client:
             client.set_recipe_origin(
                 thread_id=THREAD_ID,
@@ -733,8 +787,12 @@ def _assert_signed_write_matches_contract(write: str) -> None:
     if words is not None:
         # The words are sent as given, every optional one included, neither added to nor dropped.
         assert json.loads(request.content)["recipe"] == words
-    contract_fields = fixture("api-agent-contract-567.json")["operations"][operation]
-    assert expected <= set(contract_fields["request_body"]["properties"])
+    if operation != "recipe.diets.put":
+        # `recipe.diets.put` is not in the pinned contract fixture yet. A fixture is re-pinned only
+        # from an API commit on GitHub (docs/MIRROR.md); until then the route and the body of the
+        # diets write are checked against `D-274` item 4 by the assertions above.
+        contract_fields = fixture("api-agent-contract-567.json")["operations"][operation]
+        assert expected <= set(contract_fields["request_body"]["properties"])
     assert signature_verifies(request, public_key)
 
 
@@ -944,6 +1002,46 @@ def _assert_translation_statuses_are_reported() -> None:
         assert json.loads(transport.requests[0].content)["recipe"] == translated_recipe_words()
 
 
+def _assert_diets_statuses_are_reported() -> None:
+    """Check that each answer of `recipe.diets.put` is reported as its status (`D-274` item 4).
+
+    The API answers 200 for a write it stored. A changed set of diets is reported as updated, an
+    unchanged one as unchanged, and a replayed answer as replayed, exactly as the origin write does.
+    """
+    answers = (
+        ({"diets": ["vegan"]}, "updated"),
+        ({"diets": ["vegan"], "changed": False}, "unchanged"),
+        ({"diets": ["vegan"], "replayed": True}, "replayed"),
+    )
+    config = bridge.BridgeConfig(
+        agent_id=AGENT_ID,
+        key_id=KEY_ID,
+        private_key_file=Path(__file__),  # unused: the client is supplied
+        agent_api_url="http://127.0.0.1:1",
+        public_api_url="http://127.0.0.1:2",
+        observer_url=None,
+    )
+    for extra, status in answers:
+        transport = _AnsweringTransport(200, extra)
+        client = AgentNexusClient(
+            agent_id=AGENT_ID,
+            key_id=KEY_ID,
+            signer=generate_key_pair().signer,
+            options=ClientOptions(base_url="http://127.0.0.1:1"),
+            transport=transport,
+        )
+        with client:
+            result = bridge.run_command(
+                bridge.parse_command(json.dumps(diets_put()).encode()),
+                config=config,
+                client=client,
+            )
+        assert result["operation_status"] == status, extra
+        assert result["diets"] == ["vegan"], extra
+        assert len(transport.requests) == 1
+        assert json.loads(transport.requests[0].content)["diets"] == ["vegan"]
+
+
 @pytest.mark.parametrize(
     "write",
     [
@@ -958,6 +1056,8 @@ def _assert_translation_statuses_are_reported() -> None:
         "translation-wine-article",
         "translation-statuses",
         "origin",
+        "diets",
+        "diets-statuses",
         "thread-versions",
     ],
 )
@@ -980,6 +1080,8 @@ def test_the_recipe_writes_are_signed_as_sent_and_match_the_contract(write: str)
         _assert_contract_agreement()
     elif write == "translation-statuses":
         _assert_translation_statuses_are_reported()
+    elif write == "diets-statuses":
+        _assert_diets_statuses_are_reported()
     elif write == "thread-versions":
         _assert_thread_versions_reads_the_contract_example()
     else:
@@ -1029,6 +1131,8 @@ class FakeClient:
         "null-food-ref-with-amounts",
         "origin-and-fusion",
         "origin-unclear",
+        "diets",
+        "diets-none",
     ],
 )
 def test_the_bridge_validates_and_forwards_the_recipe_without_calculation(shape: str) -> None:
@@ -1054,6 +1158,12 @@ def test_the_bridge_validates_and_forwards_the_recipe_without_calculation(shape:
         structured["is_fusion"] = True
     elif shape == "origin-unclear":
         structured["origin_countries"] = []
+    elif shape == "diets":
+        # The Connector keeps no list of diets: a slug of the right shape is forwarded, and the API
+        # decides which slugs are live.
+        structured["diets"] = ["vegan", "made-up-diet"]
+    elif shape == "diets-none":
+        structured["diets"] = []
     else:
         with_amounts(structured)
         structured["ingredients"][0]["food_ref"] = None
@@ -1170,6 +1280,20 @@ def test_the_bridge_validates_and_forwards_the_recipe_without_calculation(shape:
         ("origin-put-unknown-field", "Unknown field"),
         ("origin-put-missing-billing", "pricing_version"),
         ("origin-put-thread-id-upper", "canonical UUID"),
+        ("diets-not-list", "must be a list of diet slugs"),
+        ("diets-null", "must be a list of diet slugs"),
+        ("diets-item-not-text", "2 to 40 characters"),
+        ("diets-item-too-short", "2 to 40 characters"),
+        ("diets-item-too-long", "2 to 40 characters"),
+        ("diets-put-missing", "Field 'diets' is required"),
+        ("diets-put-null", "Field 'diets' is required"),
+        ("diets-put-not-list", "must be a list of diet slugs"),
+        ("diets-put-slug-too-short", "2 to 40 characters"),
+        ("diets-put-slug-too-long", "2 to 40 characters"),
+        ("diets-put-slug-not-text", "2 to 40 characters"),
+        ("diets-put-unknown-field", "Unknown field"),
+        ("diets-put-missing-billing", "pricing_version"),
+        ("diets-put-thread-id-upper", "canonical UUID"),
     ],
 )
 def test_malformed_or_fabricated_recipe_data_is_refused_before_sending(
@@ -1177,9 +1301,9 @@ def test_malformed_or_fabricated_recipe_data_is_refused_before_sending(
 ) -> None:
     """Refuse a partial, fabricated or unknown value for the stated reason, before signing.
 
-    The same holds for the origin of a Recipe named in its create command, for a translated version
-    and for an origin write. Where the API names a stable code for a refusal, the bridge carries it
-    (agntnexus/agentnexus#567).
+    The same holds for the origin and the diets of a Recipe named in its create command, for a
+    translated version and for an origin or diets write. Where the API names a stable code for a
+    refusal, the bridge carries it (agntnexus/agentnexus#567, #632).
     """
     if mutation.startswith(WRITE_MUTATION_PREFIXES):
         document = write_refusal_document(mutation)
@@ -1288,6 +1412,16 @@ def test_malformed_or_fabricated_recipe_data_is_refused_before_sending(
         structured["origin_countries"] = None
     elif mutation == "recipe-origin-unknown-field":
         structured["origin"] = {"countries": ["DE"]}
+    elif mutation == "diets-not-list":
+        structured["diets"] = "vegan"
+    elif mutation == "diets-null":
+        structured["diets"] = None
+    elif mutation == "diets-item-not-text":
+        structured["diets"] = [5]
+    elif mutation == "diets-item-too-short":
+        structured["diets"] = ["v"]
+    elif mutation == "diets-item-too-long":
+        structured["diets"] = ["v" * 41]
 
     with pytest.raises(bridge.BridgeInputError, match=reason) as refused:
         bridge.parse_command(json.dumps(command(structured=structured)).encode())
@@ -1360,6 +1494,30 @@ def test_bridge_and_mcp_schemas_expose_only_the_strict_text_contract() -> None:
     assert origin["items"]["type"] == "string"
     assert recipe_schema["properties"]["is_fusion"]["type"] == "boolean"
     assert {"origin_countries", "is_fusion"}.isdisjoint(recipe_schema["required"])
+    # The diets of a Recipe are an optional list of slugs of 2 to 40 characters (`D-274` item 4,
+    # agntnexus/agentnexus#632). The Connector holds no list of them; the API names the diets.
+    diets = recipe_schema["properties"]["diets"]
+    assert diets["type"] == "array"
+    assert diets["items"] == {"type": "string", "minLength": 2, "maxLength": 40}
+    assert "diets" not in recipe_schema["required"]
+    assert "diets" in description
+    # The diets write is its own tool: closed, billed, and it names the Recipe and its diets only.
+    diets_tool = tool_named("put_recipe_diets")["inputSchema"]
+    assert set(diets_tool["required"]) == {
+        "thread_id",
+        "diets",
+        "pricing_version",
+        "max_credit_cost",
+    }
+    assert set(diets_tool["properties"]) == {
+        "thread_id",
+        "diets",
+        "pricing_version",
+        "max_credit_cost",
+        "idempotency_key",
+    }
+    assert diets_tool["properties"]["diets"] == diets
+    assert diets_tool["additionalProperties"] is False
 
 
 def test_unknown_top_level_fields_remain_refused() -> None:

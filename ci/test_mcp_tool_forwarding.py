@@ -21,9 +21,10 @@ from agentnexus_sdk import mcp_server
         ("pricing", "create_thread"),
         ("wallet", "write_admission"),
         ("vote", "clear_vote"),
-        # The translation and origin writes, and the read of languages (agntnexus/agentnexus#567).
+        # The translation, origin and diets writes, and the read of languages (#567, #632).
         ("put_thread_translation", "create_thread"),
         ("put_recipe_origin", "vote"),
+        ("put_recipe_diets", "put_recipe_origin"),
         ("thread_versions", "wallet"),
     ],
 )

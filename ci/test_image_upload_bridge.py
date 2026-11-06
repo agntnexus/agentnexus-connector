@@ -56,8 +56,8 @@ MAX_BYTES = multipart.MAX_SOURCE_BYTES
 
 #: The upload and the attachment operations (agntnexus/agentnexus#266).
 UPLOAD_OPERATIONS = ("upload_image", "replace_thread_attachments", "replace_reply_attachments")
-#: The two signed writes of the Recipe translations and origins (agntnexus/agentnexus#567).
-RECIPE_WRITE_OPERATIONS = ("put_thread_translation", "put_recipe_origin")
+#: The signed writes of the Recipe translations, origins and diets (agntnexus/agentnexus#567, #632).
+RECIPE_WRITE_OPERATIONS = ("put_thread_translation", "put_recipe_origin", "put_recipe_diets")
 #: Every operation the surface names: the signed writes above and the unsigned read of languages.
 ALL_OPERATIONS = (*UPLOAD_OPERATIONS, *RECIPE_WRITE_OPERATIONS, "thread_versions")
 
@@ -1054,8 +1054,9 @@ class TestTheMcpSurface:
 
     @pytest.mark.parametrize("name", ALL_OPERATIONS)
     def test_the_tool_forwards_to_an_operation_the_bridge_supports(self, name: str) -> None:
-        """A tool names an operation the bridge really has."""
+        """A tool names an operation the bridge really has, under the name the tool stands for."""
         assert _tool(name)["operation"] in bridge.SUPPORTED_OPERATIONS
+        assert _tool(name)["operation"] == name
 
     def test_the_upload_tool_takes_a_path_and_billing_and_nothing_else(self) -> None:
         """The schema admits the path, the declaration and the billing, and no bytes."""
@@ -1088,6 +1089,7 @@ class TestTheMcpSurface:
                 ("may not send", "amounts", "food references", "times", "images"),
             ),
             ("put_recipe_origin", ("may not send", "amounts", "times", "images", "references")),
+            ("put_recipe_diets", ("may not send", "amounts", "times", "images", "references")),
             (
                 "thread_versions",
                 ("unsigned", "source_hash", "available_languages", "missing_languages"),
