@@ -23,7 +23,7 @@ The `SOURCE_DATE_EPOCH` is the committer time of `38d9dd2`, 1793693372 (2026-11-
 
 ## Signed artifacts
 
-The release builder ran from the merged source `38d9dd21e6d82774da1951f2c7423f8084e5301d` (agentnexus-connector#88). It wrote the artifacts below into `connector-release/`, where they are committed. The values are measured from the committed tree, from the blobs in Git and not the working copy, on 2026-11-03.
+The release builder ran from the merged source `38d9dd21e6d82774da1951f2c7423f8084e5301d` (agentnexus-connector#88). It wrote the artifacts below into `connector-release/`, where they were committed. The values are measured from the committed tree, from the blobs in Git and not the working copy, on 2026-11-03. The signing of 0.22.0 on 2026-11-06 replaced the manifest and signature below in the tree, so they are recorded here by their digests only.
 
 | Artifact | Value |
 | --- | --- |
@@ -31,8 +31,8 @@ The release builder ran from the merged source `38d9dd21e6d82774da1951f2c7423f80
 | `SOURCE_DATE_EPOCH` | 1793693372 (2026-11-03T08:09:32Z), the committer time of the source commit |
 | Build backend | `setuptools==84.0.0` |
 | Wheel `agentnexus_sdk-0.21.0-py3-none-any.whl` in `connector-release/connector/0.21.0/` | 401359 bytes, SHA-256 `b306a39cdf60e81e33c5a1201175bd2d4dd791d43a9ffd1245381309cd86f8df` |
-| Signed manifest `connector-release/connector/connector-release.json` | 347 bytes, SHA-256 `1776f9770c00f4e2b4187584b0c5d17a9299cd7b97913724bc1fc0be9190dea5`, `released_at` `2026-11-03T08:10:53Z` |
-| Detached signature `connector-release/connector/connector-release.json.sig` | 128 bytes, SHA-256 `ff3e00e7d646b77449a61c3eeb4cb21768e6010890d35faa18e4a63466c5901f` |
+| Signed manifest for 0.21.0, superseded in `connector-release/connector/connector-release.json` by 0.22.0 | 347 bytes, SHA-256 `1776f9770c00f4e2b4187584b0c5d17a9299cd7b97913724bc1fc0be9190dea5`, `released_at` `2026-11-03T08:10:53Z` |
+| Detached signature for 0.21.0, superseded by 0.22.0's `connector-release/connector/connector-release.json.sig` | 128 bytes, SHA-256 `ff3e00e7d646b77449a61c3eeb4cb21768e6010890d35faa18e4a63466c5901f` |
 
 The manifest names `connector_version` 0.21.0 and one artifact, the wheel above, served under `https://agntnexus.com/connector/0.21.0/`. When this record was written, the state file recorded the release as `published_version` 0.21.0, with no `pending_version`, and carried a `reproducible_releases` entry for the source commit, epoch and build backend. The 0.20.0 and 0.19.0 wheels stay in the tree byte-identical.
 
@@ -40,7 +40,7 @@ The manifest names `connector_version` 0.21.0 and one artifact, the wheel above,
 
 The Observer image `ghcr.io/agntnexus/agentnexus-observer@sha256:af3011d4f4af633fbcc5a2e3ca0d1ebcf64081515fac946406df41221227fbef` was promoted to production at about 10:24Z on 2026-11-03. It was built from `agentnexus-web@44979a53fd66da1d46fe952e94791824f561de3c`, on which CI run 41610777450 ran.
 
-A public HTTPS read-back of the canonical origin, taken on 2026-11-03 after 10:35Z, returned the manifest and its detached signature, and the `connect.sh` and `connect.ps1` installers. The served manifest and signature are byte-identical to the signed files in the release tree. Each installer was compared with its committed loader with line endings normalised, and the read-back matched the first sixteen hexadecimal characters of its SHA-256. The byte counts and full digests in the table are those of the committed files:
+A public HTTPS read-back of the canonical origin, taken on 2026-11-03 after 10:35Z, returned the manifest and its detached signature, and the `connect.sh` and `connect.ps1` installers. The served manifest and signature were byte-identical to the signed files in the release tree when the read-back was taken. Each installer was compared with its committed loader with line endings normalised, and the read-back matched the first sixteen hexadecimal characters of its SHA-256. The byte counts and full digests in the table are those of the files as they were committed:
 
 | Served file | Bytes | SHA-256 |
 | --- | --- | --- |
