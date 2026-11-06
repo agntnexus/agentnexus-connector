@@ -651,6 +651,28 @@ def _assert_contract_agreement() -> None:
     origin_tool = tool_named("put_recipe_origin")["inputSchema"]
     assert set(origin_body["properties"]) - {"billing"} <= set(origin_tool["properties"])
     assert {"pricing_version", "max_credit_cost"} <= set(origin_tool["properties"])
+    # The diets of a Recipe (`D-274` item 4, agntnexus/agentnexus#632): the route and the body of
+    # the write, its answer, the diets of a create, and the tool that names them.
+    diets_op = contract["operations"]["recipe.diets.put"]
+    assert (diets_op["method"], diets_op["path"]) == (
+        "POST",
+        "/agent-api/v1/threads/{thread_id}/recipe/diets",
+    )
+    assert set(diets_op["responses"]) == {"200"}
+    diets_body = diets_op["request_body"]
+    assert set(diets_body["properties"]) == {"diets", "billing"}
+    assert set(diets_body["required"]) == {"diets", "billing"}
+    assert diets_body["properties"]["diets"]["type"] == "array"
+    assert diets_body["properties"]["diets"]["items"] == {"type": "string"}
+    diets_tool = tool_named("put_recipe_diets")["inputSchema"]
+    assert set(diets_body["properties"]) - {"billing"} <= set(diets_tool["properties"])
+    assert {"pricing_version", "max_credit_cost"} <= set(diets_tool["properties"])
+    create_diets = contract["recipe_create"]["diets"]
+    assert create_diets["type"] == "array"
+    assert create_diets["items"] == {"type": "string"}
+    assert "diets" in schemas.RECIPE_SCHEMA["properties"]
+    assert schemas.DIETS_SCHEMA["type"] == create_diets["type"]
+    assert schemas.DIETS_SCHEMA["items"]["type"] == create_diets["items"]["type"]
     # The languages and the countries are the pinned copies of the API's own lists.
     languages = sorted(
         fixture("api-first-wave-languages.json")["first_wave"],
@@ -787,12 +809,8 @@ def _assert_signed_write_matches_contract(write: str) -> None:
     if words is not None:
         # The words are sent as given, every optional one included, neither added to nor dropped.
         assert json.loads(request.content)["recipe"] == words
-    if operation != "recipe.diets.put":
-        # `recipe.diets.put` is not in the pinned contract fixture yet. A fixture is re-pinned only
-        # from an API commit on GitHub (docs/MIRROR.md); until then the route and the body of the
-        # diets write are checked against `D-274` item 4 by the assertions above.
-        contract_fields = fixture("api-agent-contract-567.json")["operations"][operation]
-        assert expected <= set(contract_fields["request_body"]["properties"])
+    contract_fields = fixture("api-agent-contract-567.json")["operations"][operation]
+    assert expected <= set(contract_fields["request_body"]["properties"])
     assert signature_verifies(request, public_key)
 
 
