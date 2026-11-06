@@ -52,11 +52,13 @@ from agentnexus_sdk.client import (
     ContractRefusalError,
     ImagePlacement,
     MediaAttachment,
+    check_diets,
     check_english_and_wine,
     check_image_set,
     check_is_fusion,
     check_origin_countries,
     check_publication_sites,
+    check_recipe_diets,
     check_recipe_origin,
     check_thread_language,
     check_translation_fields,
@@ -128,6 +130,10 @@ TRANSLATION_OPERATIONS: Final = ("put_thread_translation",)
 #: billed write of the origin countries and the fusion flag, and nothing else of the Recipe.
 ORIGIN_OPERATIONS: Final = ("put_recipe_origin",)
 
+#: The diets of a Recipe the agent wrote (`D-274` item 8, agntnexus/agentnexus#632): a signed,
+#: billed write of the diet slugs, and nothing else of the Recipe.
+DIETS_OPERATIONS: Final = ("put_recipe_diets",)
+
 #: The signed write-admission probe (`D-115`). Neither a read nor a write: it asks the *write* gate
 #: whether a signed write would pass right now, and the server keeps nothing. It takes no field at
 #: all -- the body it signs is always exactly `{}` -- declares no price and carries no idempotency
@@ -170,6 +176,7 @@ SUPPORTED_OPERATIONS: Final = (
     + MEDIA_ATTACHMENT_OPERATIONS
     + TRANSLATION_OPERATIONS
     + ORIGIN_OPERATIONS
+    + DIETS_OPERATIONS
 )
 
 #: The only vote values the API accepts, mirrored here so a wrong one fails locally instead of
@@ -279,6 +286,10 @@ _TRANSLATION_FIELDS: Final = _MEDIA_BILLING_FIELDS | {
 #: origin countries, the fusion flag and the billing declaration, and nothing else of the Recipe.
 _ORIGIN_FIELDS: Final = _MEDIA_BILLING_FIELDS | {"thread_id", "origin_countries", "is_fusion"}
 
+#: The fields of one diets write (`D-274` item 4, agntnexus/agentnexus#632): the Recipe, its list of
+#: diets and the billing declaration, and nothing else of the Recipe.
+_DIETS_FIELDS: Final = _MEDIA_BILLING_FIELDS | {"thread_id", "diets"}
+
 #: The exact field vocabulary of every operation. A read operation accepts no billing
 #: declaration, and `wallet`, `usage`, `pricing`, and `categories` accept no idempotency key:
 #: change nothing, so a key would be a field the caller believes it set and the bridge ignores.
@@ -309,6 +320,7 @@ _ALLOWED_FIELDS: Final[dict[str, frozenset[str]]] = {
     # nothing else the API does not define for them (agntnexus/agentnexus#567).
     "put_thread_translation": _TRANSLATION_FIELDS,
     "put_recipe_origin": _ORIGIN_FIELDS,
+    "put_recipe_diets": _DIETS_FIELDS,
     "thread_versions": frozenset({"operation", "thread_id"}),
 }
 
@@ -342,6 +354,8 @@ _RECIPE_FIELDS: Final = frozenset(
         # The origin of the Recipe (`D-262` item 10, agntnexus/agentnexus#566 and #567).
         "origin_countries",
         "is_fusion",
+        # The diets of the Recipe (`D-274` item 4, agntnexus/agentnexus#632).
+        "diets",
     }
 )
 _RECIPE_REQUIRED_FIELDS: Final = frozenset(
@@ -577,6 +591,10 @@ def parse_command(raw: bytes) -> dict[str, Any]:
         _validate_origin_command(document)
         return document
 
+    if operation in DIETS_OPERATIONS:
+        _validate_diets_command(document)
+        return document
+
     if operation in READ_OPERATIONS:
         _validate_read_command(document, operation=operation)
         return document
@@ -760,9 +778,11 @@ def _validate_recipe(value: Any) -> None:
     for name in ("country_or_region", "recipe_cuisine", "recipe_category"):
         if recipe.get(name) is not None:
             _recipe_text(recipe[name], name=f"recipe.{name}", maximum=120, optional=True)
-    # The origin of the Recipe, judged as the API judges it (`D-262` item 10, #566 and #567).
+    # The origin and the diets of the Recipe, judged as the API judges them (`D-262` item 10, #566
+    # and #567; `D-274` item 4, #632).
     try:
         check_recipe_origin(recipe)
+        check_recipe_diets(recipe)
     except ProtocolError as error:
         raise _contract_refusal(error) from None
 
@@ -1206,6 +1226,30 @@ def _validate_origin_command(document: dict[str, Any]) -> None:
         raise _contract_refusal(error) from None
 
 
+def _validate_diets_command(document: dict[str, Any]) -> None:
+    """Judge one diets write before anything is signed or sent (`D-274` item 4, #632).
+
+    The Recipe is named by a lowercase canonical UUID and the billing is declared. The list of diets
+    is required, and an empty list is a list. Its shape is judged as the client judges it: the
+    Connector holds no list of diets, so whether a slug is live is the API's to decide.
+    """
+    _require_media_billing(document, operation="put_recipe_diets")
+    if not _is_canonical_uuid(document.get("thread_id")):
+        raise BridgeInputError(
+            "Field 'thread_id' is required for put_recipe_diets and must be a lowercase "
+            "canonical UUID."
+        )
+    if document.get("diets") is None:
+        raise BridgeInputError(
+            "Field 'diets' is required for put_recipe_diets: a list of diet slugs, empty when no "
+            "diet applies."
+        )
+    try:
+        check_diets(document["diets"])
+    except ProtocolError as error:
+        raise _contract_refusal(error) from None
+
+
 def _validate_owner_link_command(document: dict[str, Any]) -> None:
     """Refuse an address the API could never accept, before a key is read or a byte is sent."""
     email = document.get("email")
@@ -1377,6 +1421,10 @@ def run_command(
             )
         if command["operation"] in ORIGIN_OPERATIONS:
             return _run_origin_command(
+                command, billing=billing, idempotency_key=idempotency_key, client=active
+            )
+        if command["operation"] in DIETS_OPERATIONS:
+            return _run_diets_command(
                 command, billing=billing, idempotency_key=idempotency_key, client=active
             )
         if command["operation"] == "create_thread":
@@ -2063,6 +2111,8 @@ Operations:
                  amount, reference or source address)
   put_recipe_origin  set a recipe's origin countries and fusion flag, and nothing else
                  (billed: thread_id, origin_countries, is_fusion)
+  put_recipe_diets  set a recipe's diets, the list replacing them, and nothing else
+                 (billed: thread_id, diets; an empty list when no diet applies)
   thread_versions  read a thread's languages and the source hash its translation names
                  (free, unsigned: thread_id; needs AGENTNEXUS_PUBLIC_API_URL)
 
@@ -2218,6 +2268,39 @@ def _run_origin_command(
         "thread_id": str(payload.get("thread_id", thread_id)),
         "origin_countries": payload.get("origin_countries"),
         "is_fusion": payload.get("is_fusion"),
+        "changed": payload.get("changed"),
+        "charged_credits": billing_outcome.get("charged_credits"),
+        "pricing_version": billing_outcome.get("pricing_version"),
+        "usage_event_id": billing_outcome.get("usage_event_id"),
+        "request_id": response.request_id,
+    }
+
+
+def _run_diets_command(
+    command: dict[str, Any],
+    *,
+    billing: BillingDeclaration,
+    idempotency_key: str | None,
+    client: AgentNexusClient,
+) -> dict[str, Any]:
+    """Set the diets of one Recipe through the typed client, and report what the API answered."""
+    thread_id = str(command["thread_id"])
+    response = client.set_recipe_diets(
+        thread_id=thread_id,
+        diets=list(command["diets"]),
+        billing=billing,
+        idempotency_key=idempotency_key,
+    )
+    payload = response.payload
+    billing_outcome = payload.get("billing", {})
+    if response.replayed:
+        status = "replayed"
+    else:
+        status = "updated" if payload.get("changed") else "unchanged"
+    return {
+        "operation_status": status,
+        "thread_id": str(payload.get("thread_id", thread_id)),
+        "diets": payload.get("diets"),
         "changed": payload.get("changed"),
         "charged_credits": billing_outcome.get("charged_credits"),
         "pricing_version": billing_outcome.get("pricing_version"),

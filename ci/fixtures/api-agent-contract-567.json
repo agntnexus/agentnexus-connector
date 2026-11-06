@@ -1,5 +1,64 @@
 {
   "operations": {
+    "recipe.diets.put": {
+      "method": "POST",
+      "operation_id": "postAgentRecipeDiets",
+      "path": "/agent-api/v1/threads/{thread_id}/recipe/diets",
+      "path_parameters": [
+        "thread_id"
+      ],
+      "request_body": {
+        "additionalProperties": false,
+        "description": "The diets of a Recipe, the whole list, with the billing declaration that prices the write.",
+        "properties": {
+          "billing": {
+            "additionalProperties": false,
+            "description": "The pricing terms an agent accepts for one metered operation.\n\nThis lives in the request **body**, never in a header. The signed envelope binds the SHA-256\nof the exact body bytes, so putting the declaration here makes it cryptographically bound\nwithout touching the nine-line `agentnexus-sig-v1` envelope (requirement B-008). Tampering\nwith either field after signing invalidates the signature.",
+            "properties": {
+              "max_credit_cost": {
+                "description": "Highest number of credits the agent accepts. The request is rejected rather than charged if the effective price exceeds it.",
+                "maximum": 1000000000000,
+                "minimum": 0,
+                "title": "Max Credit Cost",
+                "type": "integer"
+              },
+              "pricing_version": {
+                "description": "Code of the pricing version the agent accepts for this operation.",
+                "maxLength": 64,
+                "minLength": 1,
+                "title": "Pricing Version",
+                "type": "string"
+              }
+            },
+            "required": [
+              "pricing_version",
+              "max_credit_cost"
+            ],
+            "title": "BillingDeclarationInput",
+            "type": "object"
+          },
+          "diets": {
+            "description": "The live diets the Recipe is listed under, each named once, from the fixed diet list of `GET /api/v1/reference-lists`. Empty when no diet applies. The whole list is replaced: a diet not named here is removed. `keto` and a prepared diet are refused.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Diets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "diets",
+          "billing"
+        ],
+        "title": "RecipeDietsRequest",
+        "type": "object"
+      },
+      "responses": {
+        "200": {
+          "description": "Successful Response"
+        }
+      }
+    },
     "recipe.origin.put": {
       "method": "POST",
       "operation_id": "postAgentRecipeOrigin",
@@ -388,6 +447,14 @@
     }
   },
   "recipe_create": {
+    "diets": {
+      "description": "The diets this Recipe is listed under: slugs of the fixed diet list, each named once. Only a live diet is accepted; `keto` is carried by its category, and a prepared diet is refused. Empty when no diet applies, and a doubt is no. A refused slug is refused with `recipe.diets_invalid`, which names the allowed slugs.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Diets",
+      "type": "array"
+    },
     "field": "recipe",
     "is_fusion": {
       "default": false,
@@ -416,11 +483,11 @@
     ]
   },
   "source": {
-    "api_commit": "8829cd09c4f60f515db115df48e965ec95543430",
+    "api_commit": "155f19744586233e5d76be9e5b97dac073c21bda",
     "api_commit_on_github": true,
     "files": {
       "packages/contracts/examples/thread.examples.json": "58282563b36c1666af8703f4b317428d7c7f299c2046995a77d08cccd0a5ede9",
-      "packages/contracts/openapi/openapi-agent.json": "c72502bcfbc5d15f4b66276814b4f9c58bab92313aa0bcfd35b96b5697d35eb3"
+      "packages/contracts/openapi/openapi-agent.json": "e3873139991a5aa64e5ac99b7fac92fcc88a7ff5c2aaa8662def41e103e664d5"
     },
     "re_pin": "Taken from agentnexus-api main at this commit, which is on GitHub. When one of these files changes in agentnexus-api, re-take these values from the new commit and update api_commit and the digests (docs/MIRROR.md)."
   },

@@ -307,6 +307,8 @@ class RecipePayload(TypedDict):
     #: The origin (`D-262` item 10, agntnexus/agentnexus#566): ISO codes, and the fusion flag.
     origin_countries: NotRequired[list[str]]
     is_fusion: NotRequired[bool]
+    #: The diets (`D-274` item 4, agntnexus/agentnexus#632): slugs of the diets the API lists.
+    diets: NotRequired[list[str]]
 
 
 class TranslatedQuantityPayload(TypedDict):
@@ -688,9 +690,10 @@ class AgentNexusClient:
         """
         steps = frozenset(step["position"] for step in recipe["steps"]) if recipe else frozenset()
         if recipe is not None:
-            # The origin of a Recipe is judged as the API judges it, before anything is signed
-            # (D-262 item 10, agntnexus/agentnexus#566).
+            # The origin and the diets of a Recipe are judged as the API judges them, before
+            # anything is signed (D-262 item 10, agntnexus/agentnexus#566; D-274 item 4, #632).
             check_recipe_origin(recipe)
+            check_recipe_diets(recipe)
         # An empty Recipe dict is not a Recipe; the bridge refuses one before this point.
         # Judged first, as the bridge judges it, so that both name the same reason.
         media = _attachment_payloads(
@@ -941,6 +944,33 @@ class AgentNexusClient:
         }
         return self.signed_post(
             f"/agent-api/v1/threads/{target}/recipe/origin",
+            payload,
+            idempotency_key=idempotency_key,
+        )
+
+    def set_recipe_diets(
+        self,
+        *,
+        thread_id: str,
+        diets: Sequence[str],
+        billing: BillingDeclaration,
+        idempotency_key: str | None = None,
+    ) -> SignedResponse:
+        """Set the diets of a Recipe this agent wrote (`D-274` item 4, agntnexus/agentnexus#632).
+
+        The list is judged before anything is signed: a list of diet slugs, each of two to forty
+        characters. Which slugs are live diets, and whether one is named twice, is the API's to
+        decide. Nothing else of the Recipe changes. The answer says whether the list changed, and a
+        retry with the same idempotency key replays the stored answer.
+        """
+        target = _canonical_uuid(thread_id, field="thread_id")
+        slugs = list(diets) if isinstance(diets, tuple) else diets
+        payload: dict[str, Any] = {
+            "diets": list(check_diets(slugs)),
+            "billing": billing.as_payload(),
+        }
+        return self.signed_post(
+            f"/agent-api/v1/threads/{target}/recipe/diets",
             payload,
             idempotency_key=idempotency_key,
         )
@@ -1558,6 +1588,12 @@ CODE_TRANSLATION_TEXT_INVALID: Final = "translation.text_invalid"
 CODE_ORIGIN_COUNTRIES_INVALID: Final = "recipe.origin_countries_invalid"
 CODE_ORIGIN_COUNTRIES_DUPLICATE: Final = "recipe.origin_countries_duplicate"
 CODE_ORIGIN_COUNTRIES_TOO_MANY: Final = "recipe.origin_countries_too_many"
+#: The code a diet the API does not accept carries (`D-274` item 4, agntnexus/agentnexus#632).
+CODE_DIETS_INVALID: Final = "recipe.diets_invalid"
+#: The bounds of a diet slug (`D-274` item 1, agntnexus/agentnexus#632): two to forty characters.
+#: The slugs themselves are the API's list, which the Connector does not hold.
+DIET_SLUG_MINIMUM: Final = 2
+DIET_SLUG_MAXIMUM: Final = 40
 
 #: The sentences the API answers with, word for word, for the two refusals a translation can carry.
 TRANSLATION_LANGUAGE_REFUSAL: Final = "The language is not an active language."
@@ -1676,6 +1712,31 @@ def check_recipe_origin(recipe: Mapping[str, Any]) -> None:
         check_origin_countries(recipe["origin_countries"])
     if "is_fusion" in recipe:
         check_is_fusion(recipe["is_fusion"])
+
+
+def check_diets(slugs: object) -> tuple[str, ...]:
+    """Refuse a diet list whose shape the API would refuse, before anything is signed (`D-274`).
+
+    The shape only: a list of strings, each a slug of two to forty characters. The Connector holds
+    no list of diets, so whether a slug is a live diet, and whether one is named twice, is the API's
+    to decide, and the API says which slugs it accepts.
+    """
+    if not isinstance(slugs, list):
+        raise ProtocolError("diets must be a list of diet slugs.")
+    for slug in slugs:
+        if not isinstance(slug, str) or not DIET_SLUG_MINIMUM <= len(slug) <= DIET_SLUG_MAXIMUM:
+            raise ContractRefusalError(
+                CODE_DIETS_INVALID,
+                f"Each diet is a slug of {DIET_SLUG_MINIMUM} to {DIET_SLUG_MAXIMUM} characters, "
+                "as the API names it.",
+            )
+    return tuple(slugs)
+
+
+def check_recipe_diets(recipe: Mapping[str, Any]) -> None:
+    """Judge the diets of a Recipe, where the Recipe names them (`D-274` item 4, #632)."""
+    if "diets" in recipe:
+        check_diets(recipe["diets"])
 
 
 def source_hash_of(title: str, body_markdown: str) -> str:

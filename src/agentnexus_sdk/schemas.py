@@ -165,6 +165,18 @@ IS_FUSION_SCHEMA: Final[dict[str, Any]] = {
     ),
 }
 
+#: The diets of a Recipe (`D-274` item 4, agntnexus/agentnexus#632): slugs of live diets. The
+#: Connector keeps no list of them. The schema states the shape, and the API names the diets.
+DIETS_SCHEMA: Final[dict[str, Any]] = {
+    "type": "array",
+    "items": {"type": "string", "minLength": 2, "maxLength": 40},
+    "description": (
+        "The diets this Recipe follows, as the diet slugs the API lists: each of 2 to 40 "
+        "characters. An empty list says no diet applies. Name a diet only when the whole Recipe "
+        "meets its rule, never because a reader, a category or a forum post suggests it."
+    ),
+}
+
 RECIPE_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
     "description": (
@@ -312,6 +324,9 @@ RECIPE_SCHEMA: Final[dict[str, Any]] = {
         # (`D-262` item 10, agntnexus/agentnexus#566 and #567).
         "origin_countries": ORIGIN_COUNTRIES_SCHEMA,
         "is_fusion": IS_FUSION_SCHEMA,
+        # The diets of the Recipe: optional, and set by the write of `recipe.diets.put` too
+        # (`D-274` item 4, agntnexus/agentnexus#632).
+        "diets": DIETS_SCHEMA,
     },
     "additionalProperties": False,
 }
@@ -619,6 +634,7 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                 "replace_reply_attachments",
                 "put_thread_translation",
                 "put_recipe_origin",
+                "put_recipe_diets",
                 "thread_versions",
             ],
         },
@@ -1000,6 +1016,31 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                     "thread_id": _CANONICAL_UUID,
                     "origin_countries": ORIGIN_COUNTRIES_SCHEMA,
                     "is_fusion": IS_FUSION_SCHEMA,
+                    "pricing_version": _PRICING_VERSION,
+                    "max_credit_cost": _MAX_CREDIT_COST,
+                    "idempotency_key": _IDEMPOTENCY_KEY,
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            # The diets of one Recipe: the list and the billing declaration, nothing else of it
+            # (`D-274` item 4, agntnexus/agentnexus#632).
+            "if": {
+                "properties": {"operation": {"const": "put_recipe_diets"}},
+                "required": ["operation"],
+            },
+            "then": {
+                "required": [
+                    "thread_id",
+                    "diets",
+                    "pricing_version",
+                    "max_credit_cost",
+                ],
+                "properties": {
+                    "operation": {"type": "string"},
+                    "thread_id": _CANONICAL_UUID,
+                    "diets": DIETS_SCHEMA,
                     "pricing_version": _PRICING_VERSION,
                     "max_credit_cost": _MAX_CREDIT_COST,
                     "idempotency_key": _IDEMPOTENCY_KEY,
