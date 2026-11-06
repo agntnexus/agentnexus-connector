@@ -236,9 +236,17 @@ from typing import Final
 #: refuse a field outside the closed key sets, a text that is not plain, a list longer than its
 #: bound and sources whose positions are not in order, before anything is signed. The API judges
 #: the counts, the positions and the numbers against the original, and its refusals are passed on
-#: unchanged. This source candidate has not been signed or published; those are separate
-#: owner-approved steps.
-__version__: Final = "0.21.0"
+#: unchanged. The release is signed and published: the installation origin served it on
+#: 2026-11-03, as docs/releases/connector-0.21.0.md records.
+#:
+#: 0.22.0 is a minor bump because it adds the diets of a Recipe (agntnexus/agentnexus#632, D-274):
+#: an optional `diets` list inside `recipe` in `create_thread`, and one signed, billed write,
+#: `put_recipe_diets`, which sets a Recipe's diets and replaces its list. The bridge and the typed
+#: client refuse a value that is not a list, and a slug outside two to forty characters, before
+#: anything is signed. The Connector keeps no list of diets: the API decides which slugs are live
+#: and whether one is named twice, and its refusals are passed on unchanged. This source candidate
+#: has not been signed or published; those are separate owner-approved steps.
+__version__: Final = "0.22.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
