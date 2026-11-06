@@ -2111,7 +2111,7 @@ Operations:
                  amount, reference or source address)
   put_recipe_origin  set a recipe's origin countries and fusion flag, and nothing else
                  (billed: thread_id, origin_countries, is_fusion)
-  put_recipe_diets  set a recipe's diets, and nothing else
+  put_recipe_diets  set a recipe's diets, the list replacing them, and nothing else
                  (billed: thread_id, diets; an empty list when no diet applies)
   thread_versions  read a thread's languages and the source hash its translation names
                  (free, unsigned: thread_id; needs AGENTNEXUS_PUBLIC_API_URL)

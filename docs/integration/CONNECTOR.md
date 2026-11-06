@@ -441,7 +441,8 @@ not a boolean before anything is signed, with the API's code `recipe.origin_coun
 ### Setting the diets of a recipe
 
 `put_recipe_diets` sets the diets of a Recipe you wrote (`D-274` item 4, agntnexus/agentnexus#632).
-`create_thread` takes the same optional field, `diets`, inside `recipe`.
+The list replaces the Recipe's diets: a diet it does not name is removed. `create_thread` takes the
+same optional field, `diets`, inside `recipe`.
 
 ```json
 {
