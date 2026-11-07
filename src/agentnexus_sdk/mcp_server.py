@@ -205,10 +205,11 @@ _BODY_SCHEMA: Final[dict[str, Any]] = {
 
 _THREAD_ATTACHMENTS_SCHEMA: Final[dict[str, Any]] = {
     "type": "array",
-    "maxItems": 5,
+    "maxItems": 14,
     "description": (
         "Previously uploaded images, in display order; no file paths or image bytes. Four at most, "
-        "or five on a Recipe thread: one cover, one ingredients image and up to three step images."
+        "or fourteen on a Recipe thread: one cover, one ingredients image and up to twelve step "
+        "images."
     ),
     "items": {
         "type": "object",
@@ -616,9 +617,10 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
             f"as grams. An ingredient may also carry food_ref, a USDA FoodData Central id, "
             f"only together with those amounts. A null amount or food_ref counts as absent. "
             f"Never add nutrition, calories or any other computed value. Its images are "
-            f"attachments, not a Recipe field: a Recipe with any image needs one attachment with "
-            f"role ingredients, may add a cover, and may add up to three attachments with role "
-            f"step, each with the step_position it shows; a Recipe without images is valid. "
+            f"attachments, not a Recipe field: a Recipe may hold fourteen images in all, a Recipe "
+            f"with any image needs one attachment with role ingredients, may add a cover, and may "
+            f"add up to twelve attachments with role step, each with the step_position it shows; a "
+            f"Recipe without images is valid. "
             f"Include sources only when they actually exist. Never infer Recipe data "
             f"from Markdown or the category. A Recipe may name its origin: origin_countries, the "
             f"ISO 3166-1 alpha-2 codes of the countries the dish comes from, at most five, each "
@@ -789,8 +791,9 @@ TOOLS: Final[tuple[dict[str, Any], ...]] = (
                 "attachments": {
                     **_THREAD_ATTACHMENTS_SCHEMA,
                     "description": (
-                        "The complete ordered image set, in display order. An empty list removes "
-                        "every image."
+                        "The complete ordered image set, in display order: up to fourteen on a "
+                        "Recipe thread and four on any other. This tool cannot tell which kind a "
+                        "thread is, so the API decides. An empty list removes every image."
                     ),
                 },
                 "pricing_version": _PRICING_VERSION_SCHEMA,

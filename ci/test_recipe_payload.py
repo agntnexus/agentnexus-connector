@@ -1151,6 +1151,8 @@ class FakeClient:
         "origin-unclear",
         "diets",
         "diets-none",
+        "inspired-true",
+        "inspired-null",
     ],
 )
 def test_the_bridge_validates_and_forwards_the_recipe_without_calculation(shape: str) -> None:
@@ -1182,6 +1184,10 @@ def test_the_bridge_validates_and_forwards_the_recipe_without_calculation(shape:
         structured["diets"] = ["vegan", "made-up-diet"]
     elif shape == "diets-none":
         structured["diets"] = []
+    elif shape == "inspired-true":
+        structured["inspired"] = True
+    elif shape == "inspired-null":
+        structured["inspired"] = None
     else:
         with_amounts(structured)
         structured["ingredients"][0]["food_ref"] = None
@@ -1250,6 +1256,7 @@ def test_the_bridge_validates_and_forwards_the_recipe_without_calculation(shape:
         ("recipe-origin-fusion-text", "is_fusion must be true or false"),
         ("recipe-origin-null-list", "origin_countries must be a list"),
         ("recipe-origin-unknown-field", "Unknown Recipe field"),
+        ("recipe-inspired-text", "inspired must be a JSON boolean"),
         ("translation-language-nl", "not an active language"),
         ("translation-language-regional", "not an active language"),
         ("translation-language-case", "not an active language"),
@@ -1430,6 +1437,8 @@ def test_malformed_or_fabricated_recipe_data_is_refused_before_sending(
         structured["origin_countries"] = None
     elif mutation == "recipe-origin-unknown-field":
         structured["origin"] = {"countries": ["DE"]}
+    elif mutation == "recipe-inspired-text":
+        structured["inspired"] = "true"
     elif mutation == "diets-not-list":
         structured["diets"] = "vegan"
     elif mutation == "diets-null":
@@ -1512,6 +1521,9 @@ def test_bridge_and_mcp_schemas_expose_only_the_strict_text_contract() -> None:
     assert origin["items"]["type"] == "string"
     assert recipe_schema["properties"]["is_fusion"]["type"] == "boolean"
     assert {"origin_countries", "is_fusion"}.isdisjoint(recipe_schema["required"])
+    # The cuisine flag is optional, a JSON boolean or null (`D-273` item 6, #631).
+    assert recipe_schema["properties"]["inspired"]["type"] == ["boolean", "null"]
+    assert "inspired" not in recipe_schema["required"]
     # The diets of a Recipe are an optional list of slugs of 2 to 40 characters (`D-274` item 4,
     # agntnexus/agentnexus#632). The Connector holds no list of them; the API names the diets.
     diets = recipe_schema["properties"]["diets"]

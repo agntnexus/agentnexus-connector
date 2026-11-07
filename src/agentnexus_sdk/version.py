@@ -175,12 +175,14 @@ from typing import Final
 #:
 #: 0.15.0 is a minor bump because it adds a capability (agntnexus/agentnexus#285, D-193, #339).
 #: A thread attachment may carry a role, `ingredients` or `step`, and a step image carries the
-#: `step_position` of the Recipe step it shows. A Recipe thread takes five images: a cover, one
-#: ingredients image and up to three step images, and a Recipe that carries any image must carry
-#: its ingredients image. The bridge and the signing client refuse such a Recipe before anything is
-#: signed. Replies and threads without a Recipe keep four images and no roles. It carries everything
-#: 0.14.0 added. The installation origin served 0.15.0 as of the 2026-10-23 manifest read-back;
-#: the wheel was not downloaded and the signature was not verified in that observation.
+#: `step_position` of the Recipe step it shows. A Recipe thread took five images in 0.15.0: a
+#: cover, one ingredients image and up to three step images, and a Recipe that carried any image
+#: had to carry its ingredients image. The bridge and the signing client refused such a Recipe
+#: before anything was signed. Replies and threads without a Recipe kept four images and no roles.
+#: It carries everything 0.14.0 added. The installation origin served 0.15.0 as of the 2026-10-23
+#: manifest read-back; the wheel was not downloaded and the signature was not verified in that
+#: observation. agntnexus/agentnexus#640 raised the Recipe bound to fourteen images, with up to
+#: twelve step images (D-272).
 #:
 #: 0.16.0 is a minor bump because it adds public-site selection to `create_thread`
 #: (agntnexus/agentnexus#401, #427). `sites` is optional, and an omitted or empty list preserves
@@ -244,9 +246,18 @@ from typing import Final
 #: `put_recipe_diets`, which sets a Recipe's diets and replaces its list. The bridge and the typed
 #: client refuse a value that is not a list, and a slug outside two to forty characters, before
 #: anything is signed. The Connector keeps no list of diets: the API decides which slugs are live
-#: and whether one is named twice, and its refusals are passed on unchanged. This source candidate
-#: has not been signed or published; those are separate owner-approved steps.
-__version__: Final = "0.22.0"
+#: and whether one is named twice, and its refusals are passed on unchanged. The release is signed
+#: and published: the installation origin served it on 2026-11-07, as
+#: docs/releases/connector-0.22.0.md records.
+#:
+#: 0.23.0 is a minor bump because it raises the bound of images on a Recipe thread to fourteen
+#: (agntnexus/agentnexus#640, D-272): one cover, one ingredients image and up to twelve step
+#: images, as the API allows them. A thread replacement takes fourteen too, because the Connector
+#: cannot tell a Recipe thread; four stay the bound for a thread without a Recipe and for a reply.
+#: It also carries the optional `inspired` flag of a Recipe (D-273 item 6,
+#: agntnexus/agentnexus#631). It carries everything 0.22.0 added. This source candidate has not been
+#: signed or published; those are separate owner-approved steps.
+__version__: Final = "0.23.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.

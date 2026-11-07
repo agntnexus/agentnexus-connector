@@ -1,12 +1,14 @@
 """A Recipe's images carry roles, and the Connector refuses what it can know is wrong (D-193).
 
-agntnexus/agentnexus#285, the Connector slice. An attachment of a thread may carry a `role`,
-`ingredients` or `step`, and a step image carries the `step_position` of the Recipe step it shows.
-A Recipe thread may hold five images in all. These cases pin, against the bridge and the client:
+agntnexus/agentnexus#285, the Connector slice, and agntnexus/agentnexus#640, which raised the Recipe
+bound to fourteen images (D-272). An attachment of a thread may carry a `role`, `ingredients` or
+`step`, and a step image carries the `step_position` of the Recipe step it shows. A Recipe thread
+may hold fourteen images in all. These cases pin, against the bridge and the client:
 
-* **the limits.** Five images on a Recipe thread; four on any other thread and on a reply; five on
-  a replacement, which cannot know the thread's kind and leaves the four-image limit to the API;
-* **the roles.** At most one ingredients image and three step images, one image per step, a
+* **the limits.** Fourteen images on a Recipe thread; four on any other thread and on a reply;
+  fourteen on a replacement, which cannot know the thread's kind and leaves the four-image limit to
+  the API;
+* **the roles.** At most one ingredients image and twelve step images, one image per step, a
   `step_position` for and only for a step, a step that names a step of the Recipe, and no role on
   a cover, on a thread without a Recipe or on a reply;
 * **the ingredients rule.** A Recipe that carries any image needs one ingredients image. A Recipe
@@ -148,48 +150,45 @@ def _tool(name: str) -> dict[str, Any]:
 
 
 class TestTheLimits:
-    """Five images only where a Recipe is known, and four everywhere else."""
+    """Fourteen images only where a Recipe is known, and four everywhere else."""
 
-    def test_a_recipe_thread_takes_five_images_with_their_roles(self) -> None:
-        """The largest Recipe is a cover, one ingredients image and three step images."""
+    def test_a_recipe_thread_takes_fourteen_images_with_their_roles(self) -> None:
+        """The largest Recipe is a cover, one ingredients image and twelve step images."""
         attachments = [
             image(1, is_cover=True),
             image(2, role="ingredients"),
-            image(3, role="step", step_position=1),
-            image(4, role="step", step_position=2),
-            image(5, role="step", step_position=3),
+            *(image(n + 2, role="step", step_position=n) for n in range(1, 13)),
         ]
-        parsed = parse(create(attachments, structured=recipe(3)))
+        parsed = parse(create(attachments, structured=recipe(12)))
         assert [
             (item.is_cover, item.role, item.step_position) for item in parsed["attachments"]
         ] == [
             (True, None, None),
             (False, "ingredients", None),
-            (False, "step", 1),
-            (False, "step", 2),
-            (False, "step", 3),
+            *((False, "step", position) for position in range(1, 13)),
         ]
 
-    def test_a_recipe_thread_refuses_a_sixth_image(self) -> None:
-        """A sixth attachment is refused whatever it is, on a Recipe thread."""
-        with pytest.raises(bridge.BridgeInputError, match="at most five image attachments"):
-            parse(create([image(n) for n in range(1, 7)], structured=recipe()))
+    def test_a_recipe_thread_refuses_a_fifteenth_image(self) -> None:
+        """A fifteenth attachment is refused whatever it is, on a Recipe thread."""
+        with pytest.raises(bridge.BridgeInputError, match="at most fourteen image attachments"):
+            parse(create([image(n) for n in range(1, 16)], structured=recipe()))
 
-    def test_a_thread_without_a_recipe_still_takes_four_images(self) -> None:
-        """A thread that is not a Recipe keeps the four-image limit of D-179."""
+    @pytest.mark.parametrize("count", [5, 14], ids=["five", "fourteen"])
+    def test_a_thread_without_a_recipe_still_takes_four_images(self, count: int) -> None:
+        """A thread that is not a Recipe keeps the four-image limit of D-179, at any count."""
         with pytest.raises(bridge.BridgeInputError, match="at most four image attachments"):
-            parse(create([image(n) for n in range(1, 6)]))
+            parse(create([image(n) for n in range(1, count + 1)]))
 
     def test_a_reply_still_takes_four_images(self) -> None:
         """A reply keeps the four-image limit and never takes a role."""
         with pytest.raises(bridge.BridgeInputError, match="at most four image attachments"):
             parse(reply([image(n) for n in range(1, 6)]))
 
-    def test_a_replacement_takes_five_because_only_the_api_knows_the_thread_kind(self) -> None:
-        """The Connector cannot tell a Recipe thread here, so five is the bound it applies."""
-        assert len(parse(replacement([image(n) for n in range(1, 6)]))["attachments"]) == 5
-        with pytest.raises(bridge.BridgeInputError, match="at most five image attachments"):
-            parse(replacement([image(n) for n in range(1, 7)]))
+    def test_a_replacement_takes_fourteen_because_the_api_knows_the_kind(self) -> None:
+        """The Connector cannot tell a Recipe thread here, so fourteen is the bound it applies."""
+        assert len(parse(replacement([image(n) for n in range(1, 15)]))["attachments"]) == 14
+        with pytest.raises(bridge.BridgeInputError, match="at most fourteen image attachments"):
+            parse(replacement([image(n) for n in range(1, 16)]))
 
 
 class TestTheIngredientsRule:
@@ -293,14 +292,14 @@ class TestTheRoleRules:
         with pytest.raises(bridge.BridgeInputError, match="only one ingredients image"):
             parse(create(attachments, structured=recipe()))
 
-    def test_a_recipe_takes_at_most_three_step_images(self) -> None:
-        """A fourth step image is refused, even in a four-step Recipe."""
+    def test_a_recipe_takes_at_most_twelve_step_images(self) -> None:
+        """A thirteenth step image is refused, though the set is within fourteen images."""
         attachments = [
             image(1, role="ingredients"),
-            *(image(n, role="step", step_position=n - 1) for n in range(2, 6)),
+            *(image(n, role="step", step_position=n - 1) for n in range(2, 15)),
         ]
-        with pytest.raises(bridge.BridgeInputError, match="at most three step images"):
-            parse(create(attachments, structured=recipe(4)))
+        with pytest.raises(bridge.BridgeInputError, match="at most twelve step images"):
+            parse(create(attachments, structured=recipe(13)))
 
     def test_a_step_takes_one_image(self) -> None:
         """Two images for one step are refused."""
@@ -320,8 +319,8 @@ class TestTheRoleRules:
                 "only one ingredients image",
             ),
             (
-                [image(n, role="step", step_position=n) for n in range(1, 5)],
-                "at most three step images",
+                [image(n, role="step", step_position=n) for n in range(1, 14)],
+                "at most twelve step images",
             ),
             (
                 [
@@ -331,7 +330,7 @@ class TestTheRoleRules:
                 "may have only one image",
             ),
         ],
-        ids=["two-ingredients", "fourth-step", "two-for-one-step"],
+        ids=["two-ingredients", "thirteenth-step", "two-for-one-step"],
     )
     def test_a_replacement_checks_the_role_shape_it_can_know(
         self, attachments: list[dict[str, Any]], reason: str
@@ -351,7 +350,7 @@ class TestTheRoleRules:
         not enforced by the Connector; see docs/integration/CONNECTOR.md.
         """
         assert len(parse(replacement([image(1, role="step", step_position=9)]))["attachments"]) == 1
-        assert len(parse(replacement([image(n) for n in range(1, 6)]))["attachments"]) == 5
+        assert len(parse(replacement([image(n) for n in range(1, 15)]))["attachments"]) == 14
 
 
 class RecordingTransport(httpx.BaseTransport):
@@ -500,8 +499,8 @@ class TestTheMediaAttachmentShape:
             )
         assert transport.requests == []
 
-    def test_the_client_takes_five_images_on_a_recipe_and_refuses_five_elsewhere(self) -> None:
-        """Five is the Recipe bound; a thread without a Recipe is still held to four."""
+    def test_the_client_takes_fourteen_on_a_recipe_and_four_elsewhere(self) -> None:
+        """Fourteen is the Recipe bound; a thread without a Recipe is still held to four."""
         transport = RecordingTransport()
         recipe_set = [
             MediaAttachment(asset_id=asset(1), alt_text="Soup", is_cover=True),
@@ -510,11 +509,15 @@ class TestTheMediaAttachmentShape:
                 MediaAttachment(
                     asset_id=asset(n), alt_text=f"Step {n}", role="step", step_position=n - 2
                 )
-                for n in (3, 4, 5)
+                for n in range(3, 15)
             ),
         ]
-        _create_thread(_client(transport), attachments=recipe_set, recipe=recipe(3))
+        _create_thread(_client(transport), attachments=recipe_set, recipe=recipe(12))
         assert len(transport.requests) == 1
+
+        fifteen = [*recipe_set, MediaAttachment(asset_id=asset(15), alt_text="Picture 15")]
+        with pytest.raises(ProtocolError, match="at most fourteen image attachments"):
+            _create_thread(_client(RecordingTransport()), attachments=fifteen, recipe=recipe(12))
 
         plain = [MediaAttachment(asset_id=asset(n), alt_text=f"Picture {n}") for n in range(1, 6)]
         with pytest.raises(ProtocolError, match="at most four image attachments"):
@@ -525,10 +528,14 @@ class TestTheMachineReadableContract:
     """The tool schemas and the bridge schema say the same thing the bridge enforces."""
 
     def test_the_create_thread_tool_describes_the_recipe_roles(self) -> None:
-        """Five images, the two roles, and the position of a step, all visible to a model."""
+        """Fourteen images, the two roles, and the position of a step, all visible to a model."""
         tool = _tool("create_thread")
         attachments = tool["inputSchema"]["properties"]["attachments"]
-        assert attachments["maxItems"] == 5
+        assert attachments["maxItems"] == 14
+        assert "fourteen" in attachments["description"]
+        assert "twelve step" in attachments["description"]
+        assert "fourteen images" in tool["description"]
+        assert "twelve attachments with role step" in tool["description"]
         item = attachments["items"]["properties"]
         assert item["role"]["enum"] == ["ingredients", "step"]
         assert item["step_position"]["minimum"] == 1
@@ -545,9 +552,10 @@ class TestTheMachineReadableContract:
         assert not {"role", "step_position"} & set(attachments["items"]["properties"])
 
     def test_the_replacement_tools_match_their_placement(self) -> None:
-        """A thread replacement takes five and says what it cannot check; a reply takes four."""
+        """A thread replacement takes fourteen and says what it cannot check; a reply takes four."""
         thread = _tool("replace_thread_attachments")
-        assert thread["inputSchema"]["properties"]["attachments"]["maxItems"] == 5
+        assert thread["inputSchema"]["properties"]["attachments"]["maxItems"] == 14
+        assert "fourteen" in thread["inputSchema"]["properties"]["attachments"]["description"]
         assert "role" in thread["inputSchema"]["properties"]["attachments"]["items"]["properties"]
         assert "Recipe" in thread["description"]
         assert "ingredients" in thread["description"]
@@ -557,7 +565,7 @@ class TestTheMachineReadableContract:
     def test_the_bridge_schema_describes_the_roles_on_thread_creation(self) -> None:
         """The machine-readable command schema offers the attachments and roles on create_thread."""
         thread_set = schemas._THREAD_ATTACHMENT_SET
-        assert thread_set["maxItems"] == 5
+        assert thread_set["maxItems"] == 14
         assert thread_set["items"]["properties"]["role"]["enum"] == ["ingredients", "step"]
         assert schemas._REPLY_ATTACHMENT_SET["maxItems"] == 4
         assert "role" not in schemas._REPLY_ATTACHMENT_SET["items"]["properties"]
@@ -566,7 +574,7 @@ class TestTheMachineReadableContract:
             for rule in schemas.BRIDGE_COMMAND_SCHEMA["allOf"]
             if rule["if"]["properties"]["operation"].get("const") == "create_thread"
         ]
-        assert rule["then"]["properties"]["attachments"]["maxItems"] == 5
+        assert rule["then"]["properties"]["attachments"]["maxItems"] == 14
         assert rule["then"]["properties"]["attachments"]["items"] == thread_set["items"]
 
 
@@ -582,8 +590,11 @@ class TestTheDocumentsSayTheSameRule:
         assert "ingredients" in text
         assert "step_position" in text
 
-    def test_the_connector_guide_states_the_five_image_recipe_limit(self) -> None:
-        """The guide says five images on a Recipe thread and four elsewhere."""
-        text = (REPOSITORY_ROOT / "docs/integration/CONNECTOR.md").read_text(encoding="utf-8")
-        assert "five images" in text
+    @pytest.mark.parametrize("relative", ["README.md", "docs/integration/CONNECTOR.md"])
+    def test_the_documents_state_the_fourteen_image_recipe_limit(self, relative: str) -> None:
+        """The README and the guide say fourteen images on a Recipe thread, and four elsewhere."""
+        text = " ".join((REPOSITORY_ROOT / relative).read_text(encoding="utf-8").split())
+        assert "fourteen images" in text
+        assert "twelve" in text
         assert "four images" in text
+        assert "five images" not in text

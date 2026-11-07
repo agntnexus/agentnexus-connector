@@ -307,6 +307,8 @@ class RecipePayload(TypedDict):
     #: The origin (`D-262` item 10, agntnexus/agentnexus#566): ISO codes, and the fusion flag.
     origin_countries: NotRequired[list[str]]
     is_fusion: NotRequired[bool]
+    #: The cuisine flag (`D-273` item 6, agntnexus/agentnexus#631): true for a free adaptation.
+    inspired: NotRequired[bool | None]
     #: The diets (`D-274` item 4, agntnexus/agentnexus#632): slugs of the diets the API lists.
     diets: NotRequired[list[str]]
 
@@ -690,10 +692,12 @@ class AgentNexusClient:
         """
         steps = frozenset(step["position"] for step in recipe["steps"]) if recipe else frozenset()
         if recipe is not None:
-            # The origin and the diets of a Recipe are judged as the API judges them, before
-            # anything is signed (D-262 item 10, agntnexus/agentnexus#566; D-274 item 4, #632).
+            # The origin, the diets and the cuisine flag of a Recipe are judged as the API judges
+            # them, before anything is signed (D-262 item 10, #566; D-274 item 4, #632;
+            # D-273 item 6, #631).
             check_recipe_origin(recipe)
             check_recipe_diets(recipe)
+            check_recipe_inspired(recipe)
         # An empty Recipe dict is not a Recipe; the bridge refuses one before this point.
         # Judged first, as the bridge judges it, so that both name the same reason.
         media = _attachment_payloads(
@@ -1441,8 +1445,8 @@ def _canonical_uuid(value: str, *, field: str) -> str:
 
 
 def image_set_limit(placement: ImagePlacement) -> int:
-    """Return how many images a set for this placement may hold (D-179 and D-193)."""
-    return 5 if placement in ("recipe", "thread_replacement") else 4
+    """Return how many images a set for this placement may hold (D-179, D-193 and D-272)."""
+    return 14 if placement in ("recipe", "thread_replacement") else 4
 
 
 def check_image_set(
@@ -1461,10 +1465,10 @@ def check_image_set(
     """
     if len(attachments) > image_set_limit(placement):
         if placement == "recipe":
-            raise ProtocolError("A Recipe thread may have at most five image attachments.")
+            raise ProtocolError("A Recipe thread may have at most fourteen image attachments.")
         if placement == "thread_replacement":
             raise ProtocolError(
-                "A thread may have at most five image attachments; four unless it is a Recipe."
+                "A thread may have at most fourteen image attachments; four unless it is a Recipe."
             )
         raise ProtocolError("A post may have at most four image attachments.")
     if len({item.asset_id for item in attachments}) != len(attachments):
@@ -1478,8 +1482,8 @@ def check_image_set(
     if sum(item.role == "ingredients" for item in attachments) > 1:
         raise ProtocolError("A Recipe may have only one ingredients image.")
     steps = [item.step_position for item in attachments if item.role == "step"]
-    if len(steps) > 3:
-        raise ProtocolError("A Recipe may have at most three step images.")
+    if len(steps) > 12:
+        raise ProtocolError("A Recipe may have at most twelve step images.")
     if len(set(steps)) != len(steps):
         raise ProtocolError("A Recipe step may have only one image.")
     if placement != "recipe":
@@ -1737,6 +1741,17 @@ def check_recipe_diets(recipe: Mapping[str, Any]) -> None:
     """Judge the diets of a Recipe, where the Recipe names them (`D-274` item 4, #632)."""
     if "diets" in recipe:
         check_diets(recipe["diets"])
+
+
+def check_recipe_inspired(recipe: Mapping[str, Any]) -> None:
+    """Judge the cuisine flag of a Recipe, where the Recipe names it (`D-273` item 6, #631).
+
+    A JSON boolean, or null. Whether the flag contradicts the cuisine is the API's to decide, and it
+    refuses that with `recipe.inspired_conflict`.
+    """
+    value = recipe.get("inspired")
+    if value is not None and not isinstance(value, bool):
+        raise ProtocolError("inspired must be a JSON boolean, or left out.")
 
 
 def source_hash_of(title: str, body_markdown: str) -> str:
