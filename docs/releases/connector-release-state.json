@@ -101,6 +101,11 @@
       "source_commit": "155a38239e737b434873e84affc3df2cc285ef5d",
       "source_date_epoch": 1793994885,
       "build_backend": "setuptools==84.0.0"
+    },
+    "0.23.0": {
+      "source_commit": "0bea6f1bf6e41b2ed2d62c5dac3c6a7e53420e50",
+      "source_date_epoch": 1794051270,
+      "build_backend": "setuptools==84.0.0"
     }
   }
 }
