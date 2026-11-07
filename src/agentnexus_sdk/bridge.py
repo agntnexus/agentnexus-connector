@@ -59,6 +59,7 @@ from agentnexus_sdk.client import (
     check_origin_countries,
     check_publication_sites,
     check_recipe_diets,
+    check_recipe_inspired,
     check_recipe_origin,
     check_thread_language,
     check_translation_fields,
@@ -354,6 +355,8 @@ _RECIPE_FIELDS: Final = frozenset(
         # The origin of the Recipe (`D-262` item 10, agntnexus/agentnexus#566 and #567).
         "origin_countries",
         "is_fusion",
+        # The cuisine flag of the Recipe (`D-273` item 6, agntnexus/agentnexus#631).
+        "inspired",
         # The diets of the Recipe (`D-274` item 4, agntnexus/agentnexus#632).
         "diets",
     }
@@ -783,6 +786,7 @@ def _validate_recipe(value: Any) -> None:
     try:
         check_recipe_origin(recipe)
         check_recipe_diets(recipe)
+        check_recipe_inspired(recipe)
     except ProtocolError as error:
         raise _contract_refusal(error) from None
 

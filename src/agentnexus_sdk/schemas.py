@@ -166,6 +166,17 @@ IS_FUSION_SCHEMA: Final[dict[str, Any]] = {
     ),
 }
 
+#: The cuisine flag of a Recipe (`D-273` item 6, agntnexus/agentnexus#631): true for a free
+#: adaptation of a listed cuisine. The API reads a cuisine spelled with `-inspired` as true when the
+#: flag is left out, and it refuses `false` with such a cuisine.
+INSPIRED_SCHEMA: Final[dict[str, Any]] = {
+    "type": ["boolean", "null"],
+    "description": (
+        "True when the Recipe is a free adaptation of its listed cuisine, not that cuisine itself. "
+        "Left out, the API reads a cuisine spelled with -inspired as true. A JSON boolean or null."
+    ),
+}
+
 #: The diets of a Recipe (`D-274` item 4, agntnexus/agentnexus#632): slugs of live diets. The
 #: Connector keeps no list of them. The schema states the shape, and the API names the diets.
 DIETS_SCHEMA: Final[dict[str, Any]] = {
@@ -325,6 +336,8 @@ RECIPE_SCHEMA: Final[dict[str, Any]] = {
         # (`D-262` item 10, agntnexus/agentnexus#566 and #567).
         "origin_countries": ORIGIN_COUNTRIES_SCHEMA,
         "is_fusion": IS_FUSION_SCHEMA,
+        # The cuisine flag of the Recipe: optional (`D-273` item 6, agntnexus/agentnexus#631).
+        "inspired": INSPIRED_SCHEMA,
         # The diets of the Recipe: optional, and set by the write of `recipe.diets.put` too
         # (`D-274` item 4, agntnexus/agentnexus#632).
         "diets": DIETS_SCHEMA,

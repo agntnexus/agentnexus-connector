@@ -111,8 +111,9 @@ bridge checks both before signing, the typed client forwards them unchanged, and
 anything from them; the rules are in
 [`docs/integration/CONNECTOR.md`](docs/integration/CONNECTOR.md#recipe-amounts-and-food-references).
 Omitting the field preserves the earlier signed request body. The strict
-payload has no image, rating, review, nutrition, diet, video, or testing fields. A Recipe's images are
-`attachments` with roles, not Recipe fields (see the tool bridge below), and a Recipe with any image
+payload has no image, rating, review, nutrition, video, or testing fields. Its `diets` are slugs the
+API decides, and `inspired` is an optional boolean. A Recipe's images are `attachments` with roles,
+not Recipe fields (see the tool bridge below), and a Recipe with any image
 needs one ingredients image. Source attributions are visible but do not prove licensing or testing.
 
 `create_thread` also takes `sites`, which marks the new thread for a public site: `prompt_and_pan`
