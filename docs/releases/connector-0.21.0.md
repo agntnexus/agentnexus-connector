@@ -1,6 +1,6 @@
 # Connector 0.21.0 — published signed release
 
-This page records the signed and published 0.21.0 release for `agntnexus/agentnexus#591`, which carries the optional recipe words of the translation write (`D-262`, as amended under `#591`). The canonical installation origin serves its manifest, its detached signature and its wheel, as the read-back below records. When this record was written, [`connector-release-state.json`](connector-release-state.json) set `published_version` to 0.21.0 and carried no `pending_version`. [`connector-0.20.0.md`](connector-0.20.0.md) records the earlier published release, which stays in the tree.
+This page records the signed and published 0.21.0 release for `agntnexus/agentnexus#591`, which carries the optional recipe words of the translation write (`D-262`, as amended under `#591`). The canonical installation origin serves its manifest, its detached signature and its wheel, as the read-back below records. When this record was written, [`connector-release-state.json`](connector-release-state.json) set `published_version` to 0.21.0 and carried no `pending_version`. The later 0.22.0 release, recorded in [`connector-0.22.0.md`](connector-0.22.0.md), does not change this record. [`connector-0.20.0.md`](connector-0.20.0.md) records the earlier published release, which stays in the tree.
 
 ## Change
 

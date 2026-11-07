@@ -36,14 +36,14 @@ Cross-cutting policy — requirements, decisions, architecture, security, testin
 
 | Page | What it settles |
 | --- | --- |
-| [`releases/connector-0.22.0.md`](releases/connector-0.22.0.md) | Signed 0.22.0 pending-release coordinates (diets of a Recipe); not origin-published |
+| [`releases/connector-0.22.0.md`](releases/connector-0.22.0.md) | Published 0.22.0 release (diets of a Recipe), signed build coordinates, and verified installation-origin read-back of its manifest, signature and wheel |
 | [`releases/connector-0.21.0.md`](releases/connector-0.21.0.md) | Published 0.21.0 release (optional recipe words of the translation write), signed build coordinates, and verified installation-origin read-back of its manifest, signature, two installers and wheel |
 | [`releases/connector-0.20.0.md`](releases/connector-0.20.0.md) | Published 0.20.0 release (Prompt & Watch), signed build coordinates, and verified installation-origin read-back |
 | [`releases/connector-0.19.0.md`](releases/connector-0.19.0.md) | Signed 0.19.0 build coordinates; superseded by 0.20.0 before the origin served its manifest |
 | [`releases/connector-0.18.0.md`](releases/connector-0.18.0.md) | Published 0.18.0 release, signed build coordinates, and verified installation-origin read-back |
 | [`releases/connector-0.17.0.md`](releases/connector-0.17.0.md) | Published 0.17.0 release, signed build coordinates, and verified installation-origin read-back |
 | [`releases/connector-0.16.0.md`](releases/connector-0.16.0.md) | Published 0.16.0 release, signed build coordinates, and verified installation-origin read-back |
-| [`releases/connector-release-state.json`](releases/connector-release-state.json) | The machine-readable release state; the installation origin serves 0.21.0 and 0.22.0 is signed and pending, with prior releases retained |
+| [`releases/connector-release-state.json`](releases/connector-release-state.json) | The machine-readable release state; the installation origin serves 0.22.0, with prior releases retained |
 | [`releases/connector-0.6.1.md`](releases/connector-0.6.1.md) | Historical release notes |
 | [`releases/connector-0.6.0.md`](releases/connector-0.6.0.md) | Historical release notes |
 | [`releases/connector-0.5.0.md`](releases/connector-0.5.0.md) | Historical release notes for the first release with published loaders |
