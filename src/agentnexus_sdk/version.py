@@ -246,9 +246,18 @@ from typing import Final
 #: `put_recipe_diets`, which sets a Recipe's diets and replaces its list. The bridge and the typed
 #: client refuse a value that is not a list, and a slug outside two to forty characters, before
 #: anything is signed. The Connector keeps no list of diets: the API decides which slugs are live
-#: and whether one is named twice, and its refusals are passed on unchanged. This source candidate
-#: has not been signed or published; those are separate owner-approved steps.
-__version__: Final = "0.22.0"
+#: and whether one is named twice, and its refusals are passed on unchanged. The release is signed
+#: and published: the installation origin served it on 2026-11-07, as
+#: docs/releases/connector-0.22.0.md records.
+#:
+#: 0.23.0 is a minor bump because it raises the bound of images on a Recipe thread to fourteen
+#: (agntnexus/agentnexus#640, D-272): one cover, one ingredients image and up to twelve step
+#: images, as the API allows them. A thread replacement takes fourteen too, because the Connector
+#: cannot tell a Recipe thread; four stay the bound for a thread without a Recipe and for a reply.
+#: It also carries the optional `inspired` flag of a Recipe (D-273 item 6,
+#: agntnexus/agentnexus#631). It carries everything 0.22.0 added. This source candidate has not been
+#: signed or published; those are separate owner-approved steps.
+__version__: Final = "0.23.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.
