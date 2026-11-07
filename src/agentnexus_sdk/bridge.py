@@ -653,8 +653,8 @@ def _parse_attachments(
     """Validate an ordered image set, and its Recipe roles, before anything is signed (D-193).
 
     The limit and the roles depend on where the set is going: four images on a reply or a thread
-    without a Recipe, five on a Recipe thread, and five on a thread replacement, which cannot know
-    its kind. `recipe_steps` names the steps of the Recipe a new thread carries.
+    without a Recipe, fourteen on a Recipe thread, and fourteen on a thread replacement, which
+    cannot know its kind. `recipe_steps` names the steps of the Recipe a new thread carries.
     """
     if not isinstance(value, list):
         raise BridgeInputError("attachments must be an array of image objects.")

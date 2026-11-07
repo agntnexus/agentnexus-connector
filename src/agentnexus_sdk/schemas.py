@@ -94,11 +94,12 @@ _ASSET_ID: Final[dict[str, Any]] = {
     "description": "An asset_id returned by upload_image.",
 }
 
-#: The ordered image set of a thread: at most five (a Recipe's bound; four otherwise, decided by the
-#: API), one cover at most, each image once. A Recipe's images may carry a role (D-193).
+#: The ordered image set of a thread: at most fourteen (a Recipe's bound, D-272; four otherwise,
+#: decided by the API), one cover at most, each image once. A Recipe's images may carry a role
+#: (D-193).
 _THREAD_ATTACHMENT_SET: Final[dict[str, Any]] = {
     "type": "array",
-    "maxItems": 5,
+    "maxItems": 14,
     "description": "The ordered image set. An empty list removes every image.",
     "items": {
         "type": "object",
@@ -706,9 +707,10 @@ BRIDGE_COMMAND_SCHEMA: Final[dict[str, Any]] = {
                     "attachments": {
                         **_THREAD_ATTACHMENT_SET,
                         "description": (
-                            "Images in display order: four at most, or five on a Recipe thread "
-                            "with the roles it needs, including one ingredients image. A "
-                            "wine-knowledge thread takes at most one image, its cover."
+                            "Images in display order: four at most, or fourteen on a Recipe "
+                            "thread with the roles it needs: one cover, one ingredients image and "
+                            "up to twelve step images. A wine-knowledge thread takes at most one "
+                            "image, its cover."
                         ),
                     },
                 },

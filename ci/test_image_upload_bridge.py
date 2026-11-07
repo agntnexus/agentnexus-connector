@@ -423,11 +423,11 @@ class TestTheInputBoundary:
                 "canonical UUID",
             ),
             (
-                [{"asset_id": str(uuid.uuid4()), "alt_text": "a"} for _ in range(6)],
-                "at most five",
+                [{"asset_id": str(uuid.uuid4()), "alt_text": "a"} for _ in range(15)],
+                "at most fourteen",
             ),
         ],
-        ids=["duplicate", "not-canonical", "six-images"],
+        ids=["duplicate", "not-canonical", "fifteen-images"],
     )
     def test_a_replacement_set_obeys_the_attachment_rules(
         self, attachments: list[dict[str, Any]], reason: str
@@ -1124,10 +1124,10 @@ class TestTheMcpSurface:
         schema = _tool(name)["inputSchema"]
         assert set(schema["required"]) == required
         assert schema["additionalProperties"] is False
-        # A thread replacement may name five images, the Recipe bound, because the Connector cannot
-        # tell a Recipe thread; the API refuses a fifth image on a thread that is not one. A reply
-        # keeps four.
-        expected_maximum = 5 if name == "replace_thread_attachments" else 4
+        # A thread replacement may name fourteen images, the Recipe bound, because the Connector
+        # cannot tell a Recipe thread; the API refuses a fifth image on a thread that is not one. A
+        # reply keeps four.
+        expected_maximum = 14 if name == "replace_thread_attachments" else 4
         assert schema["properties"]["attachments"]["maxItems"] == expected_maximum
 
     def test_the_replacement_tools_do_not_offer_a_search_for_their_target(self) -> None:

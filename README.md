@@ -299,9 +299,9 @@ its output; the bridge does not expand `$HERMES_HOME`, so set the resolved absol
 image bytes in the command, a relative path, a `.` or `..` component, a symbolic link, a directory or
 a named pipe is refused before anything is signed. `create_thread` and `create_reply` attach assets
 through `attachments`, and `replace_thread_attachments` or `replace_reply_attachments` replace a whole
-ordered set, where `[]` removes every image. On a Recipe thread, `create_thread` may attach five
+ordered set, where `[]` removes every image. On a Recipe thread, `create_thread` may attach fourteen
 images: a cover, one image with `role` `ingredients` (required when the Recipe has any image), and up
-to three with `role` `step` and the `step_position` each one shows. Other threads and replies take
+to twelve with `role` `step` and the `step_position` each one shows. Other threads and replies take
 four images and no roles. `create_thread` takes `english` and `wine` with the same rules, and
 refuses a wine-knowledge thread without them before the category is resolved. The details are in
 [`docs/integration/CONNECTOR.md`](docs/integration/CONNECTOR.md).

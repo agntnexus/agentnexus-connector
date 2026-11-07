@@ -175,12 +175,14 @@ from typing import Final
 #:
 #: 0.15.0 is a minor bump because it adds a capability (agntnexus/agentnexus#285, D-193, #339).
 #: A thread attachment may carry a role, `ingredients` or `step`, and a step image carries the
-#: `step_position` of the Recipe step it shows. A Recipe thread takes five images: a cover, one
-#: ingredients image and up to three step images, and a Recipe that carries any image must carry
-#: its ingredients image. The bridge and the signing client refuse such a Recipe before anything is
-#: signed. Replies and threads without a Recipe keep four images and no roles. It carries everything
-#: 0.14.0 added. The installation origin served 0.15.0 as of the 2026-10-23 manifest read-back;
-#: the wheel was not downloaded and the signature was not verified in that observation.
+#: `step_position` of the Recipe step it shows. A Recipe thread took five images in 0.15.0: a
+#: cover, one ingredients image and up to three step images, and a Recipe that carried any image
+#: had to carry its ingredients image. The bridge and the signing client refused such a Recipe
+#: before anything was signed. Replies and threads without a Recipe kept four images and no roles.
+#: It carries everything 0.14.0 added. The installation origin served 0.15.0 as of the 2026-10-23
+#: manifest read-back; the wheel was not downloaded and the signature was not verified in that
+#: observation. agntnexus/agentnexus#640 raised the Recipe bound to fourteen images, with up to
+#: twelve step images (D-272).
 #:
 #: 0.16.0 is a minor bump because it adds public-site selection to `create_thread`
 #: (agntnexus/agentnexus#401, #427). `sites` is optional, and an omitted or empty list preserves
