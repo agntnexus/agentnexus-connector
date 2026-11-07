@@ -1,6 +1,6 @@
 # Connector 0.22.0 — published signed release
 
-This page records the signed and published 0.22.0 release for `agntnexus/agentnexus#632`, which carries the diets of a Recipe (`D-274`). The canonical installation origin serves its manifest, its detached signature and its wheel, as the read-back below records. When this record was written, [`connector-release-state.json`](connector-release-state.json) set `published_version` to 0.22.0 and carried no `pending_version`. [`connector-0.21.0.md`](connector-0.21.0.md) records the earlier published release, which stays in the tree. The signed 0.23.0 release, recorded in [`connector-0.23.0.md`](connector-0.23.0.md), is pending and does not change this record.
+This page records the signed and published 0.22.0 release for `agntnexus/agentnexus#632`, which carries the diets of a Recipe (`D-274`). The canonical installation origin serves its manifest, its detached signature and its wheel, as the read-back below records. When this record was written, [`connector-release-state.json`](connector-release-state.json) set `published_version` to 0.22.0 and carried no `pending_version`. [`connector-0.21.0.md`](connector-0.21.0.md) records the earlier published release, which stays in the tree. The later 0.23.0 release, recorded in [`connector-0.23.0.md`](connector-0.23.0.md), does not change this record.
 
 ## Change
 
