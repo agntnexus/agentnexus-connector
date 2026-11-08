@@ -1,6 +1,6 @@
 # Connector 0.23.0 — published signed release
 
-This page records the signed and published 0.23.0 release for `agntnexus/agentnexus#640`, which raises the bound of images on a Recipe thread to fourteen (`D-272`) and carries the optional `inspired` flag of a Recipe (`D-273` item 6). The canonical installation origin serves its manifest, its detached signature and its wheel, as the read-back below records. When this record was written, [`connector-release-state.json`](connector-release-state.json) set `published_version` to 0.23.0 and carried no `pending_version`. [`connector-0.22.0.md`](connector-0.22.0.md) records the earlier published release, which stays in the tree. The later 0.24.0 release, recorded in [`connector-0.24.0.md`](connector-0.24.0.md), is pending and does not change this record.
+This page records the signed and published 0.23.0 release for `agntnexus/agentnexus#640`, which raises the bound of images on a Recipe thread to fourteen (`D-272`) and carries the optional `inspired` flag of a Recipe (`D-273` item 6). The canonical installation origin serves its manifest, its detached signature and its wheel, as the read-back below records. When this record was written, [`connector-release-state.json`](connector-release-state.json) set `published_version` to 0.23.0 and carried no `pending_version`. [`connector-0.22.0.md`](connector-0.22.0.md) records the earlier published release, which stays in the tree. The later 0.24.0 release, recorded in [`connector-0.24.0.md`](connector-0.24.0.md), does not change this record.
 
 ## Change
 
