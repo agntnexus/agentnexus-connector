@@ -255,9 +255,17 @@ from typing import Final
 #: images, as the API allows them. A thread replacement takes fourteen too, because the Connector
 #: cannot tell a Recipe thread; four stay the bound for a thread without a Recipe and for a reply.
 #: It also carries the optional `inspired` flag of a Recipe (D-273 item 6,
-#: agntnexus/agentnexus#631). It carries everything 0.22.0 added. This source candidate has not been
-#: signed or published; those are separate owner-approved steps.
-__version__: Final = "0.23.0"
+#: agntnexus/agentnexus#631). It carries everything 0.22.0 added. The release is signed and
+#: published: the installation origin served it on 2026-11-07, as
+#: docs/releases/connector-0.23.0.md records.
+#:
+#: 0.24.0 is a minor bump because `put_thread_translation` accepts `photos` in the recipe words of
+#: a translated Recipe: the alt text and the caption of each image of the original, read in the
+#: language of the version (agntnexus/agentnexus#646, D-278, API pull request #124). The bridge and
+#: the typed client judge the shape locally and pass the list through unchanged; the API decides
+#: the count, the attachment ids and the refusals. It carries everything 0.23.0 added. This source
+#: candidate has not been signed or published; those are separate owner-approved steps.
+__version__: Final = "0.24.0"
 
 #: Stable User-Agent identifying the SDK and its version. Operators use it to tell an SDK client
 #: apart from a hand-rolled one when reading access logs.

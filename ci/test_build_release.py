@@ -1308,20 +1308,22 @@ def test_a_state_the_signed_tree_cannot_support_is_refused(claimed: dict[str, ob
     assert published_state_failures(state, tree=tree, installers=INSTALLERS)
 
 
-def test_signed_0230_release_declares_0230_and_the_superseded_0220_stays_in_the_tree() -> None:
-    """The signed 0.23.0 has its own version and is published; 0.22.0 stays in the tree.
+def test_unsigned_0240_candidate_declares_0240_and_moves_no_state() -> None:
+    """The 0.24.0 source candidate has its own version and moves no state.
 
-    The published 0.23.0 wheel and the superseded 0.22.0, 0.21.0, 0.20.0 and 0.19.0 wheels stay in
-    the tree byte-identical. A state that names another release as published, or names 0.23.0 as
-    pending, is refused.
+    0.23.0 stays the published release, and the signed 0.19.0 to 0.23.0 wheels stay in the tree
+    byte-identical. No 0.24.0 entry, tree or pending claim exists: the committed state still passes
+    the published-state check.
     """
-    assert builder.read_version(REPOSITORY_ROOT, expected="0.23.0") == "0.23.0"
+    assert builder.read_version(REPOSITORY_ROOT, expected="0.24.0") == "0.24.0"
     state = _committed_state()
     tree = REPOSITORY_ROOT / "connector-release"
     assert state["published_version"] == "0.23.0"
     assert not any(key.startswith("pending_") for key in state)
     releases = state["reproducible_releases"]
     assert isinstance(releases, dict)
+    assert "0.24.0" not in releases
+    assert not (tree / "connector" / "0.24.0").exists()
     for version, signed in (
         ("0.19.0", SIGNED_0190),
         ("0.20.0", SIGNED_0200),
