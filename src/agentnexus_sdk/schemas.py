@@ -412,19 +412,20 @@ _TRANSLATED_QUANTITY_SCHEMA: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
-#: The translated recipe words of a Recipe thread (`D-262` item 5, `#591`): the words only, never an
-#: amount, a reference, a time, an image or a source address. The words after the tips are optional:
-#: a word left out, or null, reads the original's.
+#: The translated recipe words of a Recipe thread (`D-262` item 5, `#591`, `#646`): the words only,
+#: never an amount, a reference, a time, an image's address or a source address. The words after the
+#: tips are optional: a word left out, or null, reads the original's.
 TRANSLATED_RECIPE_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
     "description": (
         "The translated recipe words of a Recipe thread: each ingredient's name with its four "
         "serving displays, the steps and the tips, in the original's order and count. Optional, "
         "and left out or null where the original's is kept: the description, the keywords, the "
-        "category and cuisine display values, an ingredient's note, a step's name, and the labels "
-        "of the sources, one for each source of the original at its position. Never amounts, food "
-        "references, times, servings, nutrition, images or a source's address: they stay on the "
-        "original."
+        "category and cuisine display values, an ingredient's note, a step's name, the labels "
+        "of the sources, one for each source of the original at its position, and the photos, one "
+        "for each image attachment of the original, each with its attachment id, its alt text and "
+        "an optional caption. Never amounts, food references, times, servings, nutrition, image "
+        "files or a source's address: they stay on the original."
     ),
     "required": ["ingredients", "steps"],
     "properties": {
@@ -499,6 +500,30 @@ TRANSLATED_RECIPE_SCHEMA: Final[dict[str, Any]] = {
                 "properties": {
                     "position": {"type": "integer", "minimum": 1, "maximum": 16},
                     "label": {"type": "string", "minLength": 1, "maxLength": 200},
+                },
+                "additionalProperties": False,
+            },
+        },
+        "photos": {
+            "type": ["array", "null"],
+            "maxItems": 14,
+            "description": (
+                "One photo word for each image attachment of the original, each image named once. "
+                "Left out or null, the original's alt texts are kept."
+            ),
+            "items": {
+                "type": "object",
+                "required": ["attachment_id", "alt_text"],
+                "properties": {
+                    "attachment_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "The attachment's id, as the public thread detail serves it."
+                        ),
+                    },
+                    "alt_text": {"type": "string", "minLength": 1, "maxLength": 500},
+                    "caption": {"type": ["string", "null"]},
                 },
                 "additionalProperties": False,
             },

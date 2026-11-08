@@ -43,6 +43,15 @@ THREAD_ID = "44444444-4444-4444-8444-444444444444"
 #: SHA-256 of the signed create body for `recipe()` as the 0.16.0 client wrote it, before the
 #: structured amount and food reference fields existed (agntnexus/agentnexus#438).
 PLAIN_RECIPE_BODY_SHA256 = "968b238ae6e8e31c1dbc60f584d577c2d2deb1457e86f2e825edeb3db54c609b"
+#: SHA-256 of the signed translation body for `translated_recipe_words()` with no photo words: the
+#: bytes the client signed before `photos` existed (agntnexus/agentnexus#646).
+PLAIN_TRANSLATION_BODY_SHA256 = "98d5b5bac9149812528a4b8b0ac9be039295d4767aca0154248ebbcfe711d58c"
+#: The attachment identifiers the photo words name, as the public thread detail serves them.
+ATTACHMENT_IDS = (
+    "66666666-6666-4666-8666-666666666661",
+    "66666666-6666-4666-8666-666666666662",
+    "66666666-6666-4666-8666-666666666663",
+)
 #: The source hash of the thread `command()` posts: SHA-256 of its title and body, one line feed
 #: between them, as the API computes it for a translation (`D-262` item 5, #567).
 ORIGINAL_SOURCE_HASH = hashlib.sha256(
@@ -93,6 +102,13 @@ STABLE_CODES = {
     "translation-words-note-markup": "translation.text_invalid",
     "translation-words-step-name-long": "translation.text_invalid",
     "translation-words-step-name-empty": "translation.text_invalid",
+    # The photo words of `#646`: a key outside a photo is refused as a field, and an alt text the
+    # plain-text rule refuses is refused as text. The other photo refusals carry no API code.
+    "translation-photos-top-level": "translation.field_not_allowed",
+    "translation-photos-unknown-key": "translation.field_not_allowed",
+    "translation-photos-alt-empty": "translation.text_invalid",
+    "translation-photos-alt-too-long": "translation.text_invalid",
+    "translation-photos-alt-markup": "translation.text_invalid",
 }
 #: The refusal mutations that name a translation, an origin or a diets write, not a create command.
 WRITE_MUTATION_PREFIXES = ("translation-", "origin-put-", "diets-put-")
@@ -302,9 +318,33 @@ def translated_recipe_words_absent() -> dict[str, Any]:
         recipe_category_display=None,
         recipe_cuisine_display=None,
         sources=None,
+        photos=None,
     )
     words["ingredients"][0]["note"] = None
     words["steps"][0]["name"] = None
+    return words
+
+
+def translated_photo(**changes: Any) -> dict[str, Any]:
+    """Return one photo word of a version: its attachment, its alt text and its caption."""
+    photo: dict[str, Any] = {
+        "attachment_id": ATTACHMENT_IDS[0],
+        "alt_text": "Une soupe de lentilles dans un bol blanc.",
+        "caption": "Servie chaude, au citron.",
+    }
+    photo.update(changes)
+    return photo
+
+
+def translated_recipe_words_with_photos() -> dict[str, Any]:
+    """Return the translated words with three photo words, one for each caption shape (`#646`)."""
+    words = translated_recipe_words()
+    first, second, third = ATTACHMENT_IDS
+    words["photos"] = [
+        translated_photo(attachment_id=first),
+        translated_photo(attachment_id=second, caption=None),
+        without(translated_photo(attachment_id=third), "caption"),
+    ]
     return words
 
 
@@ -389,6 +429,9 @@ def write_refusal_document(mutation: str) -> dict[str, Any]:
         return translation(title="t" * 201)
     if mutation == "translation-body-too-long":
         return translation(body_markdown="b" * 20_001)
+    if mutation == "translation-photos-top-level":
+        # A photo is a word of the recipe, never a field of the version itself (`#646`).
+        return translation(photos=[translated_photo()])
     if mutation.startswith("translation-"):
         # The mutations below change the recipe words of an otherwise valid version.
         document = translation()
@@ -446,6 +489,32 @@ def write_refusal_document(mutation: str) -> dict[str, Any]:
             words["steps"][0]["name"] = "s" * 201
         elif mutation == "translation-words-step-name-empty":
             words["steps"][0]["name"] = "   "
+        elif mutation == "translation-photos-not-list":
+            words["photos"] = "attachment-01"
+        elif mutation == "translation-photos-too-many":
+            words["photos"] = [translated_photo(attachment_id=f"photo-{n:02d}") for n in range(15)]
+        elif mutation == "translation-photos-item-not-object":
+            words["photos"] = [ATTACHMENT_IDS[0]]
+        elif mutation == "translation-photos-unknown-key":
+            words["photos"] = [translated_photo(url="https://example.org/dish.jpg")]
+        elif mutation == "translation-photos-missing-alt":
+            words["photos"] = [without(translated_photo(), "alt_text")]
+        elif mutation == "translation-photos-missing-attachment-id":
+            words["photos"] = [without(translated_photo(), "attachment_id")]
+        elif mutation == "translation-photos-attachment-id-not-text":
+            words["photos"] = [translated_photo(attachment_id=5)]
+        elif mutation == "translation-photos-attachment-id-empty":
+            words["photos"] = [translated_photo(attachment_id="")]
+        elif mutation == "translation-photos-alt-empty":
+            words["photos"] = [translated_photo(alt_text="   ")]
+        elif mutation == "translation-photos-alt-too-long":
+            words["photos"] = [translated_photo(alt_text="a" * 501)]
+        elif mutation == "translation-photos-alt-not-text":
+            words["photos"] = [translated_photo(alt_text=5)]
+        elif mutation == "translation-photos-alt-markup":
+            words["photos"] = [translated_photo(alt_text="<b>Soupe</b> de lentilles.")]
+        elif mutation == "translation-photos-caption-not-text":
+            words["photos"] = [translated_photo(caption=5)]
         else:
             raise AssertionError(mutation)
         return document
@@ -641,13 +710,25 @@ def _assert_contract_agreement() -> None:
     billed = set(body["properties"]) - {"billing"}
     assert billed <= set(translation_tool["properties"])
     assert {"pricing_version", "max_credit_cost"} <= set(translation_tool["properties"])
-    assert set(words) == set(translation_tool["properties"]["recipe"]["properties"])
+    # `photos` (agntnexus/agentnexus#646) is the one word the tool carries before the pinned
+    # contract names it. The API that accepts it is not merged, and a fixture is re-taken from an
+    # API commit on GitHub, never edited by hand (docs/MIRROR.md). The exception ends with that
+    # re-pin: once the pinned contract names `photos`, the first assertion below refuses it until
+    # it is removed here.
+    pending_words = {"photos"}
+    assert pending_words.isdisjoint(words)
+    assert set(words) | pending_words == set(translation_tool["properties"]["recipe"]["properties"])
     # The tool names every member its nested objects carry, and a source has no address.
     tool_words = translation_tool["properties"]["recipe"]["properties"]
     assert set(tool_words["ingredients"]["items"]["properties"]) == set(ingredient)
     assert set(tool_words["steps"]["items"]["properties"]) == {"position", "instruction", "name"}
     assert set(tool_words["sources"]["items"]["properties"]) == {"position", "label"}
     assert tool_words["sources"]["items"]["additionalProperties"] is False
+    # A photo names its attachment, its alt text and an optional caption, and nothing else.
+    photo = tool_words["photos"]["items"]
+    assert set(photo["properties"]) == {"attachment_id", "alt_text", "caption"}
+    assert set(photo["required"]) == {"attachment_id", "alt_text"}
+    assert photo["additionalProperties"] is False
     origin_tool = tool_named("put_recipe_origin")["inputSchema"]
     assert set(origin_body["properties"]) - {"billing"} <= set(origin_tool["properties"])
     assert {"pricing_version", "max_credit_cost"} <= set(origin_tool["properties"])
@@ -780,6 +861,7 @@ def _assert_signed_write_matches_contract(write: str) -> None:
             "translation-recipe": translated_recipe(),
             "translation-recipe-words": translated_recipe_words(),
             "translation-recipe-words-absent": translated_recipe_words_absent(),
+            "translation-recipe-words-photos": translated_recipe_words_with_photos(),
         }.get(write)
         with client:
             client.put_thread_translation(
@@ -811,6 +893,9 @@ def _assert_signed_write_matches_contract(write: str) -> None:
         assert json.loads(request.content)["recipe"] == words
     contract_fields = fixture("api-agent-contract-567.json")["operations"][operation]
     assert expected <= set(contract_fields["request_body"]["properties"])
+    if write == "translation-recipe-words":
+        # A version that names no photo sends the bytes it sent before `photos` existed (`#646`).
+        assert hashlib.sha256(request.content).hexdigest() == PLAIN_TRANSLATION_BODY_SHA256
     assert signature_verifies(request, public_key)
 
 
@@ -1020,6 +1105,44 @@ def _assert_translation_statuses_are_reported() -> None:
         assert json.loads(transport.requests[0].content)["recipe"] == translated_recipe_words()
 
 
+def _assert_translation_photos_reach_the_signed_body_through_the_bridge() -> None:
+    """Check that the bridge accepts the largest photo list and sends it unchanged in the body.
+
+    Fourteen photo words, the most a Recipe thread may hold, each with an alt text of 500
+    characters, are judged by the bridge and signed exactly as given (`#646`).
+    """
+    photos = [
+        translated_photo(attachment_id=f"photo-{n:02d}", alt_text="a" * 500, caption=None)
+        for n in range(14)
+    ]
+    document = translation(recipe=translated_recipe_words() | {"photos": photos})
+    config = bridge.BridgeConfig(
+        agent_id=AGENT_ID,
+        key_id=KEY_ID,
+        private_key_file=Path(__file__),  # unused: the client is supplied
+        agent_api_url="http://127.0.0.1:1",
+        public_api_url="http://127.0.0.1:2",
+        observer_url=None,
+    )
+    transport = _AnsweringTransport(201, {})
+    client = AgentNexusClient(
+        agent_id=AGENT_ID,
+        key_id=KEY_ID,
+        signer=generate_key_pair().signer,
+        options=ClientOptions(base_url="http://127.0.0.1:1"),
+        transport=transport,
+    )
+    with client:
+        result = bridge.run_command(
+            bridge.parse_command(json.dumps(document).encode()),
+            config=config,
+            client=client,
+        )
+    assert result["operation_status"] == "created"
+    (request,) = transport.requests
+    assert json.loads(request.content)["recipe"]["photos"] == photos
+
+
 def _assert_diets_statuses_are_reported() -> None:
     """Check that each answer of `recipe.diets.put` is reported as its status (`D-274` item 4).
 
@@ -1071,6 +1194,8 @@ def _assert_diets_statuses_are_reported() -> None:
         "translation-recipe",
         "translation-recipe-words",
         "translation-recipe-words-absent",
+        "translation-recipe-words-photos",
+        "translation-photos-bridge",
         "translation-wine-article",
         "translation-statuses",
         "origin",
@@ -1098,6 +1223,8 @@ def test_the_recipe_writes_are_signed_as_sent_and_match_the_contract(write: str)
         _assert_contract_agreement()
     elif write == "translation-statuses":
         _assert_translation_statuses_are_reported()
+    elif write == "translation-photos-bridge":
+        _assert_translation_photos_reach_the_signed_body_through_the_bridge()
     elif write == "diets-statuses":
         _assert_diets_statuses_are_reported()
     elif write == "thread-versions":
@@ -1284,6 +1411,20 @@ def test_the_bridge_validates_and_forwards_the_recipe_without_calculation(shape:
         ("translation-words-note-markup", "without markup"),
         ("translation-words-step-name-long", "must not exceed 200 characters"),
         ("translation-words-step-name-empty", "must not be empty"),
+        ("translation-photos-top-level", "outside the allowed set"),
+        ("translation-photos-not-list", "photos must contain 0 to 14 items"),
+        ("translation-photos-too-many", "photos must contain 0 to 14 items"),
+        ("translation-photos-item-not-object", "photo must be an object"),
+        ("translation-photos-unknown-key", "outside the allowed set"),
+        ("translation-photos-missing-alt", "Missing translated field.*alt_text"),
+        ("translation-photos-missing-attachment-id", "Missing translated field.*attachment_id"),
+        ("translation-photos-attachment-id-not-text", "attachment id must be a non-empty string"),
+        ("translation-photos-attachment-id-empty", "attachment id must be a non-empty string"),
+        ("translation-photos-alt-empty", "must not be empty"),
+        ("translation-photos-alt-too-long", "must not exceed 500 characters"),
+        ("translation-photos-alt-not-text", "must be a string"),
+        ("translation-photos-alt-markup", "without markup"),
+        ("translation-photos-caption-not-text", "caption must be a string, or null"),
         ("translation-servings-five", "from 1 to 4"),
         ("translation-markup-step", "without markup"),
         ("translation-empty-step", "must not be empty"),
@@ -1548,6 +1689,22 @@ def test_bridge_and_mcp_schemas_expose_only_the_strict_text_contract() -> None:
     }
     assert diets_tool["properties"]["diets"] == diets
     assert diets_tool["additionalProperties"] is False
+    # The translated photo words (`#646`): one object for each image of the original, at most
+    # as many as a Recipe thread holds. Each object has an attachment id, an alt text of 1 to
+    # 500 characters and an optional caption. The bound is the Recipe image limit the Connector
+    # already enforces.
+    translated_photos = schemas.TRANSLATED_RECIPE_SCHEMA["properties"]["photos"]
+    assert translated_photos["type"] == ["array", "null"]
+    assert translated_photos["maxItems"] == client_module.image_set_limit("recipe")
+    translated_photo_schema = translated_photos["items"]
+    assert translated_photo_schema["required"] == ["attachment_id", "alt_text"]
+    assert translated_photo_schema["additionalProperties"] is False
+    assert translated_photo_schema["properties"]["alt_text"] == {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500,
+    }
+    assert translated_photo_schema["properties"]["caption"]["type"] == ["string", "null"]
 
 
 def test_unknown_top_level_fields_remain_refused() -> None:
