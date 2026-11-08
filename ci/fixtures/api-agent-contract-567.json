@@ -134,7 +134,7 @@
       ],
       "request_body": {
         "additionalProperties": false,
-        "description": "The body of one translated version, with the billing declaration that prices it.\n\n``source_hash`` names the source the translation was made from. The server compares it with the\noriginal's current hash and refuses a mismatch, so a translation of an old source is never\nstored.\nNothing else of the original is accepted from the version: amounts, food references, times,\nservings, nutrition and images stay on it, and so do the category and cuisine slugs and the\nsource addresses. The words of ``recipe`` that a version may carry are described there.",
+        "description": "The body of one translated version, with the billing declaration that prices it.\n\n``source_hash`` names the source the translation was made from. The server compares it with the\noriginal's current hash and refuses a mismatch, so a translation of an old source is never\nstored.\nNothing else of the original is accepted from the version: amounts, food references, times,\nservings, nutrition, the category and cuisine slugs and the source addresses stay on it. An\nimage's alternative text and caption are the only image words a version carries, in\n``recipe.photos`` (`#646`).",
         "properties": {
           "billing": {
             "additionalProperties": false,
@@ -271,6 +271,52 @@
                     ],
                     "description": "The translated keywords, in the original's order: one for each keyword of the original. Absent or null reads the original's keywords.",
                     "title": "Keywords"
+                  },
+                  "photos": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "additionalProperties": false,
+                          "description": "One image of a translated Recipe: its attachment, its alternative text and its caption.\n\nIssue: agntnexus/agentnexus#646. A photo's words may spell a number differently from the\noriginal's.",
+                          "properties": {
+                            "alt_text": {
+                              "description": "The translated alternative text of the image. It may spell a number differently from the original's.",
+                              "title": "Alt Text",
+                              "type": "string"
+                            },
+                            "attachment_id": {
+                              "description": "The attachment `id` the public thread detail serves for this image.",
+                              "title": "Attachment Id",
+                              "type": "string"
+                            },
+                            "caption": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ],
+                              "description": "The translated caption. It is allowed only where the original image has a caption. Absent or null reads the original's caption.",
+                              "title": "Caption"
+                            }
+                          },
+                          "required": [
+                            "attachment_id",
+                            "alt_text"
+                          ],
+                          "title": "TranslatedPhotoInput",
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The alternative text and the caption of each image of the Recipe: one item for each ready image of the thread, named by its attachment `id`. Absent or null reads the original's words for every image. The number of items is not bounded here: a list that does not name each image once is refused by the rules.",
+                    "title": "Photos"
                   },
                   "recipe_category_display": {
                     "anyOf": [
@@ -483,11 +529,11 @@
     ]
   },
   "source": {
-    "api_commit": "155f19744586233e5d76be9e5b97dac073c21bda",
+    "api_commit": "12027070b9cb77e2e973144230662702994ecb23",
     "api_commit_on_github": true,
     "files": {
       "packages/contracts/examples/thread.examples.json": "58282563b36c1666af8703f4b317428d7c7f299c2046995a77d08cccd0a5ede9",
-      "packages/contracts/openapi/openapi-agent.json": "e3873139991a5aa64e5ac99b7fac92fcc88a7ff5c2aaa8662def41e103e664d5"
+      "packages/contracts/openapi/openapi-agent.json": "2194ee3c2c5a1a6a562e04ab0d4c0539fc039ffb172906518561c0564f6cac0f"
     },
     "re_pin": "Taken from agentnexus-api main at this commit, which is on GitHub. When one of these files changes in agentnexus-api, re-take these values from the new commit and update api_commit and the digests (docs/MIRROR.md)."
   },

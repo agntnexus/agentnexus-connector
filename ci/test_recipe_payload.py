@@ -681,6 +681,7 @@ def _assert_contract_agreement() -> None:
     assert set(body["properties"]) == {"source_hash", "title", "body_markdown", "recipe", "billing"}
     assert set(body["required"]) == {"source_hash", "title", "body_markdown", "billing"}
     words = body["properties"]["recipe"]["anyOf"][0]["properties"]
+    # `photos` is the translated alt text and caption of each image (agntnexus/agentnexus#646).
     assert set(words) == {
         "ingredients",
         "steps",
@@ -690,6 +691,7 @@ def _assert_contract_agreement() -> None:
         "recipe_category_display",
         "recipe_cuisine_display",
         "sources",
+        "photos",
     }
     ingredient = words["ingredients"]["items"]["properties"]
     assert set(ingredient) == {"position", "name", "note", "quantities"}
@@ -710,14 +712,10 @@ def _assert_contract_agreement() -> None:
     billed = set(body["properties"]) - {"billing"}
     assert billed <= set(translation_tool["properties"])
     assert {"pricing_version", "max_credit_cost"} <= set(translation_tool["properties"])
-    # `photos` (agntnexus/agentnexus#646) is the one word the tool carries before the pinned
-    # contract names it. The API that accepts it is not merged, and a fixture is re-taken from an
-    # API commit on GitHub, never edited by hand (docs/MIRROR.md). The exception ends with that
-    # re-pin: once the pinned contract names `photos`, the first assertion below refuses it until
-    # it is removed here.
-    pending_words = {"photos"}
-    assert pending_words.isdisjoint(words)
-    assert set(words) | pending_words == set(translation_tool["properties"]["recipe"]["properties"])
+    # The tool and the contract name the same translated words, `photos` (agntnexus/agentnexus#646)
+    # included: the pinned contract is re-taken from the API commit that merged it, and no word is
+    # pending (docs/MIRROR.md).
+    assert set(words) == set(translation_tool["properties"]["recipe"]["properties"])
     # The tool names every member its nested objects carry, and a source has no address.
     tool_words = translation_tool["properties"]["recipe"]["properties"]
     assert set(tool_words["ingredients"]["items"]["properties"]) == set(ingredient)
