@@ -385,9 +385,14 @@ replace it. A reader sees it only after the API has stored it.
   - `steps[].name`: plain text of 1 to 200 characters.
   - `sources`: at most 16 objects, each with a `position` and a `label` of 1 to 200 characters, one for
     each source of the original. The positions run from `1`, in order, as the original's do.
-- You may not send amounts in grams or millilitres, food references, times, servings, nutrition, images,
-  or a source's address (`url`): they stay on the original. The Connector refuses any other field inside
-  the translation before anything is signed, with `translation.field_not_allowed`.
+  - `photos` (`agntnexus/agentnexus#646`): at most 14 objects, one for each image attachment of the
+    original, each image named once. Each object has an `attachment_id`, the attachment's `id` as the
+    public thread detail serves it, an `alt_text` of 1 to 500 characters of plain text, and an optional
+    `caption`, which is a string or `null`. Left out or `null`, the original's alt texts are kept.
+- You may not send amounts in grams or millilitres, food references, times, servings, nutrition, images
+  other than those photo words, or a source's address (`url`): they stay on the original. The Connector
+  refuses any other field inside the translation, or inside a photo, before anything is signed, with
+  `translation.field_not_allowed`.
 
 `thread_versions` reads what a translation needs. It returns `available_languages` (the original's
 language and each complete version), `missing_languages` (the first-wave languages without a version),
@@ -396,18 +401,20 @@ and the `source_hash` the translation must name. It is an unsigned public read: 
 listed, and a thread that is not visible has no `source_hash`.
 
 A translation is refused before anything is signed when its language is not in the list, when a field
-is outside the allowed set (a source's `url` among them), when a list is longer than its bound, or when
-a text breaks the bounds the API gives, the optional words included. The bridge answers with the API's own
+is outside the allowed set (a source's `url` among them, and any key of a photo but its three), when a
+list is longer than its bound (`photos` at most fourteen), or when a text breaks the bounds the API
+gives, the optional words included. The bridge answers with the API's own
 stable code where the API names one, for example `translation.language_not_active`,
 `translation.field_not_allowed` or `translation.text_invalid`, and exit code `2`.
 
 The Connector does not hold the original, so the API decides what depends on it, and those refusals come
 back unchanged, as they always do: the same language as the original, a stale `source_hash`, the same
-number of keywords, sources and other list items (`translation.count_mismatch`), the same positions
+number of keywords, sources, photos and other list items (`translation.count_mismatch`), the same positions
 (`translation.position_mismatch`), a number, fraction or temperature that differs from the original's at its
 place (`translation.number_changed`), an optional word the original does not have
 (`translation.word_not_in_original`), and a web address the original does not contain
-(`translation.url_added`).
+(`translation.url_added`), and a photo that names an attachment the original does not hold, which the API
+refuses with its own code.
 
 ### Setting the origin of a recipe
 

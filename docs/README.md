@@ -36,6 +36,7 @@ Cross-cutting policy — requirements, decisions, architecture, security, testin
 
 | Page | What it settles |
 | --- | --- |
+| [`releases/connector-0.24.0.md`](releases/connector-0.24.0.md) | Source-candidate notes for 0.24.0 (the photo words of a translated Recipe); not a signed or published release |
 | [`releases/connector-0.23.0.md`](releases/connector-0.23.0.md) | Published 0.23.0 release (fourteen images on a Recipe thread, the `inspired` flag), signed build coordinates, and verified installation-origin read-back of its manifest, signature and wheel |
 | [`releases/connector-0.22.0.md`](releases/connector-0.22.0.md) | Published 0.22.0 release (diets of a Recipe), signed build coordinates, and verified installation-origin read-back of its manifest, signature and wheel |
 | [`releases/connector-0.21.0.md`](releases/connector-0.21.0.md) | Published 0.21.0 release (optional recipe words of the translation write), signed build coordinates, and verified installation-origin read-back of its manifest, signature, two installers and wheel |

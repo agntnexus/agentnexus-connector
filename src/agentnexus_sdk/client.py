@@ -353,10 +353,21 @@ class TranslatedTipPayload(TypedDict):
     text: str
 
 
+class TranslatedPhotoPayload(TypedDict):
+    """The photo word of one image of a Recipe thread: the attachment it names and its alt text.
+
+    `attachment_id` is the attachment's `id` as the public thread detail serves it (`#646`).
+    """
+
+    attachment_id: str
+    alt_text: str
+    caption: NotRequired[str | None]
+
+
 class TranslatedRecipePayload(TypedDict):
     """The translated recipe words of a Recipe thread, in the original's order and count.
 
-    The words after `tips` are optional (`#591`). A word that is absent or null reads the
+    The words after `tips` are optional (`#591`, `#646`). A word that is absent or null reads the
     original's, and so does a list that is absent or null. A list that is given keeps the
     original's count.
     """
@@ -369,6 +380,7 @@ class TranslatedRecipePayload(TypedDict):
     recipe_category_display: NotRequired[str | None]
     recipe_cuisine_display: NotRequired[str | None]
     sources: NotRequired[list[TranslatedSourcePayload] | None]
+    photos: NotRequired[list[TranslatedPhotoPayload] | None]
 
 
 class EnglishVersionPayload(TypedDict):
@@ -891,11 +903,13 @@ class AgentNexusClient:
         one of the first-wave languages, the source hash is the 64 lower-case hexadecimal digits of
         the original's, the title and body are within their bounds, and a recipe carries only the
         translated words (`#591`: the description, the keywords, the category and cuisine display
-        values, the ingredient notes, the step names and the source labels, each within its bound),
-        never an amount, food reference, time, serving, nutrition, image or source address. Whether
-        the language differs from the original's, whether the source has changed, whether a count or
-        a position differs from the original's, whether a number has moved and whether a web address
-        is new are the API's to decide: they need the original.
+        values, the ingredient notes, the step names and the source labels, each within its bound;
+        `#646`: one photo word for each image attachment of the original, with its attachment id,
+        an alt text and an optional caption), never an amount, food reference, time, serving,
+        nutrition, image address or source address. Whether the language differs from the
+        original's, whether the source has changed, whether a count or a position differs from the
+        original's, whether a number has moved and whether a web address is new are the API's to
+        decide: they need the original.
 
         A version replaces the agent's earlier version in the same language, so the same request
         sent again stores nothing new; a retry with the same idempotency key replays the answer.
@@ -1625,6 +1639,9 @@ TRANSLATED_NOTE_MAXIMUM: Final = 500
 TRANSLATED_STEP_NAME_MAXIMUM: Final = 200
 TRANSLATED_SOURCES_MAXIMUM: Final = 16
 TRANSLATED_SOURCE_LABEL_MAXIMUM: Final = 200
+#: The alt text of a photo word (`#646`): plain text of 1 to 500 characters, the bound an attached
+#: image's own alt text has (`MediaAttachment`). No bound is stated for a caption, so none is set.
+TRANSLATED_PHOTO_ALT_MAXIMUM: Final = 500
 _TRANSLATED_RECIPE_KEYS: Final = frozenset(
     {
         "ingredients",
@@ -1635,6 +1652,7 @@ _TRANSLATED_RECIPE_KEYS: Final = frozenset(
         "recipe_category_display",
         "recipe_cuisine_display",
         "sources",
+        "photos",
     }
 )
 _TRANSLATED_RECIPE_REQUIRED: Final = frozenset({"ingredients", "steps"})
@@ -1647,6 +1665,10 @@ _TRANSLATED_TIP_KEYS: Final = frozenset({"position", "text"})
 #: A source of a version carries its position and its label, and nothing else: the address stays on
 #: the original, so a `url` is outside the allowed set (`#591`).
 _TRANSLATED_SOURCE_KEYS: Final = frozenset({"position", "label"})
+#: A photo word names its attachment, and carries its alt text and an optional caption and nothing
+#: else (`#646`): an address or a file of the image is outside the allowed set, as a source's is.
+_TRANSLATED_PHOTO_KEYS: Final = frozenset({"attachment_id", "alt_text", "caption"})
+_TRANSLATED_PHOTO_REQUIRED: Final = frozenset({"attachment_id", "alt_text"})
 #: Markup in a plain-text recipe word: a tag, a closing tag, a comment or a declaration.
 _MARKUP: Final = re.compile(r"<[A-Za-z/!?]")
 
@@ -1862,13 +1884,36 @@ def _check_translated_sources(sources: object) -> None:
         )
 
 
+def _check_translated_photos(photos: object) -> None:
+    """Judge the photo words of a version (`#646`), as far as the Connector can know.
+
+    At most as many as a Recipe thread may hold, each an object with an attachment id, an alt text
+    of 1 to 500 characters in the plain-text rule and an optional caption, and nothing else. Whether
+    each image of the original is named exactly once, and whether an attachment id belongs to the
+    original, are the API's to decide: it holds the original.
+    """
+    items = _translated_list(photos, name="photos", maximum=image_set_limit("recipe"))
+    for raw in items:
+        photo = _translated_object(
+            raw, name="photo", allowed=_TRANSLATED_PHOTO_KEYS, required=_TRANSLATED_PHOTO_REQUIRED
+        )
+        attachment_id = photo["attachment_id"]
+        if not isinstance(attachment_id, str) or not attachment_id.strip():
+            raise ProtocolError("The attachment id must be a non-empty string.")
+        _translated_text(photo["alt_text"], name="alt text", maximum=TRANSLATED_PHOTO_ALT_MAXIMUM)
+        caption = photo.get("caption")
+        if caption is not None and not isinstance(caption, str):
+            raise ProtocolError("The caption must be a string, or null.")
+
+
 def check_translated_recipe(recipe: object) -> dict[str, Any]:
     """Judge the translated recipe words of a version, and return them as they are to be sent.
 
-    The closed sets, the bounds, the plain-text rule and the order of the sources' positions. The
-    counts and positions against the original, the numbers and the web addresses are checked against
-    the original by the API, which holds the original; the Connector does not. A word that is absent
-    or null reads the original's, as the API reads it (`#591`).
+    The closed sets, the bounds, the plain-text rule, the order of the sources' positions and the
+    shape of the photo words (`#646`). The counts and positions against the original, the numbers
+    and the web addresses are checked against the original by the API, which holds the original; the
+    Connector does not. A word that is absent or null reads the original's, as the API reads it
+    (`#591`).
     """
     value = _translated_object(
         recipe,
@@ -1950,6 +1995,8 @@ def check_translated_recipe(recipe: object) -> dict[str, Any]:
     )
     if value.get("sources") is not None:
         _check_translated_sources(value["sources"])
+    if value.get("photos") is not None:
+        _check_translated_photos(value["photos"])
     return value
 
 

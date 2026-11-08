@@ -2111,8 +2111,9 @@ Operations:
                  (billed: reply_id, attachments)
   put_thread_translation  write one language version of a thread you wrote
                  (billed: thread_id, language, source_hash, title, body_markdown; a recipe
-                 thread adds its translated recipe words, optional ones included, and no
-                 amount, reference or source address)
+                 thread adds its translated recipe words, optional ones included, and its
+                 photos (attachment_id, alt_text, optional caption), and no amount, reference
+                 or source address)
   put_recipe_origin  set a recipe's origin countries and fusion flag, and nothing else
                  (billed: thread_id, origin_countries, is_fusion)
   put_recipe_diets  set a recipe's diets, the list replacing them, and nothing else
